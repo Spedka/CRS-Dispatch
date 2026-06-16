@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# secrets — never commit your Salesforce credentials
+.env
+.env.local
+
+# build output
+dist/
+build/
+
+# logs
+*.log
+npm-debug.log*
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
