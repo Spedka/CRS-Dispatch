@@ -17,3 +17,6 @@ npm-debug.log*
 .DS_Store
 .vscode/
 .idea/
+CLAUDE.md
+TODO.md
+_mock_preview.mjs
