@@ -16,15 +16,16 @@ export const config = {
     apiVersion: 'v60.0', // bump to your org's max if newer
   },
 
-  // The Opportunity Status/Stage values that count as "needs field work".
-  // Replace with YOUR real StageName (or custom status) picklist values.
-  jobStatusValues: ['Needs Scheduling', 'Scheduled', 'Dispatched', 'Emergency'],
+  // The Opportunity StageName values that mean "needs field work right now":
+  // the queue, the booked work, and the active work. Add 'Parts Ordered' if you
+  // also want pipeline visibility on jobs not yet ready to schedule.
+  jobStatusValues: ['Ready to be scheduled', 'Scheduled', 'In Progress'],
 
   // ---- Opportunity (the job) field API names ----
   fields: {
     oppName: 'Name',
     oppStatus: 'StageName',                 // or a custom 'Status__c'
-    oppScheduledDate: 'Scheduled_Date__c',  // custom Date field you add
+    oppScheduledDate: 'Scheduled_Project_Start_Date__c',  // custom Date field you add
     // Opportunity has no native address. Pull from the related Account,
     // or swap these for custom Opportunity address fields.
     addrStreet: 'Account.ShippingStreet',

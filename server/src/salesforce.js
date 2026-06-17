@@ -14,7 +14,9 @@ async function getToken() {
     throw new Error('Missing SF_CLIENT_ID / SF_CLIENT_SECRET in .env');
   }
 
-  const res = await fetch(`${loginUrl}/services/oauth2/token`, {
+  // Strip any trailing slash so we never build a double-slash token URL.
+  const base = loginUrl.replace(/\/+$/, '');
+  const res = await fetch(`${base}/services/oauth2/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({

@@ -3,10 +3,9 @@ import { api } from './api.js';
 
 // Map your real status strings to a color treatment. Unknown -> neutral.
 const STATUS_CLASS = {
-  'Emergency': 'emergency',
-  'Needs Scheduling': 'needs',
-  'Scheduled': 'scheduled',
-  'Dispatched': 'dispatched',
+  'Ready to be scheduled': 'needs',   // amber — needs a tech assigned
+  'Scheduled': 'scheduled',           // blue — booked
+  'In Progress': 'dispatched',        // indigo — tech on site
 };
 const statusClass = (s) => STATUS_CLASS[s] || 'scheduled';
 
