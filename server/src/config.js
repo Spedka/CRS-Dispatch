@@ -24,7 +24,7 @@ export const config = {
   // ---- Opportunity (the job) field API names ----
   fields: {
     oppName: 'Name',
-    oppStatus: 'StageName',                 // or a custom 'Status__c'
+    oppStatus: 'Project_Status__c',         // custom field holding the lifecycle values
     oppScheduledDate: 'Scheduled_Project_Start_Date__c',  // custom Date field you add
     // Opportunity has no native address. Pull from the related Account,
     // or swap these for custom Opportunity address fields.

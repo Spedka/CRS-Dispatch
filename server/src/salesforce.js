@@ -72,3 +72,13 @@ export async function deleteRecord(object, id) {
   if (res.status !== 204) throw new Error(`Delete failed: ${res.status} ${await res.text()}`);
   return { success: true };
 }
+
+export async function updateRecord(object, id, fields) {
+  const res = await sfFetch(`/sobjects/${object}/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(fields),
+  });
+  // A successful update also returns 204 No Content.
+  if (res.status !== 204) throw new Error(`Update failed: ${res.status} ${await res.text()}`);
+  return { success: true };
+}

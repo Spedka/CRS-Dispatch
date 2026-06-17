@@ -5,7 +5,8 @@
   "description": "CRS field work dispatch board — Express API + React board over Salesforce",
   "scripts": {
     "install:all": "npm install --prefix server && npm install --prefix web",
-    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev --prefix server\" \"npm run dev --prefix web\"",
+    "clean": "lsof -iTCP:3001,5173 -sTCP:LISTEN -t | xargs kill -9 2>/dev/null || true",
+    "dev": "npm run clean && concurrently -n api,web -c cyan,magenta \"npm run dev --prefix server\" \"npm run dev --prefix web\"",
     "dev:server": "npm run dev --prefix server",
     "dev:web": "npm run dev --prefix web"
   },

@@ -1,6 +1,6 @@
 import express from 'express';
 import { config } from './config.js';
-import { query, createRecord, deleteRecord } from './salesforce.js';
+import { query, createRecord, deleteRecord, updateRecord } from './salesforce.js';
 
 export const router = express.Router();
 const f = config.fields;
@@ -63,6 +63,43 @@ router.get('/technicians', async (req, res) => {
                   WHERE ${o.technicianActive} = true ORDER BY Name`;
     const recs = await query(soql);
     res.json(recs.map((t) => ({ id: t.Id, name: t.Name })));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PATCH /api/jobs/:id  { scheduledDate?, status? }
+// Writes an Opportunity change straight back. Only whitelisted fields are
+// allowed, mapped to your real API names from config — no arbitrary writes.
+router.patch('/jobs/:id', async (req, res) => {
+  try {
+    const allowed = {
+      scheduledDate: f.oppScheduledDate,
+      status: f.oppStatus,
+    };
+    const payload = {};
+    for (const [key, value] of Object.entries(req.body)) {
+      // Empty string from a cleared date input -> null, not '' (SF rejects '').
+      if (allowed[key]) payload[allowed[key]] = value === '' ? null : value;
+    }
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({ error: 'No writable fields in request' });
+    }
+    await updateRecord('Opportunity', req.params.id, payload);
+
+    // A job's assignments must always sit on its scheduled date. If the date
+    // changed, move every assignment row for this Opportunity to match.
+    if ('scheduledDate' in req.body) {
+      const date = req.body.scheduledDate === '' ? null : req.body.scheduledDate;
+      const rows = await query(
+        `SELECT Id FROM ${o.assignment} WHERE ${o.assignmentOppLookup} = '${esc(req.params.id)}'`
+      );
+      await Promise.all(rows.map((r) =>
+        updateRecord(o.assignment, r.Id, { [o.assignmentDate]: date })
+      ));
+    }
+
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
