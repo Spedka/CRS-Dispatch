@@ -13,7 +13,19 @@ const statusClass = (s) => STATUS_CLASS[s] || 'scheduled';
 // The first three keep it on the board; the rest close it out (it drops off
 // on the next refresh, since the API only returns board statuses).
 const BOARD_STATUSES = ['Ready to be scheduled', 'Scheduled', 'In Progress'];
-const ASSIGNABLE_STATUSES = [...BOARD_STATUSES, 'Installation Complete'];
+// Everything a dispatcher can set from the board, in lifecycle order. The three
+// BOARD_STATUSES keep the job on the board; the rest write the status back and
+// drop the job off (it's no longer active field work). Strings must match the
+// Salesforce picklist values EXACTLY.
+const ASSIGNABLE_STATUSES = [
+  'Quoted',
+  'Parts Ordered',
+  'Ready to be scheduled',
+  'Scheduled',
+  'In Progress',
+  'Installation Complete',
+  'Waiting on Payment',
+];
 
 const POLL_MS = 5 * 60 * 1000; // refresh from Salesforce every 5 minutes
 
