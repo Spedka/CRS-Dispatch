@@ -40,7 +40,12 @@ const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); retur
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 const startOfWeek = (d) => { const x = startOfDay(d); x.setDate(x.getDate() - x.getDay()); return x; }; // Sunday start
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const dateOnlyISO = (iso) => iso && typeof iso === 'string' ? iso.slice(0, 10) : null;
 const initials = (name) => name ? name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase() : '?';
+const startOfYear = (d) => { const x = startOfDay(d); x.setMonth(0, x.setDate(1)); return x; };
+const startOfMonth = (d) => { const x = startOfDay(d); x.setDate(1); return x; };
+const startOfPreviousMonth = (d) => { const x = startOfMonth(d); x.setMonth(x.getMonth() - 1); return x; };
+const todayIso = () => new Date().toISOString().slice(0, 10);
 
 function fmtDate(iso) {
   if (!iso) return 'No date';
@@ -83,8 +88,8 @@ export default function App() {
   const [techs, setTechs] = useState([]);
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
-  const [closedFrom, setClosedFrom] = useState('');
-  const [closedTo, setClosedTo] = useState('');
+  const [createdFrom, setCreatedFrom] = useState('');
+  const [createdTo, setCreatedTo] = useState('');
   const [sortBy, setSortBy] = useState('scheduled');
   const [jobTech, setJobTech] = useState('all');
   const [extraJobs, setExtraJobs] = useState([]);   // jobs fetched for a terminal-status filter
@@ -115,6 +120,12 @@ export default function App() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (createdFrom && !createdTo) {
+      setCreatedTo(todayIso());
+    }
+  }, [createdFrom, createdTo]);
 
   useEffect(() => {
     const id = setInterval(() => { if (pending.current === 0) load(true); }, POLL_MS);
@@ -251,11 +262,28 @@ export default function App() {
     } catch (e) { flash(`Could not update: ${e.message}`); load(true); }
   };
 
+  const filteredJobs = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return jobs.filter((j) => {
+      if (!(q === '' || j.name.toLowerCase().includes(q))) return false;
+      if (jobTech === 'unassigned' && j.assignments.length > 0) return false;
+      if (jobTech !== 'all' && jobTech !== 'unassigned'
+          && !j.assignments.some((a) => a.technicianId === jobTech)) return false;
+      if (createdFrom || createdTo) {
+        const cd = dateOnlyISO(j.createdDate);
+        if (!cd) return false;
+        if (createdFrom && cd < createdFrom) return false;
+        if (createdTo && cd > createdTo) return false;
+      }
+      return true;
+    });
+  }, [jobs, query, jobTech, createdFrom, createdTo]);
+
   const statuses = useMemo(() => {
     const set = new Map();
-    jobs.forEach((j) => set.set(j.status, (set.get(j.status) || 0) + 1));
-    return [['all', jobs.length], ...set.entries()];
-  }, [jobs]);
+    filteredJobs.forEach((j) => set.set(j.status, (set.get(j.status) || 0) + 1));
+    return [['all', filteredJobs.length], ...set.entries()];
+  }, [filteredJobs]);
 
   const viewingTerminal = TERMINAL_STATUSES.includes(filter);
 
@@ -268,11 +296,11 @@ export default function App() {
       if (jobTech === 'unassigned' && j.assignments.length > 0) return false;
       if (jobTech !== 'all' && jobTech !== 'unassigned'
           && !j.assignments.some((a) => a.technicianId === jobTech)) return false;
-      if (closedFrom || closedTo) {
-        const cd = j.closeDate ? isoOf(new Date(j.closeDate)) : null;
+      if (createdFrom || createdTo) {
+        const cd = dateOnlyISO(j.createdDate);
         if (!cd) return false;
-        if (closedFrom && cd < closedFrom) return false;
-        if (closedTo && cd > closedTo) return false;
+        if (createdFrom && cd < createdFrom) return false;
+        if (createdTo && cd > createdTo) return false;
       }
       return true;
     });
@@ -286,7 +314,7 @@ export default function App() {
       name: (a, b) => byStr(a.name, b.name),
     };
     return [...filtered].sort(sorters[sortBy] || sorters.scheduled);
-  }, [jobs, extraJobs, viewingTerminal, filter, query, jobTech, closedFrom, closedTo, sortBy]);
+  }, [jobs, extraJobs, viewingTerminal, filter, query, jobTech, createdFrom, createdTo, sortBy]);
 
   return (
     <>
@@ -332,17 +360,46 @@ export default function App() {
             </div>
 
             <div className="rangefilter">
-              <span className="rl">Closed</span>
-              <input className="dateinput" type="date" value={closedFrom} onChange={(e) => setClosedFrom(e.target.value)} title="Closed from" />
+              <span className="rl">Created</span>
+              <input className="dateinput" type="date" value={createdFrom} onChange={(e) => setCreatedFrom(e.target.value)} title="Created from" />
               <span className="dash">–</span>
-              <input className="dateinput" type="date" value={closedTo} onChange={(e) => setClosedTo(e.target.value)} title="Closed to" />
+              <input className="dateinput" type="date" value={createdTo} onChange={(e) => setCreatedTo(e.target.value)} title="Created to" />
+              <select
+                className="ctlselect datepreset"
+                defaultValue=""
+                onChange={(e) => {
+                  const value = e.target.value;
+                  e.target.value = '';
+                  const today = new Date();
+                  if (value === 'ytd') {
+                    setCreatedFrom(isoOf(startOfYear(today)));
+                    setCreatedTo(todayIso());
+                  } else if (value === 'thisMonth') {
+                    setCreatedFrom(isoOf(startOfMonth(today)));
+                    setCreatedTo(todayIso());
+                  } else if (value === 'lastMonth') {
+                    const start = startOfPreviousMonth(today);
+                    const end = new Date(start);
+                    end.setMonth(end.getMonth() + 1);
+                    end.setDate(0);
+                    setCreatedFrom(isoOf(start));
+                    setCreatedTo(isoOf(end));
+                  }
+                }}
+              >
+                <option value="">Range preset</option>
+                <option value="ytd">Year to date</option>
+                <option value="thisMonth">This month</option>
+                <option value="lastMonth">Last month</option>
+              </select>
               <button
                 className="clearrange"
-                onClick={() => { setClosedFrom(''); setClosedTo(''); }}
-                disabled={!closedFrom && !closedTo}
+                onClick={() => { setCreatedFrom(''); setCreatedTo(''); }}
+                disabled={!createdFrom && !createdTo}
               >Clear dates</button>
-              {!closedFrom && !closedTo && <span className="rangestate">showing all time</span>}
+              {!createdFrom && !createdTo && <span className="rangestate">showing all time</span>}
             </div>
+            <div className="datehint">Board loads opportunities by status; these dates only filter by Created Date.</div>
 
             <div className="sortbar">
               <label className="sortgrp">
@@ -374,7 +431,7 @@ export default function App() {
               <span className="chipdiv" />
               {TERMINAL_STATUSES.map((s) => (
                 <button key={s} className={`chip term ${filter === s ? 'on' : ''}`} onClick={() => setFilter(s)} title="Completed in Field Squared — view only">
-                  {s}{filter === s && !extraLoading && <span className="ct">{extraJobs.length}</span>}
+                  {s}{filter === s && !extraLoading && <span className="ct">{shown.length}</span>}
                 </button>
               ))}
             </div>
@@ -395,7 +452,7 @@ export default function App() {
                         </div>
                         <div className="meta">
                           <span><span className="ic">◍</span>{job.address || 'No address'}</span>
-                          {job.closeDate && <span className="created">Closed {fmtCreated(job.closeDate)}</span>}
+                          {job.createdDate && <span className="created">Created {fmtCreated(job.createdDate)}</span>}
                           {job.scheduledDate && <span className="created">Scheduled {fmtDate(job.scheduledDate)}</span>}
                         </div>
                         {job.assignments.length > 0 && (
@@ -429,7 +486,7 @@ export default function App() {
                       </div>
                       <div className="meta">
                         <span><span className="ic">◍</span>{job.address || 'No address'}</span>
-                        {job.closeDate && <span className="created">Closed {fmtCreated(job.closeDate)}</span>}
+                        {job.createdDate && <span className="created">Created {fmtCreated(job.createdDate)}</span>}
                         <span className="nextlabel">Next scheduled</span>
                         <input
                           className="dateinput"

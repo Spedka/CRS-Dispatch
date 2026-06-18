@@ -1,5 +1,3 @@
-import 'dotenv/config';
-
 // =====================================================================
 //  THE ONLY FILE YOU SHOULD NEED TO EDIT to match your Salesforce org.
 //  Everything below the credentials block maps THIS app's names to
@@ -8,12 +6,7 @@ import 'dotenv/config';
 
 export const config = {
   salesforce: {
-    // Reuse the connected app you already use for the QBO pipeline
-    // (Client Credentials flow). These come from .env — never hardcode.
-    loginUrl: process.env.SF_LOGIN_URL || 'https://login.salesforce.com',
-    clientId: process.env.SF_CLIENT_ID,
-    clientSecret: process.env.SF_CLIENT_SECRET,
-    apiVersion: 'v60.0', // bump to your org's max if newer
+    apiVersion: 'v60.0', // creds are read from env in salesforce.js now
   },
 
   // Everything that stays on the board: the full lifecycle EXCEPT the terminal

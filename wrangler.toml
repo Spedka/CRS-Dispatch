@@ -1,0 +1,19 @@
+name = "crs-dispatch"
+main = "server/src/worker.js"
+compatibility_date = "2026-06-12"
+# No nodejs_compat needed — Hono + your code are pure Web APIs.
+
+[assets]
+directory = "./web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+[vars]
+# Client-credentials token endpoint = your My Domain (prod), NOT test.salesforce.com.
+SF_LOGIN_URL = "https://crsbuilding.my.salesforce.com"
+
+# Optional: second-layer token cache so cold isolates don't each re-auth.
+# [[kv_namespaces]]
+# binding = "SF_TOKENS"
+# id = "<your-kv-id>"

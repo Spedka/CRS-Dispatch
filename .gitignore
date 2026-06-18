@@ -20,3 +20,4 @@ npm-debug.log*
 CLAUDE.md
 TODO.md
 _mock_preview.mjs
+.dev.vars

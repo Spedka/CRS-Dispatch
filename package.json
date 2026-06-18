@@ -1,16 +1,17 @@
 {
   "name": "crs-dispatch",
-  "version": "0.1.0",
   "private": true,
-  "description": "CRS field work dispatch board — Express API + React board over Salesforce",
+  "type": "module",
   "scripts": {
-    "install:all": "npm install --prefix server && npm install --prefix web",
-    "clean": "lsof -iTCP:3001,5173 -sTCP:LISTEN -t | xargs kill -9 2>/dev/null || true",
-    "dev": "npm run clean && concurrently -n api,web -c cyan,magenta \"npm run dev --prefix server\" \"npm run dev --prefix web\"",
-    "dev:server": "npm run dev --prefix server",
-    "dev:web": "npm run dev --prefix web"
+    "dev:web": "npm --prefix web run dev",
+    "dev:api": "wrangler dev",
+    "build": "npm --prefix web run build",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
   },
   "devDependencies": {
-    "concurrently": "^9.0.1"
+    "wrangler": "^4.20.0"
   }
 }

@@ -152,6 +152,8 @@ td.open{background:var(--open-bg);}
 .rangefilter{display:flex;align-items:center;gap:9px;margin-bottom:16px;flex-wrap:wrap;}
 .rangefilter .rl{font-size:12px;font-weight:600;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.4px;}
 .rangefilter .dash{color:var(--ink-faint);}
+.datepreset{font:inherit;font-size:12px;font-family:'IBM Plex Mono',monospace;border:1px solid var(--line-strong);border-radius:7px;padding:4px 9px;color:var(--ink);background:var(--surface);cursor:pointer;}
+.datepreset:hover{border-color:var(--ink-faint);}
 .meta .created{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink-faint);}
 .sortbar{display:flex;align-items:center;gap:18px;margin-bottom:16px;flex-wrap:wrap;}
 .sortgrp{display:flex;align-items:center;gap:8px;}
