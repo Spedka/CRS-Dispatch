@@ -42,7 +42,7 @@ const startOfWeek = (d) => { const x = startOfDay(d); x.setDate(x.getDate() - x.
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const dateOnlyISO = (iso) => iso && typeof iso === 'string' ? iso.slice(0, 10) : null;
 const initials = (name) => name ? name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase() : '?';
-const startOfYear = (d) => { const x = startOfDay(d); x.setMonth(0, x.setDate(1)); return x; };
+const startOfYear = (d) => { const x = startOfDay(d); x.setMonth(0, 1); return x; };
 const startOfMonth = (d) => { const x = startOfDay(d); x.setDate(1); return x; };
 const startOfPreviousMonth = (d) => { const x = startOfMonth(d); x.setMonth(x.getMonth() - 1); return x; };
 const todayIso = () => new Date().toISOString().slice(0, 10);
@@ -308,8 +308,8 @@ export default function App() {
     const byStr = (a, b) => a.localeCompare(b);
     const sorters = {
       scheduled: (a, b) => byStr(a.scheduledDate || '9999-99', b.scheduledDate || '9999-99'),
-      closedNew: (a, b) => byStr(b.closeDate || '', a.closeDate || ''),
-      closedOld: (a, b) => byStr(a.closeDate || '9999', b.closeDate || '9999'),
+      createdNew: (a, b) => byStr(b.createdDate || '', a.createdDate || ''),
+      createdOld: (a, b) => byStr(a.createdDate || '9999', b.createdDate || '9999'),
       lid: (a, b) => String(a.lid || '').localeCompare(String(b.lid || ''), undefined, { numeric: true }),
       name: (a, b) => byStr(a.name, b.name),
     };
@@ -340,7 +340,7 @@ export default function App() {
 
       <main>
         {loading && <div className="state">Loading from Salesforce…</div>}
-        {error && <div className="state err">Couldn't reach the API: {error}<br /><small>Is the server running on :3001 and your .env filled in?</small></div>}
+        {error && <div className="state err">Couldn't reach the API: {error}<br /><small>Check the Worker's Salesforce secrets and SF_LOGIN_URL.</small></div>}
 
         {!loading && !error && tab === 'jobs' && (
           <section>
@@ -406,8 +406,8 @@ export default function App() {
                 <span className="rl">Sort</span>
                 <select className="ctlselect" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
                   <option value="scheduled">Scheduled date</option>
-                  <option value="closedNew">Closed — newest</option>
-                  <option value="closedOld">Closed — oldest</option>
+                  <option value="createdNew">created — newest</option>
+                  <option value="createdOld">created — oldest</option>
                   <option value="lid">LID</option>
                   <option value="name">Job name</option>
                 </select>
