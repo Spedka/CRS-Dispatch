@@ -17,6 +17,7 @@ function shapeJob(r) {
         technicianId: a[o.assignmentTechLookup],
         technicianName: a[o.assignmentTechRelationship]?.Name ?? null,
         workDate: a[o.assignmentDate] ?? null,
+        completed: a[o.assignmentCompleted] === true,
       }))
     : [];
 
@@ -26,8 +27,10 @@ function shapeJob(r) {
   return {
     id: r.Id,
     name: r[f.oppName],
+    lid: r[f.oppLid] ?? null,
     status: r[f.oppStatus],
     scheduledDate: r[f.oppScheduledDate] ?? null,
+    closeDate: r.CloseDate ?? null,
     address,
     assignments,
   };
@@ -41,9 +44,9 @@ router.get('/jobs', async (req, res) => {
     const inList = statuses.map((s) => `'${esc(s)}'`).join(',');
 
     const soql = `
-      SELECT Id, ${f.oppName}, ${f.oppStatus}, ${f.oppScheduledDate},
+      SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}, ${f.oppScheduledDate}, CloseDate,
              ${f.addrStreet}, ${f.addrCity},
-             (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name, ${o.assignmentDate}
+             (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name, ${o.assignmentDate}, ${o.assignmentCompleted}
               FROM ${o.assignmentChildRelationship})
       FROM Opportunity
       WHERE ${f.oppStatus} IN (${inList})
@@ -85,17 +88,31 @@ router.patch('/jobs/:id', async (req, res) => {
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ error: 'No writable fields in request' });
     }
+    // If the caller provided a scheduledDate, check whether it actually
+    // changed before we go clear non-completed assignment dates. Clearing
+    // is destructive and should only run when the Opportunity's scheduled
+    // date is being updated to a different value.
+    let shouldReleaseCrew = false;
+    if ('scheduledDate' in req.body) {
+      const existing = await query(
+        `SELECT ${f.oppScheduledDate} FROM Opportunity WHERE Id='${esc(req.params.id)}'`
+      );
+      const currentVal = existing && existing[0] ? existing[0][f.oppScheduledDate] ?? null : null;
+      const incomingVal = req.body.scheduledDate === '' ? null : req.body.scheduledDate;
+      if (currentVal !== incomingVal) shouldReleaseCrew = true;
+    }
+
     await updateRecord('Opportunity', req.params.id, payload);
 
-    // A job's assignments must always sit on its scheduled date. If the date
-    // changed, move every assignment row for this Opportunity to match.
-    if ('scheduledDate' in req.body) {
-      const date = req.body.scheduledDate === '' ? null : req.body.scheduledDate;
+    // Only release planned crew (clear non-completed assignment dates) when
+    // the scheduled date actually changed.
+    if (shouldReleaseCrew) {
       const rows = await query(
-        `SELECT Id FROM ${o.assignment} WHERE ${o.assignmentOppLookup} = '${esc(req.params.id)}'`
+        `SELECT Id FROM ${o.assignment}
+         WHERE ${o.assignmentOppLookup} = '${esc(req.params.id)}' AND ${o.assignmentCompleted} = false`
       );
       await Promise.all(rows.map((r) =>
-        updateRecord(o.assignment, r.Id, { [o.assignmentDate]: date })
+        updateRecord(o.assignment, r.Id, { [o.assignmentDate]: null })
       ));
     }
 
@@ -120,6 +137,27 @@ router.post('/jobs/:oppId/assignments', async (req, res) => {
 
     const result = await createRecord(o.assignment, fields);
     res.json({ assignmentId: result.id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PATCH /api/assignments/:id  { completed?, workDate? }
+// Edit a single assignment: mark it done/undone, and/or set its own date.
+router.patch('/assignments/:id', async (req, res) => {
+  try {
+    const fields = {};
+    if (typeof req.body.completed === 'boolean') {
+      fields[o.assignmentCompleted] = req.body.completed;
+    }
+    if ('workDate' in req.body) {
+      fields[o.assignmentDate] = req.body.workDate === '' ? null : req.body.workDate;
+    }
+    if (Object.keys(fields).length === 0) {
+      return res.status(400).json({ error: 'Nothing to update' });
+    }
+    await updateRecord(o.assignment, req.params.id, fields);
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

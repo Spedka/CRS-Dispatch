@@ -16,16 +16,26 @@ export const config = {
     apiVersion: 'v60.0', // bump to your org's max if newer
   },
 
-  // The Opportunity StageName values that mean "needs field work right now":
-  // the queue, the booked work, and the active work. Add 'Parts Ordered' if you
-  // also want pipeline visibility on jobs not yet ready to schedule.
-  jobStatusValues: ['Ready to be scheduled', 'Scheduled', 'In Progress'],
+  // Everything that stays on the board: the full lifecycle EXCEPT the terminal
+  // states (Billing Complete, Project Complete), which are set in Field Squared
+  // and are the only statuses that drop a job off "All outstanding".
+  jobStatusValues: [
+    'Pending Customer Approval',
+    'Quoted',
+    'Parts Ordered',
+    'Ready to be scheduled',
+    'Scheduled',
+    'In Progress',
+    'Installation Complete',
+    'Waiting on Payment',
+  ],
 
   // ---- Opportunity (the job) field API names ----
   fields: {
     oppName: 'Name',
     oppStatus: 'Project_Status__c',         // custom field holding the lifecycle values
     oppScheduledDate: 'Scheduled_Project_Start_Date__c',  // custom Date field you add
+    oppLid: 'LID__c',                       // LID number shown on each job
     // Opportunity has no native address. Pull from the related Account,
     // or swap these for custom Opportunity address fields.
     addrStreet: 'Account.ShippingStreet',
@@ -43,6 +53,7 @@ export const config = {
     assignmentTechLookup: 'Technician__c',  // lookup -> Technician__c
     assignmentTechRelationship: 'Technician__r', // for Technician__r.Name
     assignmentDate: 'Work_Date__c',         // Date the tech is on this job
+    assignmentCompleted: 'Completed__c',    // checkbox: tech actually worked that day
 
     // ---- Technician__c (your tech list) ----
     technician: 'Technician__c',

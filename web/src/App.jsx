@@ -3,31 +3,37 @@ import { api } from './api.js';
 
 // Map your real status strings to a color treatment. Unknown -> neutral.
 const STATUS_CLASS = {
+  'Pending Customer Approval': 'scheduled',
+  'Quoted': 'scheduled',
+  'Parts Ordered': 'needs',
   'Ready to be scheduled': 'needs',   // amber — needs a tech assigned
   'Scheduled': 'scheduled',           // blue — booked
   'In Progress': 'dispatched',        // indigo — tech on site
+  'Installation Complete': 'dispatched',
+  'Waiting on Payment': 'emergency',  // red — done, awaiting payment
+  'Billing Complete': 'scheduled',
+  'Project Complete': 'scheduled',
 };
 const statusClass = (s) => STATUS_CLASS[s] || 'scheduled';
 
-// Statuses a dispatcher can move a job into from the board.
-// The first three keep it on the board; the rest close it out (it drops off
-// on the next refresh, since the API only returns board statuses).
-const BOARD_STATUSES = ['Ready to be scheduled', 'Scheduled', 'In Progress'];
-// Everything a dispatcher can set from the board, in lifecycle order. The three
-// BOARD_STATUSES keep the job on the board; the rest write the status back and
-// drop the job off (it's no longer active field work). Strings must match the
-// Salesforce picklist values EXACTLY.
-const ASSIGNABLE_STATUSES = [
-  'Quoted',
-  'Parts Ordered',
-  'Ready to be scheduled',
-  'Scheduled',
-  'In Progress',
-  'Installation Complete',
-  'Waiting on Payment',
+// Terminal statuses leave the board. They're set in Field Squared, never here,
+// so they're not offered in the dropdown — you can only VIEW them via a filter.
+const TERMINAL_STATUSES = ['Billing Complete', 'Project Complete'];
+
+// Everything that stays on the board (mirrors config.jobStatusValues).
+const BOARD_STATUSES = [
+  'Pending Customer Approval', 'Quoted', 'Parts Ordered', 'Ready to be scheduled',
+  'Scheduled', 'In Progress', 'Installation Complete', 'Waiting on Payment',
 ];
+// A dispatcher can set any board status. Billing/Project Complete are excluded —
+// those happen in Field Squared. Strings must match the Salesforce picklist EXACTLY.
+const ASSIGNABLE_STATUSES = BOARD_STATUSES;
 
 const POLL_MS = 5 * 60 * 1000; // refresh from Salesforce every 5 minutes
+
+// Statuses that auto-advance to "Scheduled" the moment a job is given a date.
+// (Already-advanced statuses like In Progress are left alone.)
+const PRE_SCHEDULED = ['Quoted', 'Parts Ordered', 'Ready to be scheduled'];
 
 // ---- date helpers (all local-time, no UTC drift) ----
 const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
@@ -48,12 +54,41 @@ function fmtAgo(ms) {
   return `synced ${Math.floor(s / 60)}m ago`;
 }
 
+// CreatedDate is a full ISO datetime from Salesforce — show just the date.
+function fmtCreated(iso) {
+  if (!iso) return null;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function nextScheduledAssignmentDate(job) {
+  const dates = (job.assignments || [])
+    .filter((a) => a.workDate && !a.completed)
+    .map((a) => a.workDate)
+    .sort();
+  return dates[0] || '';
+}
+
+function deriveJobStatusFromAssignments(job) {
+  const assignments = job.assignments || [];
+  const nextDate = nextScheduledAssignmentDate(job);
+  if (nextDate) return { status: 'Scheduled', scheduledDate: nextDate };
+  if (assignments.length === 0) return { status: 'Ready to be scheduled', scheduledDate: '' };
+  if (assignments.every((a) => a.completed)) return { status: 'Installation Complete', scheduledDate: '' };
+  return { status: 'Ready to be scheduled', scheduledDate: '' };
+}
+
 export default function App() {
   const [tab, setTab] = useState('jobs');
   const [jobs, setJobs] = useState([]);
   const [techs, setTechs] = useState([]);
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
+  const [closedFrom, setClosedFrom] = useState('');
+  const [closedTo, setClosedTo] = useState('');
+  const [sortBy, setSortBy] = useState('scheduled');
+  const [jobTech, setJobTech] = useState('all');
+  const [extraJobs, setExtraJobs] = useState([]);   // jobs fetched for a terminal-status filter
+  const [extraLoading, setExtraLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
@@ -91,6 +126,19 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  // Terminal statuses aren't pulled with the board (could be huge history), so
+  // fetch them on demand the moment such a filter is picked.
+  useEffect(() => {
+    if (!TERMINAL_STATUSES.includes(filter)) { setExtraJobs([]); return; }
+    let cancelled = false;
+    setExtraLoading(true);
+    api.getJobs(filter)
+      .then((j) => { if (!cancelled) setExtraJobs(j); })
+      .catch(() => { if (!cancelled) setExtraJobs([]); })
+      .finally(() => { if (!cancelled) setExtraLoading(false); });
+    return () => { cancelled = true; };
+  }, [filter]);
+
   const flash = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2200); };
 
   const track = async (fn) => {
@@ -102,33 +150,94 @@ export default function App() {
   const assign = async (job, technicianId) => {
     const tech = techs.find((t) => t.id === technicianId);
     try {
-      const { assignmentId } = await track(() => api.addAssignment(job.id, technicianId, job.scheduledDate));
-      setJobs((prev) => prev.map((j) => j.id === job.id
-        ? { ...j, assignments: [...j.assignments, { assignmentId, technicianId, technicianName: tech?.name, workDate: job.scheduledDate }] }
-        : j));
+        const { assignmentId } = await track(() => api.addAssignment(job.id, technicianId, job.scheduledDate));
+      const updated = {
+        ...job,
+        assignments: [...job.assignments, { assignmentId, technicianId, technicianName: tech?.name, workDate: job.scheduledDate, completed: false }],
+      };
+      const derived = deriveJobStatusFromAssignments(updated);
+      setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updated, ...derived } : j));
+      await track(() => api.updateJob(job.id, derived));
       flash(`${tech?.name} added to ${job.name}`);
     } catch (e) { flash(`Could not assign: ${e.message}`); }
   };
 
   const unassign = async (job, assignmentId) => {
+    const updatedAssignments = job.assignments.filter((a) => a.assignmentId !== assignmentId);
+    const updatedJob = { ...job, assignments: updatedAssignments };
+    const { status, scheduledDate } = deriveJobStatusFromAssignments(updatedJob);
+    setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updatedJob, status, scheduledDate } : j));
     try {
       await track(() => api.removeAssignment(assignmentId));
-      setJobs((prev) => prev.map((j) => j.id === job.id
-        ? { ...j, assignments: j.assignments.filter((a) => a.assignmentId !== assignmentId) }
-        : j));
+      await track(() => api.updateJob(job.id, { status, scheduledDate }));
       flash('Tech removed');
-    } catch (e) { flash(`Could not remove: ${e.message}`); }
+    } catch (e) { flash(`Could not remove: ${e.message}`); load(true); }
+  };
+
+  // Mark/unmark a tech's work as actually done. Completed assignments freeze on
+  // their date (real history) and won't move when the job is rescheduled.
+  const toggleDone = async (job, a) => {
+    const next = !a.completed;
+    const updatedJob = {
+      ...job,
+      assignments: job.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, completed: next } : x),
+    };
+    const { status, scheduledDate } = deriveJobStatusFromAssignments(updatedJob);
+    setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updatedJob, status, scheduledDate } : j));
+    try {
+      await track(() => api.updateAssignment(a.assignmentId, { completed: next }));
+      await track(() => api.updateJob(job.id, { status, scheduledDate }));
+      flash(next ? `${a.technicianName} marked done` : `${a.technicianName} reopened`);
+    } catch (e) { flash(`Could not update: ${e.message}`); load(true); }
+  };
+
+  // Edit a single assignment's own date.
+  const setAssignmentDate = async (job, a, date) => {
+    const updatedJob = {
+      ...job,
+      assignments: job.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, workDate: date || null } : x),
+    };
+    const { status, scheduledDate } = deriveJobStatusFromAssignments(updatedJob);
+    setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updatedJob, status, scheduledDate } : j));
+    try {
+      await track(() => api.updateAssignment(a.assignmentId, { workDate: date }));
+      await track(() => api.updateJob(job.id, { status, scheduledDate }));
+      flash('Assignment date saved');
+    } catch (e) { flash(`Could not save date: ${e.message}`); load(true); }
   };
 
   const setDate = async (job, date) => {
-    // Assignments are pinned to the job's scheduled date — move them together.
+    // Giving an un-advanced job a date schedules it; clearing returns it to queue.
+    let status = job.status;
+    if (date && PRE_SCHEDULED.includes(job.status)) status = 'Scheduled';
+    else if (!date) status = 'Ready to be scheduled';
+
+    const fields = { scheduledDate: date };
+    if (status !== job.status) fields.status = status;
+
+    // Changing the next date RELEASES the planned crew: completed stay frozen,
+    // non-completed are unscheduled (date cleared) and flagged for re-planning.
     setJobs((prev) => prev.map((j) => j.id === job.id
-      ? { ...j, scheduledDate: date, assignments: j.assignments.map((a) => ({ ...a, workDate: date })) }
+      ? { ...j, scheduledDate: date || null, status,
+          assignments: j.assignments.map((a) => a.completed ? a : { ...a, workDate: null }) }
       : j));
     try {
-      await track(() => api.updateJob(job.id, { scheduledDate: date }));
-      flash('Scheduled date saved');
+      await track(() => api.updateJob(job.id, fields));
+      flash(date ? 'Next date set — planned crew released' : 'Returned to queue');
     } catch (e) { flash(`Could not save date: ${e.message}`); load(true); }
+  };
+
+  // Pull a job off the calendar and back into the queue: clear its date and
+  // reset status to "Ready to be scheduled". Completed assignments stay frozen.
+  const unschedule = async (job) => {
+    setJobs((prev) => prev.map((j) => j.id === job.id
+      ? { ...j, scheduledDate: null, status: 'Ready to be scheduled',
+          assignments: j.assignments.map((a) => a.completed ? a : { ...a, workDate: null }) }
+      : j));
+    try {
+      await track(() => api.updateJob(job.id, { scheduledDate: '', status: 'Ready to be scheduled' }));
+      flash(`${job.name} unscheduled`);
+    } catch (e) { flash(`Could not unschedule: ${e.message}`); load(true); }
   };
 
   const setStatus = async (job, status) => {
@@ -148,13 +257,36 @@ export default function App() {
     return [['all', jobs.length], ...set.entries()];
   }, [jobs]);
 
+  const viewingTerminal = TERMINAL_STATUSES.includes(filter);
+
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return jobs.filter((j) =>
-      (filter === 'all' || j.status === filter) &&
-      (q === '' || j.name.toLowerCase().includes(q))
-    );
-  }, [jobs, filter, query]);
+    const source = viewingTerminal ? extraJobs : jobs;
+    const filtered = source.filter((j) => {
+      if (!(filter === 'all' || j.status === filter)) return false;
+      if (!(q === '' || j.name.toLowerCase().includes(q))) return false;
+      if (jobTech === 'unassigned' && j.assignments.length > 0) return false;
+      if (jobTech !== 'all' && jobTech !== 'unassigned'
+          && !j.assignments.some((a) => a.technicianId === jobTech)) return false;
+      if (closedFrom || closedTo) {
+        const cd = j.closeDate ? isoOf(new Date(j.closeDate)) : null;
+        if (!cd) return false;
+        if (closedFrom && cd < closedFrom) return false;
+        if (closedTo && cd > closedTo) return false;
+      }
+      return true;
+    });
+
+    const byStr = (a, b) => a.localeCompare(b);
+    const sorters = {
+      scheduled: (a, b) => byStr(a.scheduledDate || '9999-99', b.scheduledDate || '9999-99'),
+      closedNew: (a, b) => byStr(b.closeDate || '', a.closeDate || ''),
+      closedOld: (a, b) => byStr(a.closeDate || '9999', b.closeDate || '9999'),
+      lid: (a, b) => String(a.lid || '').localeCompare(String(b.lid || ''), undefined, { numeric: true }),
+      name: (a, b) => byStr(a.name, b.name),
+    };
+    return [...filtered].sort(sorters[sortBy] || sorters.scheduled);
+  }, [jobs, extraJobs, viewingTerminal, filter, query, jobTech, closedFrom, closedTo, sortBy]);
 
   return (
     <>
@@ -199,25 +331,93 @@ export default function App() {
               />
             </div>
 
+            <div className="rangefilter">
+              <span className="rl">Closed</span>
+              <input className="dateinput" type="date" value={closedFrom} onChange={(e) => setClosedFrom(e.target.value)} title="Closed from" />
+              <span className="dash">–</span>
+              <input className="dateinput" type="date" value={closedTo} onChange={(e) => setClosedTo(e.target.value)} title="Closed to" />
+              <button
+                className="clearrange"
+                onClick={() => { setClosedFrom(''); setClosedTo(''); }}
+                disabled={!closedFrom && !closedTo}
+              >Clear dates</button>
+              {!closedFrom && !closedTo && <span className="rangestate">showing all time</span>}
+            </div>
+
+            <div className="sortbar">
+              <label className="sortgrp">
+                <span className="rl">Sort</span>
+                <select className="ctlselect" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+                  <option value="scheduled">Scheduled date</option>
+                  <option value="closedNew">Closed — newest</option>
+                  <option value="closedOld">Closed — oldest</option>
+                  <option value="lid">LID</option>
+                  <option value="name">Job name</option>
+                </select>
+              </label>
+              <label className="sortgrp">
+                <span className="rl">Tech</span>
+                <select className="ctlselect" value={jobTech} onChange={(e) => setJobTech(e.target.value)}>
+                  <option value="all">All</option>
+                  <option value="unassigned">Unassigned</option>
+                  {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </label>
+            </div>
+
             <div className="filters">
               {statuses.map(([s, count]) => (
                 <button key={s} className={`chip ${filter === s ? 'on' : ''}`} onClick={() => setFilter(s)}>
                   {s === 'all' ? 'All outstanding' : s}<span className="ct">{count}</span>
                 </button>
               ))}
+              <span className="chipdiv" />
+              {TERMINAL_STATUSES.map((s) => (
+                <button key={s} className={`chip term ${filter === s ? 'on' : ''}`} onClick={() => setFilter(s)} title="Completed in Field Squared — view only">
+                  {s}{filter === s && !extraLoading && <span className="ct">{extraJobs.length}</span>}
+                </button>
+              ))}
             </div>
 
             <div className="jobs">
-              {shown.length === 0 && <div className="empty">{query.trim() ? 'No jobs match that search.' : 'No jobs in this status.'}</div>}
-              {shown.map((job) => {
-                const assignedIds = new Set(job.assignments.map((a) => a.technicianId));
-                const available = techs.filter((t) => !assignedIds.has(t.id));
+              {viewingTerminal && extraLoading && <div className="state">Loading completed jobs…</div>}
+              {!extraLoading && shown.length === 0 && <div className="empty">{query.trim() ? 'No jobs match that search.' : 'Nothing here.'}</div>}
+              {!extraLoading && shown.map((job) => {
+                if (viewingTerminal) {
+                  return (
+                    <div className="job ro" key={job.id}>
+                      <div className="stripe" data-status={statusClass(job.status)} />
+                      <div className="body">
+                        <div className="row1">
+                          <span className="jname">{job.name}</span>
+                          {job.lid && <span className="lidtag">LID {job.lid}</span>}
+                          <span className={`badge ${statusClass(job.status)}`}>{job.status}</span>
+                        </div>
+                        <div className="meta">
+                          <span><span className="ic">◍</span>{job.address || 'No address'}</span>
+                          {job.closeDate && <span className="created">Closed {fmtCreated(job.closeDate)}</span>}
+                          {job.scheduledDate && <span className="created">Scheduled {fmtDate(job.scheduledDate)}</span>}
+                        </div>
+                        {job.assignments.length > 0 && (
+                          <div className="rotechs">
+                            {job.assignments.map((a) => (
+                              <span className="rotech" key={a.assignmentId}>
+                                {a.completed ? '✓ ' : ''}{a.technicianName}{a.workDate ? ` · ${fmtDate(a.workDate)}` : ''}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                }
                 return (
                   <div className="job" key={job.id}>
                     <div className="stripe" data-status={statusClass(job.status)} />
                     <div className="body">
                       <div className="row1">
                         <span className="jname">{job.name}</span>
+                        {job.lid && <span className="lidtag">LID {job.lid}</span>}
                         <select
                           className={`statussel ${statusClass(job.status)}`}
                           value={job.status}
@@ -229,28 +429,48 @@ export default function App() {
                       </div>
                       <div className="meta">
                         <span><span className="ic">◍</span>{job.address || 'No address'}</span>
+                        {job.closeDate && <span className="created">Closed {fmtCreated(job.closeDate)}</span>}
+                        <span className="nextlabel">Next scheduled</span>
                         <input
                           className="dateinput"
                           type="date"
-                          value={job.scheduledDate || ''}
-                          onChange={(e) => setDate(job, e.target.value)}
-                          title="Scheduled date"
+                          value={nextScheduledAssignmentDate(job)}
+                          readOnly
+                          title="Next scheduled assignment date"
                         />
+                        {nextScheduledAssignmentDate(job)
+                          ? <span className="created">Scheduled {fmtDate(nextScheduledAssignmentDate(job))}</span>
+                          : <span className="unsched-tag">None</span>}
                       </div>
-                      <div className="techrow">
-                        {job.assignments.length === 0 && <span className="unassigned-tag">Unassigned</span>}
-                        {job.assignments.map((a) => (
-                          <span className="techchip" key={a.assignmentId}>
-                            {a.technicianName || 'Tech'}
-                            <button className="x" onClick={() => unassign(job, a.assignmentId)} aria-label="Remove">×</button>
-                          </span>
-                        ))}
-                        {available.length > 0 && (
-                          <select className="addtech" value="" onChange={(e) => e.target.value && assign(job, e.target.value)}>
-                            <option value="">+ Add tech</option>
-                            {available.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                          </select>
-                        )}
+                      <div className="assignlist">
+                        {job.assignments.length === 0 && <span className="unassigned-tag">No techs assigned</span>}
+                        {job.assignments.map((a) => {
+                          const cls = a.completed ? 'done' : (!a.workDate ? 'unscheduled' : '');
+                          return (
+                            <div className={`assignrow ${cls}`} key={a.assignmentId}>
+                              <button
+                                className="check"
+                                onClick={() => toggleDone(job, a)}
+                                title={a.completed ? 'Worked this day — click to reopen' : 'Mark as worked (freezes the date)'}
+                                aria-label="Toggle done"
+                              >{a.completed ? '✓' : '○'}</button>
+                              <span className="aname">{a.technicianName || 'Tech'}</span>
+                              <input
+                                className="adate"
+                                type="date"
+                                value={a.workDate || ''}
+                                onChange={(e) => setAssignmentDate(job, a, e.target.value)}
+                                title="Assignment date"
+                              />
+                              {!a.workDate && !a.completed && <span className="untag">unscheduled</span>}
+                              <button className="x" onClick={() => unassign(job, a.assignmentId)} aria-label="Remove">×</button>
+                            </div>
+                          );
+                        })}
+                        <select className="addtech" value="" onChange={(e) => e.target.value && assign(job, e.target.value)}>
+                          <option value="">+ Add assignment</option>
+                          {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                        </select>
                       </div>
                     </div>
                   </div>
@@ -275,9 +495,15 @@ function rangeLabel(mode, anchor) {
   return `${s.toLocaleDateString(undefined, opt)} – ${e.toLocaleDateString(undefined, opt)}`;
 }
 
+const CLOSED_LIST_STATUSES = ['Pending Customer Approval', 'Quoted', 'Parts Ordered', 'Ready to be scheduled'];
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
 function Schedule({ jobs, techs }) {
   const [mode, setMode] = useState('week');
   const [anchor, setAnchor] = useState(() => startOfDay(new Date()));
+  const [techFilter, setTechFilter] = useState('all');
+  const [year, setYear] = useState(() => new Date().getFullYear());
+  const [expandedMonths, setExpandedMonths] = useState(() => Array(12).fill(false));
 
   const shift = (dir) => {
     const d = new Date(anchor);
@@ -286,8 +512,34 @@ function Schedule({ jobs, techs }) {
     setAnchor(startOfDay(d));
   };
 
+  const closedJobs = useMemo(() => jobs
+    .filter((j) => CLOSED_LIST_STATUSES.includes(j.status) && j.closeDate)
+    .filter((j) => new Date(j.closeDate + 'T00:00:00').getFullYear() === year),
+  [jobs, year]);
+
+  const closedByMonth = useMemo(() => {
+    const buckets = Array.from({ length: 12 }, () => []);
+    closedJobs.forEach((j) => {
+      const month = new Date(j.closeDate + 'T00:00:00').getMonth();
+      buckets[month].push(j);
+    });
+    return buckets.map((items) => items.sort((a, b) => a.name.localeCompare(b.name)));
+  }, [closedJobs]);
+
+  const toggleMonth = (month) => setExpandedMonths((prev) => {
+    const next = [...prev];
+    next[month] = !next[month];
+    return next;
+  });
+
+  useEffect(() => {
+    setExpandedMonths(Array(12).fill(false));
+  }, [year]);
+
   return (
     <section>
+      <div className="schedule-layout">
+        <div className="schedule-main">
       <div className="view-head">
         <div><h2>Who's on what</h2><p>Each tech's load by day. Empty cells are open.</p></div>
       </div>
@@ -299,6 +551,10 @@ function Schedule({ jobs, techs }) {
           <button className="navbtn" onClick={() => shift(1)} aria-label="Next">›</button>
         </div>
         <div className="rangelabel">{rangeLabel(mode, anchor)}</div>
+        <select className="techfilter" value={techFilter} onChange={(e) => setTechFilter(e.target.value)}>
+          <option value="all">All technicians</option>
+          {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
         <div className="seg">
           <button className={`segbtn ${mode === 'week' ? 'on' : ''}`} onClick={() => setMode('week')}>Week</button>
           <button className={`segbtn ${mode === 'month' ? 'on' : ''}`} onClick={() => setMode('month')}>Month</button>
@@ -306,26 +562,63 @@ function Schedule({ jobs, techs }) {
       </div>
 
       {mode === 'week'
-        ? <WeekGrid jobs={jobs} techs={techs} anchor={anchor} />
-        : <MonthGrid jobs={jobs} anchor={anchor} />}
+        ? <WeekGrid jobs={jobs} techs={techs} anchor={anchor} techFilter={techFilter} />
+        : <MonthGrid jobs={jobs} anchor={anchor} techFilter={techFilter} />}
+        </div>
+        <aside className="closed-months-panel">
+          <div className="panel-head">
+            <div>
+              <div className="panel-title">Unscheduled opportunities</div>
+              <div className="panel-subtitle">{year}</div>
+            </div>
+            <div className="year-nav">
+              <button className="year-btn" onClick={() => setYear((y) => y - 1)} aria-label="Previous year">‹</button>
+              <button className="year-btn" onClick={() => setYear((y) => y + 1)} aria-label="Next year">›</button>
+            </div>
+          </div>
+          {MONTHS.map((month, idx) => {
+            const items = closedByMonth[idx] || [];
+            return (
+              <div className="month-group" key={month}>
+                <button type="button" className="month-toggle" onClick={() => toggleMonth(idx)}>
+                  <span>{month}</span>
+                  <span className="month-count">{items.length}</span>
+                </button>
+                {expandedMonths[idx] && (
+                  <div className="month-items">
+                    {items.length === 0
+                      ? <div className="month-empty">No closed jobs</div>
+                      : items.map((job) => (
+                        <div className="month-job" data-status={statusClass(job.status)} key={job.id}>
+                          <div className="job-name">{job.name}</div>
+                          <div className="job-meta">{job.lid ? `LID ${job.lid}` : ''}{job.status ? ` · ${job.status}` : ''}</div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </aside>
+      </div>
     </section>
   );
 }
 
-function WeekGrid({ jobs, techs, anchor }) {
+function WeekGrid({ jobs, techs, anchor, techFilter }) {
   const days = useMemo(() => {
     const s = startOfWeek(anchor);
     return Array.from({ length: 7 }, (_, i) => addDays(s, i));
   }, [anchor]);
   const todayIso = isoOf(startOfDay(new Date()));
+  const rows = techFilter === 'all' ? techs : techs.filter((t) => t.id === techFilter);
 
-  // techId -> iso -> [job names]
+  // techId -> iso -> [job names], placed by each assignment's own date
   const grid = useMemo(() => {
     const m = {};
     jobs.forEach((job) => job.assignments.forEach((a) => {
-      const d = a.workDate || job.scheduledDate;
-      if (!d) return;
-      ((m[a.technicianId] ||= {})[d] ||= []).push(job.name);
+      if (!a.workDate) return; // unscheduled assignment — not on the calendar
+      ((m[a.technicianId] ||= {})[a.workDate] ||= []).push(job.name);
     }));
     return m;
   }, [jobs]);
@@ -343,7 +636,7 @@ function WeekGrid({ jobs, techs, anchor }) {
           </tr>
         </thead>
         <tbody>
-          {techs.map((t) => (
+          {rows.map((t) => (
             <tr key={t.id}>
               <td className="techcol"><div className="tn">{t.name}</div></td>
               {days.map((d) => {
@@ -366,7 +659,7 @@ function WeekGrid({ jobs, techs, anchor }) {
   );
 }
 
-function MonthGrid({ jobs, anchor }) {
+function MonthGrid({ jobs, anchor, techFilter }) {
   const todayIso = isoOf(startOfDay(new Date()));
   const month = anchor.getMonth();
 
@@ -379,12 +672,17 @@ function MonthGrid({ jobs, anchor }) {
     return Array.from({ length: total }, (_, i) => addDays(gridStart, i));
   }, [anchor, month]);
 
-  // iso -> [job]
+  // iso -> [job], optionally narrowed to a single tech's jobs
   const byDate = useMemo(() => {
     const m = {};
-    jobs.forEach((j) => { if (j.scheduledDate) (m[j.scheduledDate] ||= []).push(j); });
+    jobs.forEach((j) => {
+      const date = nextScheduledAssignmentDate(j);
+      if (!date) return;
+      if (techFilter !== 'all' && !j.assignments.some((a) => a.technicianId === techFilter)) return;
+      (m[date] ||= []).push(j);
+    });
     return m;
-  }, [jobs]);
+  }, [jobs, techFilter]);
 
   const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 

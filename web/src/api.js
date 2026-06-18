@@ -27,4 +27,11 @@ export const api = {
 
   removeAssignment: (assignmentId) =>
     fetch(`/api/assignments/${assignmentId}`, { method: 'DELETE' }).then(j),
+
+  updateAssignment: (assignmentId, fields) =>
+    fetch(`/api/assignments/${assignmentId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+    }).then(j),
 };
