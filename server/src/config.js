@@ -47,6 +47,7 @@ export const config = {
     assignmentTechLookup: 'Technician__c',  // lookup -> Technician__c
     assignmentTechRelationship: 'Technician__r', // for Technician__r.Name
     assignmentDate: 'Work_Date__c',         // Date the tech is on this job
+    assignmentStartTime: 'Start_Time__c',   // Time the tech starts (HH:MM)
     assignmentCompleted: 'Completed__c',    // checkbox: tech actually worked that day
 
     // ---- Technician__c (your tech list) ----

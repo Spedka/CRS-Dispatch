@@ -92,7 +92,11 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [lastSync, setLastSync] = useState(null);
   const [now, setNow] = useState(Date.now());
-  const [pendingAdd, setPendingAdd] = useState({ jobId: null, techId: '', date: '' });
+  const [pendingAdd, setPendingAdd] = useState({ jobId: null, techId: '', date: '', time: '' });
+  const [selectedJobId, setSelectedJobId] = useState(null);
+  const [draftJob, setDraftJob] = useState(null);
+  const [draftPendingAdd, setDraftPendingAdd] = useState({ techId: '', date: '', time: '' });
+  const [modalSaving, setModalSaving] = useState(false);
 
   // Count of in-flight writes. While > 0 the poll holds off so a background
   // refresh can't overwrite a change you just made but that hasn't saved yet.
@@ -127,6 +131,25 @@ export default function App() {
   }, [load]);
 
   useEffect(() => {
+    if (!selectedJobId) return;
+    const onKey = (e) => { if (e.key === 'Escape') setSelectedJobId(null); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [selectedJobId]);
+
+  // Snapshot the job into draftJob when the modal opens; don't re-init on every jobs update.
+  useEffect(() => {
+    if (selectedJobId) {
+      const job = jobs.find((j) => j.id === selectedJobId);
+      if (job) setDraftJob(JSON.parse(JSON.stringify(job)));
+    } else {
+      setDraftJob(null);
+      setDraftPendingAdd({ techId: '', date: '', time: '' });
+      setModalSaving(false);
+    }
+  }, [selectedJobId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
@@ -152,16 +175,16 @@ export default function App() {
     finally { pending.current -= 1; }
   };
 
-  const assign = async (job, technicianId, workDate) => {
+  const assign = async (job, technicianId, workDate, startTime = '07:00') => {
     const tech = techs.find((t) => t.id === technicianId);
     try {
-        console.debug('[APP] assign()', { oppId: job.id, technicianId, workDate });
-        const resp = await track(() => api.addAssignment(job.id, technicianId, workDate));
+        console.debug('[APP] assign()', { oppId: job.id, technicianId, workDate, startTime });
+        const resp = await track(() => api.addAssignment(job.id, technicianId, workDate, startTime));
       const assignmentId = resp.assignmentId;
       const created = resp.assignment;
       const newAssignment = created ?
-        { assignmentId: created.assignmentId, technicianId: created.technicianId, technicianName: created.technicianName, workDate: created.workDate, completed: created.completed }
-        : { assignmentId, technicianId, technicianName: tech?.name, workDate: workDate || null, completed: false };
+        { assignmentId: created.assignmentId, technicianId: created.technicianId, technicianName: created.technicianName, workDate: created.workDate, startTime: created.startTime || '07:00', completed: created.completed }
+        : { assignmentId, technicianId, technicianName: tech?.name, workDate: workDate || null, startTime: startTime || '07:00', completed: false };
       const updated = {
         ...job,
         assignments: [...job.assignments, newAssignment],
@@ -217,6 +240,18 @@ export default function App() {
     } catch (e) { flash(`Could not save date: ${e.message}`); load(true); }
   };
 
+  const setAssignmentTime = async (job, a, time) => {
+    const t = time || '07:00';
+    const updatedJob = {
+      ...job,
+      assignments: job.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, startTime: t } : x),
+    };
+    setJobs((prev) => prev.map((j) => j.id === job.id ? updatedJob : j));
+    try {
+      await track(() => api.updateAssignment(a.assignmentId, { startTime: t }));
+    } catch (e) { flash(`Could not save time: ${e.message}`); load(true); }
+  };
+
   const setDate = async (job, date) => {
     // Giving an un-advanced job a date schedules it; clearing returns it to queue.
     let status = job.status;
@@ -261,6 +296,45 @@ export default function App() {
       flash(offBoard ? `${job.name} closed out` : 'Status updated');
     } catch (e) { flash(`Could not update: ${e.message}`); load(true); }
   };
+
+  const saveModal = async () => {
+    const originalJob = jobs.find((j) => j.id === selectedJobId);
+    if (!originalJob || !draftJob) return;
+    setModalSaving(true);
+    try {
+      // Removed assignments
+      const keptIds = new Set(draftJob.assignments.filter((a) => !a._new).map((a) => a.assignmentId));
+      for (const a of originalJob.assignments) {
+        if (!keptIds.has(a.assignmentId)) await api.removeAssignment(a.assignmentId);
+      }
+      // Changed assignments
+      for (const da of draftJob.assignments.filter((a) => !a._new)) {
+        const oa = originalJob.assignments.find((a) => a.assignmentId === da.assignmentId);
+        if (!oa) continue;
+        const ch = {};
+        if (da.workDate !== oa.workDate) ch.workDate = da.workDate || '';
+        if ((da.startTime || '07:00') !== (oa.startTime || '07:00')) ch.startTime = da.startTime || '07:00';
+        if (da.completed !== oa.completed) ch.completed = da.completed;
+        if (Object.keys(ch).length > 0) await api.updateAssignment(da.assignmentId, ch);
+      }
+      // New assignments
+      for (const na of draftJob.assignments.filter((a) => a._new)) {
+        await api.addAssignment(draftJob.id, na.technicianId, na.workDate || '', na.startTime || '07:00');
+      }
+      // Sync Opportunity status + scheduledDate
+      const derived = deriveJobStatusFromAssignments(draftJob);
+      const finalStatus = draftJob.status !== originalJob.status ? draftJob.status : derived.status;
+      await api.updateJob(draftJob.id, { status: finalStatus, scheduledDate: derived.scheduledDate, _suppressRelease: true });
+      setSelectedJobId(null);
+      await load(true);
+      flash('Changes saved');
+    } catch (e) {
+      flash(`Save failed: ${e.message}`);
+      setModalSaving(false);
+    }
+  };
+
+  const cancelModal = () => setSelectedJobId(null);
 
   const filteredJobs = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -519,6 +593,15 @@ export default function App() {
                                 onChange={(e) => setAssignmentDate(job, a, e.target.value)}
                                 title="Assignment date"
                               />
+                              <input
+                                className="atime"
+                                type="time"
+                                defaultValue={a.startTime || '07:00'}
+                                onBlur={(e) => { if (e.target.value) setAssignmentTime(job, a, e.target.value); }}
+                                title="Start time"
+                                disabled={a.completed}
+                                key={a.assignmentId + (a.startTime || '07:00')}
+                              />
                               {!a.workDate && !a.completed && <span className="untag">unscheduled</span>}
                               <button className="x" onClick={() => unassign(job, a.assignmentId)} aria-label="Remove">×</button>
                             </div>
@@ -529,7 +612,7 @@ export default function App() {
                             const techId = e.target.value;
                             if (!techId) return;
                             e.target.value = '';
-                            setPendingAdd({ jobId: job.id, techId, date: job.scheduledDate || '' });
+                            setPendingAdd({ jobId: job.id, techId, date: job.scheduledDate || '', time: '' });
                           }}>
                             <option value="">+ Add assignment</option>
                             {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
@@ -537,12 +620,13 @@ export default function App() {
                           {pendingAdd.jobId === job.id && (
                             <div className="inline-add">
                               <input className="adate" type="date" value={pendingAdd.date || ''} onChange={(e) => setPendingAdd((p) => ({ ...p, date: e.target.value }))} />
+                              <input className="atime" type="time" value={pendingAdd.time || '07:00'} onChange={(e) => setPendingAdd((p) => ({ ...p, time: e.target.value }))} title="Start time" />
                               <button className="add-btn" onClick={async () => {
-                                const { techId, date } = pendingAdd;
-                                setPendingAdd({ jobId: null, techId: '', date: '' });
-                                await assign(job, techId, date || '');
+                                const { techId, date, time } = pendingAdd;
+                                setPendingAdd({ jobId: null, techId: '', date: '', time: '' });
+                                await assign(job, techId, date || '', time || '07:00');
                               }}>Add</button>
-                              <button className="cancel-btn" onClick={() => setPendingAdd({ jobId: null, techId: '', date: '' })}>Cancel</button>
+                              <button className="cancel-btn" onClick={() => setPendingAdd({ jobId: null, techId: '', date: '', time: '' })}>Cancel</button>
                             </div>
                           )}
                         </div>
@@ -555,10 +639,122 @@ export default function App() {
           </section>
         )}
 
-        {!loading && !error && tab === 'schedule' && <Schedule jobs={jobs} techs={techs} />}
+        {!loading && !error && tab === 'schedule' && <Schedule jobs={jobs} techs={techs} onJobClick={setSelectedJobId} />}
       </main>
 
       {toast && <div className="toast">{toast}<span className="tsf">→ Salesforce</span></div>}
+
+      {draftJob && (
+        <div className="modal-backdrop" onClick={cancelModal}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+            <div className="modal-header">
+              <div className="modal-title-row">
+                <span className="jname">{draftJob.name}</span>
+                {draftJob.lid && <span className="lidtag">LID {draftJob.lid}</span>}
+                <select
+                  className={`statussel ${statusClass(draftJob.status)}`}
+                  value={draftJob.status}
+                  onChange={(e) => setDraftJob((d) => ({ ...d, status: e.target.value }))}
+                >
+                  {!ASSIGNABLE_STATUSES.includes(draftJob.status) && <option value={draftJob.status}>{draftJob.status}</option>}
+                  {ASSIGNABLE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+              <button className="modal-close" onClick={cancelModal} aria-label="Close">×</button>
+            </div>
+            <div className="modal-body">
+              <div className="meta">
+                <span><span className="ic">◍</span>{draftJob.address || 'No address'}</span>
+                {draftJob.closeDate && <span className="created">Close Date {fmtDate(draftJob.closeDate)}</span>}
+                <span className="nextlabel">Next scheduled</span>
+                <input className="dateinput" type="date" value={nextScheduledAssignmentDate(draftJob)} readOnly title="Next scheduled assignment date" />
+                {nextScheduledAssignmentDate(draftJob)
+                  ? <span className="created">Scheduled {fmtDate(nextScheduledAssignmentDate(draftJob))}</span>
+                  : <span className="unsched-tag">None</span>}
+              </div>
+              <div className="assignlist">
+                {draftJob.assignments.length === 0 && <span className="unassigned-tag">No techs assigned</span>}
+                {draftJob.assignments.map((a) => {
+                  const cls = a.completed ? 'done' : (!a.workDate ? 'unscheduled' : '');
+                  return (
+                    <div className={`assignrow ${cls}`} key={a.assignmentId}>
+                      <button
+                        className="check"
+                        onClick={() => setDraftJob((d) => ({ ...d, assignments: d.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, completed: !x.completed } : x) }))}
+                        title={a.completed ? 'Worked this day — click to reopen' : 'Mark as worked (freezes the date)'}
+                        aria-label="Toggle done"
+                      >{a.completed ? '✓' : '○'}</button>
+                      <span className="aname">{a.technicianName || 'Tech'}</span>
+                      <input
+                        className="adate"
+                        type="date"
+                        value={a.workDate || ''}
+                        onChange={(e) => setDraftJob((d) => ({ ...d, assignments: d.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, workDate: e.target.value || null } : x) }))}
+                        title="Assignment date"
+                      />
+                      <input
+                        className="atime"
+                        type="time"
+                        value={a.startTime || '07:00'}
+                        onChange={(e) => setDraftJob((d) => ({ ...d, assignments: d.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, startTime: e.target.value || '07:00' } : x) }))}
+                        title="Start time"
+                        disabled={a.completed}
+                      />
+                      {!a.workDate && !a.completed && <span className="untag">unscheduled</span>}
+                      <button
+                        className="x"
+                        onClick={() => setDraftJob((d) => ({ ...d, assignments: d.assignments.filter((x) => x.assignmentId !== a.assignmentId) }))}
+                        aria-label="Remove"
+                      >×</button>
+                    </div>
+                  );
+                })}
+                <div>
+                  <select className="addtech" value="" onChange={(e) => {
+                    const techId = e.target.value;
+                    if (!techId) return;
+                    e.target.value = '';
+                    setDraftPendingAdd({ techId, date: draftJob.scheduledDate || '', time: '' });
+                  }}>
+                    <option value="">+ Add assignment</option>
+                    {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                  {draftPendingAdd.techId && (
+                    <div className="inline-add">
+                      <input className="adate" type="date" value={draftPendingAdd.date || ''} onChange={(e) => setDraftPendingAdd((p) => ({ ...p, date: e.target.value }))} />
+                      <input className="atime" type="time" value={draftPendingAdd.time || '07:00'} onChange={(e) => setDraftPendingAdd((p) => ({ ...p, time: e.target.value }))} title="Start time" />
+                      <button className="add-btn" onClick={() => {
+                        const { techId, date, time } = draftPendingAdd;
+                        const tech = techs.find((t) => t.id === techId);
+                        setDraftJob((d) => ({
+                          ...d,
+                          assignments: [...d.assignments, {
+                            assignmentId: `_new_${Date.now()}`,
+                            technicianId: techId,
+                            technicianName: tech?.name || '',
+                            workDate: date || null,
+                            startTime: time || '07:00',
+                            completed: false,
+                            _new: true,
+                          }],
+                        }));
+                        setDraftPendingAdd({ techId: '', date: '', time: '' });
+                      }}>Add</button>
+                      <button className="cancel-btn" onClick={() => setDraftPendingAdd({ techId: '', date: '', time: '' })}>Cancel</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="modal-save-btn" onClick={saveModal} disabled={modalSaving}>
+                {modalSaving ? 'Saving…' : 'Save changes'}
+              </button>
+              <button className="modal-cancel-btn" onClick={cancelModal} disabled={modalSaving}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -573,7 +769,7 @@ function rangeLabel(mode, anchor) {
 const CLOSED_LIST_STATUSES = ['Pending Customer Approval', 'Quoted', 'Parts Ordered', 'Ready to be scheduled'];
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
-function Schedule({ jobs, techs }) {
+function Schedule({ jobs, techs, onJobClick }) {
   const [mode, setMode] = useState('week');
   const [anchor, setAnchor] = useState(() => startOfDay(new Date()));
   const [techFilter, setTechFilter] = useState('all');
@@ -637,8 +833,8 @@ function Schedule({ jobs, techs }) {
       </div>
 
       {mode === 'week'
-        ? <WeekGrid jobs={jobs} techs={techs} anchor={anchor} techFilter={techFilter} />
-        : <MonthGrid jobs={jobs} anchor={anchor} techFilter={techFilter} />}
+        ? <WeekGrid jobs={jobs} techs={techs} anchor={anchor} techFilter={techFilter} onJobClick={onJobClick} />
+        : <MonthGrid jobs={jobs} anchor={anchor} techFilter={techFilter} onJobClick={onJobClick} />}
         </div>
         <aside className="closed-months-panel">
           <div className="panel-head">
@@ -680,7 +876,7 @@ function Schedule({ jobs, techs }) {
   );
 }
 
-function WeekGrid({ jobs, techs, anchor, techFilter }) {
+function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick }) {
   const days = useMemo(() => {
     const s = startOfWeek(anchor);
     return Array.from({ length: 7 }, (_, i) => addDays(s, i));
@@ -688,13 +884,17 @@ function WeekGrid({ jobs, techs, anchor, techFilter }) {
   const todayIso = isoOf(startOfDay(new Date()));
   const rows = techFilter === 'all' ? techs : techs.filter((t) => t.id === techFilter);
 
-  // techId -> iso -> [job names], placed by each assignment's own date
+  // techId -> iso -> [{ name, startTime }], sorted by start time
   const grid = useMemo(() => {
     const m = {};
     jobs.forEach((job) => job.assignments.forEach((a) => {
       if (!a.workDate) return; // unscheduled assignment — not on the calendar
-      ((m[a.technicianId] ||= {})[a.workDate] ||= []).push(job.name);
+      ((m[a.technicianId] ||= {})[a.workDate] ||= []).push({ name: job.name, startTime: a.startTime || '07:00', jobId: job.id });
     }));
+    // sort each cell by start time
+    Object.values(m).forEach((byDate) =>
+      Object.values(byDate).forEach((items) => items.sort((a, b) => a.startTime.localeCompare(b.startTime)))
+    );
     return m;
   }, [jobs]);
 
@@ -722,7 +922,12 @@ function WeekGrid({ jobs, techs, anchor, techFilter }) {
                   <td key={iso} className={cls}>
                     {items.length === 0
                       ? <span className="free">✓ Open</span>
-                      : items.map((n, i) => <div className="jchip" key={i}>{n.split('—')[0].trim()}</div>)}
+                      : items.map((item, i) => (
+                          <div className="jchip" key={i} onClick={() => onJobClick(item.jobId)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(item.jobId)}>
+                            <span className="jtime">{item.startTime}</span>
+                            {item.name.split('—')[0].trim()}
+                          </div>
+                        ))}
                   </td>
                 );
               })}
@@ -734,7 +939,7 @@ function WeekGrid({ jobs, techs, anchor, techFilter }) {
   );
 }
 
-function MonthGrid({ jobs, anchor, techFilter }) {
+function MonthGrid({ jobs, anchor, techFilter, onJobClick }) {
   const todayIso = isoOf(startOfDay(new Date()));
   const month = anchor.getMonth();
 
@@ -772,7 +977,7 @@ function MonthGrid({ jobs, anchor, techFilter }) {
           <div className={`daycell ${out ? 'out' : ''} ${iso === todayIso ? 'today' : ''}`} key={iso}>
             <div className="daynum">{d.getDate()}</div>
             {items.map((j) => (
-              <div className="dayjob" data-status={statusClass(j.status)} key={j.id} title={j.name}>
+              <div className="dayjob" data-status={statusClass(j.status)} key={j.id} title={j.name} onClick={() => onJobClick(j.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(j.id)}>
                 <span className="jn">{j.name.split('—')[0].trim()}</span>
                 {j.assignments.length > 0 && <span className="inits">{j.assignments.map((a) => initials(a.technicianName)).join(' ')}</span>}
               </div>

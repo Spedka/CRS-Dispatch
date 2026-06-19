@@ -5,6 +5,9 @@ import { createSalesforce } from './salesforce.js';
 const f = config.fields;
 const o = config.objects;
 const esc = (s) => String(s).replace(/'/g, "\\'");
+// Salesforce Time fields return "HH:MM:SS.sssZ"; we surface "HH:MM" to the UI.
+const normTime = (v) => (v ? String(v).slice(0, 5) : null);
+const toSfTime = (hhmm) => (hhmm ? `${hhmm}:00.000Z` : null);
 
 // --- shapeJob is identical to your current version ---
 function shapeJob(r) {
@@ -15,6 +18,7 @@ function shapeJob(r) {
         technicianId: a[o.assignmentTechLookup],
         technicianName: a[o.assignmentTechRelationship]?.Name ?? null,
         workDate: a[o.assignmentDate] ?? null,
+        startTime: normTime(a[o.assignmentStartTime]) || '07:00',
         completed: a[o.assignmentCompleted] === true,
       }))
     : [];
@@ -51,7 +55,7 @@ api.get('/jobs', async (c) => {
     const soql = `
       SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}, ${f.oppScheduledDate}, CreatedDate, CloseDate,
              ${f.addrStreet}, ${f.addrCity},
-             (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name, ${o.assignmentDate}, ${o.assignmentCompleted}
+             (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name, ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}
               FROM ${o.assignmentChildRelationship})
       FROM Opportunity
       WHERE ${f.oppStatus} IN (${inList})
@@ -126,12 +130,13 @@ api.post('/jobs/:oppId/assignments', async (c) => {
   try {
     const sf = createSalesforce(c.env);
     const oppId = c.req.param('oppId');
-    const { technicianId, workDate } = await c.req.json();
+    const { technicianId, workDate, startTime } = await c.req.json();
     if (!technicianId) return c.json({ error: 'technicianId required' }, 400);
 
     const fields = {
       [o.assignmentOppLookup]: oppId,
       [o.assignmentTechLookup]: technicianId,
+      [o.assignmentStartTime]: toSfTime(startTime || '07:00'),
     };
 
     // Only set the assignment date when the caller explicitly provides it.
@@ -150,7 +155,7 @@ api.post('/jobs/:oppId/assignments', async (c) => {
     let assignmentRec = null;
     try {
       const recs = await sf.query(
-        `SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentDate}, ${o.assignmentCompleted}, ${o.assignmentTechRelationship}.Name FROM ${o.assignment} WHERE Id='${esc(createdId)}'`
+        `SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}, ${o.assignmentTechRelationship}.Name FROM ${o.assignment} WHERE Id='${esc(createdId)}'`
       );
       if (recs && recs[0]) {
         const r = recs[0];
@@ -159,6 +164,7 @@ api.post('/jobs/:oppId/assignments', async (c) => {
           technicianId: r[o.assignmentTechLookup],
           technicianName: r[o.assignmentTechRelationship]?.Name ?? null,
           workDate: r[o.assignmentDate] ?? null,
+          startTime: normTime(r[o.assignmentStartTime]) || '07:00',
           completed: r[o.assignmentCompleted] === true,
         };
       }
@@ -181,6 +187,7 @@ api.patch('/assignments/:id', async (c) => {
     const fields = {};
     if (typeof body.completed === 'boolean') fields[o.assignmentCompleted] = body.completed;
     if ('workDate' in body) fields[o.assignmentDate] = body.workDate === '' ? null : body.workDate;
+    if ('startTime' in body) fields[o.assignmentStartTime] = toSfTime(body.startTime || '07:00');
     if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
 
     await sf.updateRecord(o.assignment, id, fields);

@@ -18,9 +18,9 @@ export const api = {
       body: JSON.stringify(fields),
     }).then(j),
 
-  addAssignment: (oppId, technicianId, workDate) =>
+  addAssignment: (oppId, technicianId, workDate, startTime) =>
     (function() {
-      const body = { technicianId, workDate };
+      const body = { technicianId, workDate, startTime };
       try { console.log('[API] POST /api/jobs/' + oppId + '/assignments', body); } catch (e) {}
       return fetch(`/api/jobs/${oppId}/assignments`, {
         method: 'POST',
