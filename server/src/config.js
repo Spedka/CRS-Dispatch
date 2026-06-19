@@ -33,6 +33,7 @@ export const config = {
     // or swap these for custom Opportunity address fields.
     addrStreet: 'Account.ShippingStreet',
     addrCity: 'Account.ShippingCity',
+    oppType: 'Opportunity_Type__c',
   },
 
   // ---- Job_Assignment__c (junction: one tech on one job) ----

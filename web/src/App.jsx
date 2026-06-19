@@ -48,21 +48,14 @@ const startOfPreviousMonth = (d) => { const x = startOfMonth(d); x.setMonth(x.ge
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
 function fmtDate(iso) {
-  if (!iso) return 'No date';
-  const d = new Date(iso + 'T00:00:00');
-  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  if (!iso) return null;
+  return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function fmtAgo(ms) {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `synced ${s}s ago`;
   return `synced ${Math.floor(s / 60)}m ago`;
-}
-
-// CreatedDate is a full ISO datetime from Salesforce — show just the date.
-function fmtCreated(iso) {
-  if (!iso) return null;
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function nextScheduledAssignmentDate(job) {
@@ -88,8 +81,8 @@ export default function App() {
   const [techs, setTechs] = useState([]);
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
-  const [createdFrom, setCreatedFrom] = useState('');
-  const [createdTo, setCreatedTo] = useState('');
+  const [closedFrom, setClosedFrom] = useState('');
+  const [closedTo, setClosedTo] = useState('');
   const [sortBy, setSortBy] = useState('scheduled');
   const [jobTech, setJobTech] = useState('all');
   const [extraJobs, setExtraJobs] = useState([]);   // jobs fetched for a terminal-status filter
@@ -99,6 +92,7 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [lastSync, setLastSync] = useState(null);
   const [now, setNow] = useState(Date.now());
+  const [pendingAdd, setPendingAdd] = useState({ jobId: null, techId: '', date: '' });
 
   // Count of in-flight writes. While > 0 the poll holds off so a background
   // refresh can't overwrite a change you just made but that hasn't saved yet.
@@ -122,10 +116,10 @@ export default function App() {
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    if (createdFrom && !createdTo) {
-      setCreatedTo(todayIso());
+    if (closedFrom && !closedTo) {
+      setClosedTo(todayIso());
     }
-  }, [createdFrom, createdTo]);
+  }, [closedFrom, closedTo]);
 
   useEffect(() => {
     const id = setInterval(() => { if (pending.current === 0) load(true); }, POLL_MS);
@@ -158,17 +152,23 @@ export default function App() {
     finally { pending.current -= 1; }
   };
 
-  const assign = async (job, technicianId) => {
+  const assign = async (job, technicianId, workDate) => {
     const tech = techs.find((t) => t.id === technicianId);
     try {
-        const { assignmentId } = await track(() => api.addAssignment(job.id, technicianId, job.scheduledDate));
+        console.debug('[APP] assign()', { oppId: job.id, technicianId, workDate });
+        const resp = await track(() => api.addAssignment(job.id, technicianId, workDate));
+      const assignmentId = resp.assignmentId;
+      const created = resp.assignment;
+      const newAssignment = created ?
+        { assignmentId: created.assignmentId, technicianId: created.technicianId, technicianName: created.technicianName, workDate: created.workDate, completed: created.completed }
+        : { assignmentId, technicianId, technicianName: tech?.name, workDate: workDate || null, completed: false };
       const updated = {
         ...job,
-        assignments: [...job.assignments, { assignmentId, technicianId, technicianName: tech?.name, workDate: job.scheduledDate, completed: false }],
+        assignments: [...job.assignments, newAssignment],
       };
       const derived = deriveJobStatusFromAssignments(updated);
       setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updated, ...derived } : j));
-      await track(() => api.updateJob(job.id, derived));
+      await track(() => api.updateJob(job.id, { ...derived, _suppressRelease: true }));
       flash(`${tech?.name} added to ${job.name}`);
     } catch (e) { flash(`Could not assign: ${e.message}`); }
   };
@@ -180,7 +180,7 @@ export default function App() {
     setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updatedJob, status, scheduledDate } : j));
     try {
       await track(() => api.removeAssignment(assignmentId));
-      await track(() => api.updateJob(job.id, { status, scheduledDate }));
+      await track(() => api.updateJob(job.id, { status, scheduledDate, _suppressRelease: true }));
       flash('Tech removed');
     } catch (e) { flash(`Could not remove: ${e.message}`); load(true); }
   };
@@ -197,7 +197,7 @@ export default function App() {
     setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updatedJob, status, scheduledDate } : j));
     try {
       await track(() => api.updateAssignment(a.assignmentId, { completed: next }));
-      await track(() => api.updateJob(job.id, { status, scheduledDate }));
+      await track(() => api.updateJob(job.id, { status, scheduledDate, _suppressRelease: true }));
       flash(next ? `${a.technicianName} marked done` : `${a.technicianName} reopened`);
     } catch (e) { flash(`Could not update: ${e.message}`); load(true); }
   };
@@ -212,7 +212,7 @@ export default function App() {
     setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updatedJob, status, scheduledDate } : j));
     try {
       await track(() => api.updateAssignment(a.assignmentId, { workDate: date }));
-      await track(() => api.updateJob(job.id, { status, scheduledDate }));
+      await track(() => api.updateJob(job.id, { status, scheduledDate, _suppressRelease: true }));
       flash('Assignment date saved');
     } catch (e) { flash(`Could not save date: ${e.message}`); load(true); }
   };
@@ -269,15 +269,15 @@ export default function App() {
       if (jobTech === 'unassigned' && j.assignments.length > 0) return false;
       if (jobTech !== 'all' && jobTech !== 'unassigned'
           && !j.assignments.some((a) => a.technicianId === jobTech)) return false;
-      if (createdFrom || createdTo) {
-        const cd = dateOnlyISO(j.createdDate);
+      if (closedFrom || closedTo) {
+        const cd = dateOnlyISO(j.closeDate);
         if (!cd) return false;
-        if (createdFrom && cd < createdFrom) return false;
-        if (createdTo && cd > createdTo) return false;
+        if (closedFrom && cd < closedFrom) return false;
+        if (closedTo && cd > closedTo) return false;
       }
       return true;
     });
-  }, [jobs, query, jobTech, createdFrom, createdTo]);
+  }, [jobs, query, jobTech, closedFrom, closedTo]);
 
   const statuses = useMemo(() => {
     const set = new Map();
@@ -296,11 +296,11 @@ export default function App() {
       if (jobTech === 'unassigned' && j.assignments.length > 0) return false;
       if (jobTech !== 'all' && jobTech !== 'unassigned'
           && !j.assignments.some((a) => a.technicianId === jobTech)) return false;
-      if (createdFrom || createdTo) {
-        const cd = dateOnlyISO(j.createdDate);
+      if (closedFrom || closedTo) {
+        const cd = dateOnlyISO(j.closeDate);
         if (!cd) return false;
-        if (createdFrom && cd < createdFrom) return false;
-        if (createdTo && cd > createdTo) return false;
+        if (closedFrom && cd < closedFrom) return false;
+        if (closedTo && cd > closedTo) return false;
       }
       return true;
     });
@@ -308,13 +308,13 @@ export default function App() {
     const byStr = (a, b) => a.localeCompare(b);
     const sorters = {
       scheduled: (a, b) => byStr(a.scheduledDate || '9999-99', b.scheduledDate || '9999-99'),
-      createdNew: (a, b) => byStr(b.createdDate || '', a.createdDate || ''),
-      createdOld: (a, b) => byStr(a.createdDate || '9999', b.createdDate || '9999'),
+      closedNew: (a, b) => byStr(b.closeDate || '', a.closeDate || ''),
+      closedOld: (a, b) => byStr(a.closeDate || '9999', b.closeDate || '9999'),
       lid: (a, b) => String(a.lid || '').localeCompare(String(b.lid || ''), undefined, { numeric: true }),
       name: (a, b) => byStr(a.name, b.name),
     };
     return [...filtered].sort(sorters[sortBy] || sorters.scheduled);
-  }, [jobs, extraJobs, viewingTerminal, filter, query, jobTech, createdFrom, createdTo, sortBy]);
+  }, [jobs, extraJobs, viewingTerminal, filter, query, jobTech, closedFrom, closedTo, sortBy]);
 
   return (
     <>
@@ -360,10 +360,10 @@ export default function App() {
             </div>
 
             <div className="rangefilter">
-              <span className="rl">Created</span>
-              <input className="dateinput" type="date" value={createdFrom} onChange={(e) => setCreatedFrom(e.target.value)} title="Created from" />
+              <span className="rl">Closed</span>
+              <input className="dateinput" type="date" value={closedFrom} onChange={(e) => setClosedFrom(e.target.value)} title="Closed from" />
               <span className="dash">–</span>
-              <input className="dateinput" type="date" value={createdTo} onChange={(e) => setCreatedTo(e.target.value)} title="Created to" />
+              <input className="dateinput" type="date" value={closedTo} onChange={(e) => setClosedTo(e.target.value)} title="Closed to" />
               <select
                 className="ctlselect datepreset"
                 defaultValue=""
@@ -372,18 +372,18 @@ export default function App() {
                   e.target.value = '';
                   const today = new Date();
                   if (value === 'ytd') {
-                    setCreatedFrom(isoOf(startOfYear(today)));
-                    setCreatedTo(todayIso());
+                    setClosedFrom(isoOf(startOfYear(today)));
+                    setClosedTo(todayIso());
                   } else if (value === 'thisMonth') {
-                    setCreatedFrom(isoOf(startOfMonth(today)));
-                    setCreatedTo(todayIso());
+                    setClosedFrom(isoOf(startOfMonth(today)));
+                    setClosedTo(todayIso());
                   } else if (value === 'lastMonth') {
                     const start = startOfPreviousMonth(today);
                     const end = new Date(start);
                     end.setMonth(end.getMonth() + 1);
                     end.setDate(0);
-                    setCreatedFrom(isoOf(start));
-                    setCreatedTo(isoOf(end));
+                    setClosedFrom(isoOf(start));
+                    setClosedTo(isoOf(end));
                   }
                 }}
               >
@@ -394,20 +394,20 @@ export default function App() {
               </select>
               <button
                 className="clearrange"
-                onClick={() => { setCreatedFrom(''); setCreatedTo(''); }}
-                disabled={!createdFrom && !createdTo}
+                onClick={() => { setClosedFrom(''); setClosedTo(''); }}
+                disabled={!closedFrom && !closedTo}
               >Clear dates</button>
-              {!createdFrom && !createdTo && <span className="rangestate">showing all time</span>}
+              {!closedFrom && !closedTo && <span className="rangestate">showing all time</span>}
             </div>
-            <div className="datehint">Board loads opportunities by status; these dates only filter by Created Date.</div>
+            <div className="datehint">Board loads opportunities by status; these dates only filter by Closed Date.</div>
 
             <div className="sortbar">
               <label className="sortgrp">
                 <span className="rl">Sort</span>
                 <select className="ctlselect" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
                   <option value="scheduled">Scheduled date</option>
-                  <option value="createdNew">created — newest</option>
-                  <option value="createdOld">created — oldest</option>
+                  <option value="closedNew">closed — newest</option>
+                  <option value="closedOld">closed — oldest</option>
                   <option value="lid">LID</option>
                   <option value="name">Job name</option>
                 </select>
@@ -452,7 +452,7 @@ export default function App() {
                         </div>
                         <div className="meta">
                           <span><span className="ic">◍</span>{job.address || 'No address'}</span>
-                          {job.createdDate && <span className="created">Created {fmtCreated(job.createdDate)}</span>}
+                          {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}
                           {job.scheduledDate && <span className="created">Scheduled {fmtDate(job.scheduledDate)}</span>}
                         </div>
                         {job.assignments.length > 0 && (
@@ -486,7 +486,7 @@ export default function App() {
                       </div>
                       <div className="meta">
                         <span><span className="ic">◍</span>{job.address || 'No address'}</span>
-                        {job.createdDate && <span className="created">Created {fmtCreated(job.createdDate)}</span>}
+                        {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}
                         <span className="nextlabel">Next scheduled</span>
                         <input
                           className="dateinput"
@@ -524,10 +524,28 @@ export default function App() {
                             </div>
                           );
                         })}
-                        <select className="addtech" value="" onChange={(e) => e.target.value && assign(job, e.target.value)}>
-                          <option value="">+ Add assignment</option>
-                          {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                        </select>
+                        <div>
+                          <select className="addtech" value="" onChange={(e) => {
+                            const techId = e.target.value;
+                            if (!techId) return;
+                            e.target.value = '';
+                            setPendingAdd({ jobId: job.id, techId, date: job.scheduledDate || '' });
+                          }}>
+                            <option value="">+ Add assignment</option>
+                            {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                          </select>
+                          {pendingAdd.jobId === job.id && (
+                            <div className="inline-add">
+                              <input className="adate" type="date" value={pendingAdd.date || ''} onChange={(e) => setPendingAdd((p) => ({ ...p, date: e.target.value }))} />
+                              <button className="add-btn" onClick={async () => {
+                                const { techId, date } = pendingAdd;
+                                setPendingAdd({ jobId: null, techId: '', date: '' });
+                                await assign(job, techId, date || '');
+                              }}>Add</button>
+                              <button className="cancel-btn" onClick={() => setPendingAdd({ jobId: null, techId: '', date: '' })}>Cancel</button>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>

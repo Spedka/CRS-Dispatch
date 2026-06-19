@@ -78,6 +78,15 @@ main{padding:24px 26px 60px;max-width:1180px;margin:0 auto;}
 .addtech{font:inherit;font-size:12.5px;font-weight:500;color:var(--brand);background:var(--surface);border:1px dashed var(--line-strong);border-radius:999px;padding:5px 11px;cursor:pointer;}
 .addtech:hover{border-color:var(--brand-bright);}
 
+/* Inline add picker */
+.inline-add{display:inline-flex;align-items:center;gap:8px;margin-left:8px;}
+.inline-add .adate{padding:6px 8px;border-radius:8px;border:1px solid var(--line-strong);background:var(--surface);}
+.inline-add .add-btn,.inline-add .cancel-btn{font:inherit;font-size:12px;padding:6px 10px;border-radius:8px;border:none;cursor:pointer}
+.inline-add .add-btn{background:var(--brand);color:#fff}
+.inline-add .add-btn:hover{background:var(--brand-bright)}
+.inline-add .cancel-btn{background:transparent;color:var(--ink-faint);border:1px solid transparent}
+.inline-add .cancel-btn:hover{color:var(--ink);border-color:var(--line-strong)}
+
 .statussel{font:inherit;font-size:11px;font-weight:600;border:none;border-radius:6px;padding:3px 22px 3px 9px;cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%235C6776' stroke-width='1.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 6px center;}
 .statussel.emergency{color:var(--emergency);background-color:var(--emergency-bg);}
 .statussel.needs{color:var(--needs);background-color:var(--needs-bg);}

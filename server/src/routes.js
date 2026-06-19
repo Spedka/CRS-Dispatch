@@ -42,6 +42,12 @@ api.get('/jobs', async (c) => {
     const statuses = statusParam ? [statusParam] : config.jobStatusValues;
     const inList = statuses.map((s) => `'${esc(s)}'`).join(',');
 
+    // Default board: cap to the last 365 days (by Close Date) so we don't
+    // blow past the 2000-row first page. A specific ?status= request is an
+    // on-demand history pull and must NOT be capped.
+    const sinceClause = statusParam ? '' : `AND CloseDate >= LAST_N_DAYS:365`;
+    const excludeClause = `AND (${f.oppType} != 'Monitoring' OR ${f.oppType} = null)`;
+
     const soql = `
       SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}, ${f.oppScheduledDate}, CreatedDate, CloseDate,
              ${f.addrStreet}, ${f.addrCity},
@@ -49,6 +55,8 @@ api.get('/jobs', async (c) => {
               FROM ${o.assignmentChildRelationship})
       FROM Opportunity
       WHERE ${f.oppStatus} IN (${inList})
+      ${sinceClause}
+      ${excludeClause}
       ORDER BY ${f.oppScheduledDate} ASC NULLS LAST`;
 
     const records = await sf.query(soql);
@@ -75,6 +83,7 @@ api.patch('/jobs/:id', async (c) => {
     const sf = createSalesforce(c.env);
     const id = c.req.param('id');
     const body = await c.req.json();
+    const suppressRelease = !!body._suppressRelease;
 
     const allowed = { scheduledDate: f.oppScheduledDate, status: f.oppStatus };
     const payload = {};
@@ -97,7 +106,7 @@ api.patch('/jobs/:id', async (c) => {
 
     await sf.updateRecord('Opportunity', id, payload);
 
-    if (shouldReleaseCrew) {
+    if (shouldReleaseCrew && !suppressRelease) {
       const rows = await sf.query(
         `SELECT Id FROM ${o.assignment}
          WHERE ${o.assignmentOppLookup} = '${esc(id)}' AND ${o.assignmentCompleted} = false`
@@ -124,10 +133,40 @@ api.post('/jobs/:oppId/assignments', async (c) => {
       [o.assignmentOppLookup]: oppId,
       [o.assignmentTechLookup]: technicianId,
     };
-    if (workDate) fields[o.assignmentDate] = workDate;
+
+    // Only set the assignment date when the caller explicitly provides it.
+    // If `workDate` is present and is an empty string, store null (clear).
+    // If `workDate` is absent, leave the field off the payload so it remains unset.
+    if (typeof workDate !== 'undefined') {
+      fields[o.assignmentDate] = workDate === '' ? null : workDate;
+    }
 
     const result = await sf.createRecord(o.assignment, fields);
-    return c.json({ assignmentId: result.id });
+    const createdId = result && result.id;
+    console.log('[API] Created assignment', { oppId, technicianId, fields, resultId: createdId });
+
+    // Fetch the created assignment record so the client can receive the
+    // server-side stored values (Work_Date__c, Completed__c, Technician__r.Name).
+    let assignmentRec = null;
+    try {
+      const recs = await sf.query(
+        `SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentDate}, ${o.assignmentCompleted}, ${o.assignmentTechRelationship}.Name FROM ${o.assignment} WHERE Id='${esc(createdId)}'`
+      );
+      if (recs && recs[0]) {
+        const r = recs[0];
+        assignmentRec = {
+          assignmentId: r.Id,
+          technicianId: r[o.assignmentTechLookup],
+          technicianName: r[o.assignmentTechRelationship]?.Name ?? null,
+          workDate: r[o.assignmentDate] ?? null,
+          completed: r[o.assignmentCompleted] === true,
+        };
+      }
+    } catch (e) {
+      console.log('[API] Warning: could not fetch created assignment', e.message);
+    }
+
+    return c.json({ assignmentId: createdId, assignment: assignmentRec });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -145,6 +184,7 @@ api.patch('/assignments/:id', async (c) => {
     if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
 
     await sf.updateRecord(o.assignment, id, fields);
+    console.log('[API] Updated assignment', { id, fields });
     return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: e.message }, 500);

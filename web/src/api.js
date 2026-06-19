@@ -19,19 +19,26 @@ export const api = {
     }).then(j),
 
   addAssignment: (oppId, technicianId, workDate) =>
-    fetch(`/api/jobs/${oppId}/assignments`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ technicianId, workDate }),
-    }).then(j),
+    (function() {
+      const body = { technicianId, workDate };
+      try { console.log('[API] POST /api/jobs/' + oppId + '/assignments', body); } catch (e) {}
+      return fetch(`/api/jobs/${oppId}/assignments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(j);
+    })(),
 
   removeAssignment: (assignmentId) =>
     fetch(`/api/assignments/${assignmentId}`, { method: 'DELETE' }).then(j),
 
   updateAssignment: (assignmentId, fields) =>
-    fetch(`/api/assignments/${assignmentId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(fields),
-    }).then(j),
+    (function() {
+      try { console.log('[API] PATCH /api/assignments/' + assignmentId, fields); } catch (e) {}
+      return fetch(`/api/assignments/${assignmentId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields),
+      }).then(j);
+    })(),
 };
