@@ -9,11 +9,18 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/api/*"]
 
+[triggers]
+crons = ["*/5 * * * *"]
+
 [vars]
 # Client-credentials token endpoint = your My Domain (prod), NOT test.salesforce.com.
 SF_LOGIN_URL = "https://crsbuilding.my.salesforce.com"
 
 # Optional: second-layer token cache so cold isolates don't each re-auth.
-# [[kv_namespaces]]
-# binding = "SF_TOKENS"
-# id = "<your-kv-id>"
+[[kv_namespaces]]
+binding = "SF_TOKENS"
+id = "b9df8aade82f4f5c9b6f1b5c84f23eca"
+
+[observability.logs]
+enabled = false
+invocation_logs = true

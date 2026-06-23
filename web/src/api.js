@@ -32,6 +32,16 @@ export const api = {
   removeAssignment: (assignmentId) =>
     fetch(`/api/assignments/${assignmentId}`, { method: 'DELETE' }).then(j),
 
+  searchFsTasks: (q) =>
+    fetch(`/api/fs-search?q=${encodeURIComponent(q)}`).then(j),
+
+  linkFsTask: (oppId, fsTaskId) =>
+    fetch(`/api/jobs/${oppId}/fs-link`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fsTaskId }),
+    }).then(j),
+
   updateAssignment: (assignmentId, fields) =>
     (function() {
       try { console.log('[API] PATCH /api/assignments/' + assignmentId, fields); } catch (e) {}
@@ -41,4 +51,5 @@ export const api = {
         body: JSON.stringify(fields),
       }).then(j);
     })(),
+
 };

@@ -94,6 +94,7 @@ export default function App() {
   const [now, setNow] = useState(Date.now());
   const [pendingAdd, setPendingAdd] = useState({ jobId: null, techId: '', date: '', time: '' });
   const [selectedJobId, setSelectedJobId] = useState(null);
+  const [fsLink, setFsLink] = useState({ jobId: null, query: '', searching: false, matches: null, error: null });
   const [draftJob, setDraftJob] = useState(null);
   const [draftPendingAdd, setDraftPendingAdd] = useState({ techId: '', date: '', time: '' });
   const [modalSaving, setModalSaving] = useState(false);
@@ -292,9 +293,43 @@ export default function App() {
       ? prev.filter((j) => j.id !== job.id)
       : prev.map((j) => j.id === job.id ? { ...j, status } : j));
     try {
-      await track(() => api.updateJob(job.id, { status }));
-      flash(offBoard ? `${job.name} closed out` : 'Status updated');
+      const result = await track(() => api.updateJob(job.id, { status }));
+      if (offBoard) {
+        flash(`${job.name} closed out`);
+      } else if (result.fsUpdated) {
+        flash('Status updated · FS synced');
+      } else if (result.fsError) {
+        flash(`Salesforce updated · FS error: ${result.fsError}`);
+      } else {
+        flash('Status updated');
+      }
     } catch (e) { flash(`Could not update: ${e.message}`); load(true); }
+  };
+
+  const openFsLink = (jobId) => setFsLink({ jobId, query: '', searching: false, matches: null, error: null });
+  const closeFsLink = () => setFsLink({ jobId: null, query: '', searching: false, matches: null, error: null });
+
+  const searchFs = async () => {
+    if (fsLink.query.trim().length < 3) return;
+    setFsLink((s) => ({ ...s, searching: true, matches: null, error: null }));
+    try {
+      const { matches } = await api.searchFsTasks(fsLink.query.trim());
+      setFsLink((s) => ({ ...s, searching: false, matches }));
+    } catch (e) {
+      setFsLink((s) => ({ ...s, searching: false, error: e.message }));
+    }
+  };
+
+  const confirmFsLink = async (fsTaskId, fsTaskName) => {
+    const jobId = fsLink.jobId;
+    closeFsLink();
+    try {
+      await api.linkFsTask(jobId, fsTaskId);
+      setJobs((prev) => prev.map((j) => j.id === jobId ? { ...j, fsTaskId } : j));
+      flash(`Linked to "${fsTaskName}"`);
+    } catch (e) {
+      flash(`Link failed: ${e.message}`);
+    }
   };
 
   const saveModal = async () => {
@@ -522,6 +557,9 @@ export default function App() {
                         <div className="row1">
                           <span className="jname">{job.name}</span>
                           {job.lid && <span className="lidtag">LID {job.lid}</span>}
+                          {job.fsTaskId
+                            ? <span className="fs-badge linked" title={`FS task: ${job.fsTaskId}`}>⬡ FS</span>
+                            : <span className="fs-badge unlinked" title="No Field Squared task linked">⬡ FS</span>}
                           <span className={`badge ${statusClass(job.status)}`}>{job.status}</span>
                         </div>
                         <div className="meta">
@@ -549,6 +587,9 @@ export default function App() {
                       <div className="row1">
                         <span className="jname">{job.name}</span>
                         {job.lid && <span className="lidtag">LID {job.lid}</span>}
+                        {job.fsTaskId
+                          ? <span className="fs-badge linked" title={`FS task: ${job.fsTaskId}`}>⬡ FS</span>
+                          : <button className="fs-badge unlinked fs-attach-btn" title="Attach Field Squared job" onClick={() => fsLink.jobId === job.id ? closeFsLink() : openFsLink(job.id)}>⬡ Attach FS</button>}
                         <select
                           className={`statussel ${statusClass(job.status)}`}
                           value={job.status}
@@ -558,6 +599,36 @@ export default function App() {
                           {ASSIGNABLE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                         </select>
                       </div>
+                      {fsLink.jobId === job.id && (
+                        <div className="fs-attach-panel">
+                          <div className="fs-attach-row">
+                            <input
+                              className="fs-attach-input"
+                              type="text"
+                              placeholder="Type part of the FS job name…"
+                              value={fsLink.query}
+                              onChange={(e) => setFsLink((s) => ({ ...s, query: e.target.value }))}
+                              onKeyDown={(e) => e.key === 'Enter' && searchFs()}
+                              autoFocus
+                            />
+                            <button className="add-btn" onClick={searchFs} disabled={fsLink.searching || fsLink.query.trim().length < 3}>
+                              {fsLink.searching ? '…' : 'Search'}
+                            </button>
+                            <button className="cancel-btn" onClick={closeFsLink}>Cancel</button>
+                          </div>
+                          {fsLink.error && <div className="fs-attach-error">{fsLink.error}</div>}
+                          {fsLink.matches !== null && fsLink.matches.length === 0 && (
+                            <div className="fs-attach-empty">No FS tasks match that name.</div>
+                          )}
+                          {fsLink.matches && fsLink.matches.map((m) => (
+                            <div className="fs-attach-result" key={m.externalId}>
+                              <div className="fs-result-name">{m.name}</div>
+                              <div className="fs-result-meta">{m.taskType} · {m.status}</div>
+                              <button className="add-btn" onClick={() => confirmFsLink(m.externalId, m.name)}>Link</button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <div className="meta">
                         <span><span className="ic">◍</span>{job.address || 'No address'}</span>
                         {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}

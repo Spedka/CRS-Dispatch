@@ -6,12 +6,9 @@
 
 export const config = {
   salesforce: {
-    apiVersion: 'v60.0', // creds are read from env in salesforce.js now
+    apiVersion: 'v60.0',
   },
 
-  // Everything that stays on the board: the full lifecycle EXCEPT the terminal
-  // states (Billing Complete, Project Complete), which are set in Field Squared
-  // and are the only statuses that drop a job off "All outstanding".
   jobStatusValues: [
     'Pending Customer Approval',
     'Quoted',
@@ -26,32 +23,33 @@ export const config = {
   // ---- Opportunity (the job) field API names ----
   fields: {
     oppName: 'Name',
-    oppStatus: 'Project_Status__c',         // custom field holding the lifecycle values
-    oppScheduledDate: 'Scheduled_Project_Start_Date__c',  // custom Date field you add
-    oppLid: 'LID__c',                       // LID number shown on each job
-    // Opportunity has no native address. Pull from the related Account,
-    // or swap these for custom Opportunity address fields.
+    oppStatus: 'Project_Status__c',
+    oppScheduledDate: 'Scheduled_Project_Start_Date__c',
+    oppLid: 'LID__c',
     addrStreet: 'Account.ShippingStreet',
     addrCity: 'Account.ShippingCity',
     oppType: 'Opportunity_Type__c',
+
+    // ---- Field Squared integration ----
+    // External ID field on Opportunity — Text(50), External ID, Unique.
+    // Create in SF Setup → Object Manager → Opportunity → Fields & Relationships.
+    oppFsTaskId: 'FS_Task_Id__c',
+    // WO number field — used as tertiary match fallback.
+    oppWoNumber: 'WO_Number__c',
   },
 
-  // ---- Job_Assignment__c (junction: one tech on one job) ----
+  // ---- Job_Assignment__c ----
   objects: {
     assignment: 'Job_Assignment__c',
-    // Child relationship name on Opportunity for the lookup below.
-    // Set this in the lookup field's "Child Relationship Name" so the
-    // SOQL subquery `(SELECT ... FROM Job_Assignments__r)` resolves.
     assignmentChildRelationship: 'Job_Assignments__r',
-    assignmentOppLookup: 'Opportunity__c',  // lookup -> Opportunity
-    assignmentTechLookup: 'Technician__c',  // lookup -> Technician__c
-    assignmentTechRelationship: 'Technician__r', // for Technician__r.Name
-    assignmentDate: 'Work_Date__c',         // Date the tech is on this job
-    assignmentStartTime: 'Start_Time__c',   // Time the tech starts (HH:MM)
-    assignmentCompleted: 'Completed__c',    // checkbox: tech actually worked that day
+    assignmentOppLookup: 'Opportunity__c',
+    assignmentTechLookup: 'Technician__c',
+    assignmentTechRelationship: 'Technician__r',
+    assignmentDate: 'Work_Date__c',
+    assignmentStartTime: 'Start_Time__c',
+    assignmentCompleted: 'Completed__c',
 
-    // ---- Technician__c (your tech list) ----
     technician: 'Technician__c',
-    technicianActive: 'Active__c',          // checkbox; defaults true
+    technicianActive: 'Active__c',
   },
 };

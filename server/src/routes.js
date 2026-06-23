@@ -1,15 +1,16 @@
 import { Hono } from 'hono';
 import { config } from './config.js';
 import { createSalesforce } from './salesforce.js';
+import { createFs } from './fieldSquared.js';
+import { FS_TO_SF, SF_TO_FS } from './statusMap.js';
+import { runFsSync } from './fsSync.js';
 
 const f = config.fields;
 const o = config.objects;
 const esc = (s) => String(s).replace(/'/g, "\\'");
-// Salesforce Time fields return "HH:MM:SS.sssZ"; we surface "HH:MM" to the UI.
 const normTime = (v) => (v ? String(v).slice(0, 5) : null);
 const toSfTime = (hhmm) => (hhmm ? `${hhmm}:00.000Z` : null);
 
-// --- shapeJob is identical to your current version ---
 function shapeJob(r) {
   const child = r[o.assignmentChildRelationship];
   const assignments = child
@@ -34,6 +35,8 @@ function shapeJob(r) {
     closeDate: r.CloseDate ?? null,
     address,
     assignments,
+    // FS integration fields
+    fsTaskId: r[f.oppFsTaskId] ?? null,
   };
 }
 
@@ -45,17 +48,16 @@ api.get('/jobs', async (c) => {
     const statusParam = c.req.query('status');
     const statuses = statusParam ? [statusParam] : config.jobStatusValues;
     const inList = statuses.map((s) => `'${esc(s)}'`).join(',');
+    const sinceClause = statusParam  ? '' : `AND (CloseDate >= LAST_N_DAYS:365 OR CloseDate > TODAY)`;
 
-    // Default board: cap to the last 365 days (by Close Date) so we don't
-    // blow past the 2000-row first page. A specific ?status= request is an
-    // on-demand history pull and must NOT be capped.
-    const sinceClause = statusParam ? '' : `AND CloseDate >= LAST_N_DAYS:365`;
     const excludeClause = `AND (${f.oppType} != 'Monitoring' OR ${f.oppType} = null)`;
 
     const soql = `
-      SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}, ${f.oppScheduledDate}, CreatedDate, CloseDate,
+      SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}, ${f.oppScheduledDate},
+             ${f.oppFsTaskId}, CreatedDate, CloseDate,
              ${f.addrStreet}, ${f.addrCity},
-             (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name, ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}
+             (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
+                     ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}
               FROM ${o.assignmentChildRelationship})
       FROM Opportunity
       WHERE ${f.oppStatus} IN (${inList})
@@ -64,6 +66,7 @@ api.get('/jobs', async (c) => {
       ORDER BY ${f.oppScheduledDate} ASC NULLS LAST`;
 
     const records = await sf.query(soql);
+    c.executionCtx.waitUntil(runFsSync(c.env));
     return c.json(records.map(shapeJob));
   } catch (e) {
     return c.json({ error: e.message }, 500);
@@ -85,6 +88,7 @@ api.get('/technicians', async (c) => {
 api.patch('/jobs/:id', async (c) => {
   try {
     const sf = createSalesforce(c.env);
+    const fs = createFs(c.env);
     const id = c.req.param('id');
     const body = await c.req.json();
     const suppressRelease = !!body._suppressRelease;
@@ -98,14 +102,26 @@ api.patch('/jobs/:id', async (c) => {
       return c.json({ error: 'No writable fields in request' }, 400);
     }
 
+    // Pre-fetch current opp when we need scheduledDate crew-release check or FS write-through.
+    let previousSfStatus = null;
+    let fsTaskId = null;
     let shouldReleaseCrew = false;
-    if ('scheduledDate' in body) {
+
+    if ('scheduledDate' in body || 'status' in body) {
       const existing = await sf.query(
-        `SELECT ${f.oppScheduledDate} FROM Opportunity WHERE Id='${esc(id)}'`
+        `SELECT ${f.oppScheduledDate}, ${f.oppStatus}, ${f.oppFsTaskId}
+         FROM Opportunity WHERE Id = '${esc(id)}' LIMIT 1`
       );
-      const currentVal = existing && existing[0] ? existing[0][f.oppScheduledDate] ?? null : null;
-      const incomingVal = body.scheduledDate === '' ? null : body.scheduledDate;
-      if (currentVal !== incomingVal) shouldReleaseCrew = true;
+      const cur = existing?.[0];
+      if ('scheduledDate' in body) {
+        const curVal = cur?.[f.oppScheduledDate] ?? null;
+        const newVal = body.scheduledDate === '' ? null : body.scheduledDate;
+        if (curVal !== newVal) shouldReleaseCrew = true;
+      }
+      if ('status' in body) {
+        previousSfStatus = cur?.[f.oppStatus] ?? null;
+        fsTaskId = cur?.[f.oppFsTaskId] ?? null;
+      }
     }
 
     await sf.updateRecord('Opportunity', id, payload);
@@ -120,7 +136,24 @@ api.patch('/jobs/:id', async (c) => {
       ));
     }
 
-    return c.json({ ok: true });
+    let fsUpdated = false;
+    let fsError = null;
+
+    if ('status' in body && fsTaskId) {
+      try {
+        const task = await fs.getTask(fsTaskId);
+        const fsStatus = SF_TO_FS[body.status];
+        if (fsStatus) {
+          await fs.updateStatus(fsTaskId, task.Name, task.TaskType, fsStatus);
+          fsUpdated = true;
+        }
+      } catch (fsErr) {
+        console.error('[routes] FS write failed (SF kept):', fsErr.message);
+        fsError = fsErr.message;
+      }
+    }
+
+    return c.json({ ok: true, fsUpdated, fsError });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -138,26 +171,21 @@ api.post('/jobs/:oppId/assignments', async (c) => {
       [o.assignmentTechLookup]: technicianId,
       [o.assignmentStartTime]: toSfTime(startTime || '07:00'),
     };
-
-    // Only set the assignment date when the caller explicitly provides it.
-    // If `workDate` is present and is an empty string, store null (clear).
-    // If `workDate` is absent, leave the field off the payload so it remains unset.
     if (typeof workDate !== 'undefined') {
       fields[o.assignmentDate] = workDate === '' ? null : workDate;
     }
 
     const result = await sf.createRecord(o.assignment, fields);
-    const createdId = result && result.id;
-    console.log('[API] Created assignment', { oppId, technicianId, fields, resultId: createdId });
+    const createdId = result?.id;
 
-    // Fetch the created assignment record so the client can receive the
-    // server-side stored values (Work_Date__c, Completed__c, Technician__r.Name).
     let assignmentRec = null;
     try {
       const recs = await sf.query(
-        `SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}, ${o.assignmentTechRelationship}.Name FROM ${o.assignment} WHERE Id='${esc(createdId)}'`
+        `SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentDate}, ${o.assignmentStartTime},
+                ${o.assignmentCompleted}, ${o.assignmentTechRelationship}.Name
+         FROM ${o.assignment} WHERE Id='${esc(createdId)}'`
       );
-      if (recs && recs[0]) {
+      if (recs?.[0]) {
         const r = recs[0];
         assignmentRec = {
           assignmentId: r.Id,
@@ -191,7 +219,6 @@ api.patch('/assignments/:id', async (c) => {
     if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
 
     await sf.updateRecord(o.assignment, id, fields);
-    console.log('[API] Updated assignment', { id, fields });
     return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: e.message }, 500);
@@ -203,6 +230,43 @@ api.delete('/assignments/:id', async (c) => {
     const sf = createSalesforce(c.env);
     await sf.deleteRecord(o.assignment, c.req.param('id'));
     return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Search FS tasks by name fragment — used by the manual-link UI on the board.
+api.get('/fs-search', async (c) => {
+  try {
+    const q = c.req.query('q')?.trim();
+    if (!q || q.length < 3) return c.json({ error: 'Query must be at least 3 characters' }, 400);
+
+    const fs = createFs(c.env);
+    const since = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
+    const tasks = await fs.listModified(since);
+
+    const lower = q.toLowerCase();
+    const matches = tasks
+      .filter((t) => t.Name && t.Name.toLowerCase().includes(lower))
+      .slice(0, 15)
+      .map((t) => ({ externalId: t.ExternalId, name: t.Name, status: t.Status, taskType: t.TaskType }));
+
+    return c.json({ matches });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Manually stamp an FS task ID onto a SF opportunity.
+api.post('/jobs/:id/fs-link', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const id = c.req.param('id');
+    const { fsTaskId } = await c.req.json();
+    if (!fsTaskId) return c.json({ error: 'fsTaskId required' }, 400);
+
+    await sf.updateRecord('Opportunity', id, { [f.oppFsTaskId]: fsTaskId });
+    return c.json({ ok: true, fsTaskId });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }

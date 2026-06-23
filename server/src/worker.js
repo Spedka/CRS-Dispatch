@@ -1,7 +1,17 @@
 import { Hono } from 'hono';
 import { api } from './routes.js';
+import { runFsSync } from './fsSync.js';
 
 const app = new Hono();
 app.route('/api', api);
 
-export default app; // Hono exposes { fetch }, which is the Worker entrypoint
+export default {
+  // HTTP requests — handled by Hono as before.
+  fetch: app.fetch.bind(app),
+
+  // Cron trigger — fires every 5 minutes (configure in wrangler.toml).
+  // Runs the FS ↔ SF status reconcile.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runFsSync(env));
+  },
+};
