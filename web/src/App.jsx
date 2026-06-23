@@ -70,8 +70,6 @@ function deriveJobStatusFromAssignments(job) {
   const assignments = job.assignments || [];
   const nextDate = nextScheduledAssignmentDate(job);
   if (nextDate) return { status: 'Scheduled', scheduledDate: nextDate };
-  if (assignments.length === 0) return { status: 'Ready to be scheduled', scheduledDate: '' };
-  if (assignments.every((a) => a.completed)) return { status: 'Installation Complete', scheduledDate: '' };
   return { status: 'Ready to be scheduled', scheduledDate: '' };
 }
 
@@ -238,6 +236,7 @@ export default function App() {
       await track(() => api.updateAssignment(a.assignmentId, { workDate: date }));
       await track(() => api.updateJob(job.id, { status, scheduledDate, _suppressRelease: true }));
       flash('Assignment date saved');
+      await load(true);
     } catch (e) { flash(`Could not save date: ${e.message}`); load(true); }
   };
 
@@ -250,6 +249,7 @@ export default function App() {
     setJobs((prev) => prev.map((j) => j.id === job.id ? updatedJob : j));
     try {
       await track(() => api.updateAssignment(a.assignmentId, { startTime: t }));
+      await load(true);
     } catch (e) { flash(`Could not save time: ${e.message}`); load(true); }
   };
 
@@ -324,9 +324,15 @@ export default function App() {
     const jobId = fsLink.jobId;
     closeFsLink();
     try {
-      await api.linkFsTask(jobId, fsTaskId);
-      setJobs((prev) => prev.map((j) => j.id === jobId ? { ...j, fsTaskId } : j));
-      flash(`Linked to "${fsTaskName}"`);
+      const result = await api.linkFsTask(jobId, fsTaskId);
+      // Reload to pick up the reconciled status and any synced assignments
+      await load(true);
+      const parts = [`Linked to "${fsTaskName}"`];
+      if (result.assignmentsAdded > 0) {
+        parts.push(`${result.assignmentsAdded} tech${result.assignmentsAdded > 1 ? 's' : ''} added`);
+      }
+      if (result.sfStatus) parts.push(`status → ${result.sfStatus}`);
+      flash(parts.join(' · '));
     } catch (e) {
       flash(`Link failed: ${e.message}`);
     }
@@ -601,6 +607,10 @@ export default function App() {
                       </div>
                       {fsLink.jobId === job.id && (
                         <div className="fs-attach-panel">
+                          <div className="fs-attach-header">
+                            <span className="fs-attach-title">Search Field Squared</span>
+                            <button className="fs-attach-close" onClick={closeFsLink} aria-label="Close">×</button>
+                          </div>
                           <div className="fs-attach-row">
                             <input
                               className="fs-attach-input"
@@ -611,20 +621,21 @@ export default function App() {
                               onKeyDown={(e) => e.key === 'Enter' && searchFs()}
                               autoFocus
                             />
-                            <button className="add-btn" onClick={searchFs} disabled={fsLink.searching || fsLink.query.trim().length < 3}>
+                            <button className="fs-btn-search" onClick={searchFs} disabled={fsLink.searching || fsLink.query.trim().length < 3}>
                               {fsLink.searching ? '…' : 'Search'}
                             </button>
-                            <button className="cancel-btn" onClick={closeFsLink}>Cancel</button>
                           </div>
                           {fsLink.error && <div className="fs-attach-error">{fsLink.error}</div>}
                           {fsLink.matches !== null && fsLink.matches.length === 0 && (
-                            <div className="fs-attach-empty">No FS tasks match that name.</div>
+                            <div className="fs-attach-empty">No FS tasks found with that name.</div>
                           )}
                           {fsLink.matches && fsLink.matches.map((m) => (
                             <div className="fs-attach-result" key={m.externalId}>
-                              <div className="fs-result-name">{m.name}</div>
-                              <div className="fs-result-meta">{m.taskType} · {m.status}</div>
-                              <button className="add-btn" onClick={() => confirmFsLink(m.externalId, m.name)}>Link</button>
+                              <div className="fs-result-info">
+                                <div className="fs-result-name">{m.name}</div>
+                                <div className="fs-result-meta">{m.taskType} · {m.status}</div>
+                              </div>
+                              <button className="fs-btn-link" onClick={() => confirmFsLink(m.externalId, m.name)}>Link</button>
                             </div>
                           ))}
                         </div>
@@ -690,6 +701,7 @@ export default function App() {
                           </select>
                           {pendingAdd.jobId === job.id && (
                             <div className="inline-add">
+                              <span className="pending-tech">{techs.find((t) => t.id === pendingAdd.techId)?.name}</span>
                               <input className="adate" type="date" value={pendingAdd.date || ''} onChange={(e) => setPendingAdd((p) => ({ ...p, date: e.target.value }))} />
                               <input className="atime" type="time" value={pendingAdd.time || '07:00'} onChange={(e) => setPendingAdd((p) => ({ ...p, time: e.target.value }))} title="Start time" />
                               <button className="add-btn" onClick={async () => {
@@ -960,7 +972,7 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick }) {
     const m = {};
     jobs.forEach((job) => job.assignments.forEach((a) => {
       if (!a.workDate) return; // unscheduled assignment — not on the calendar
-      ((m[a.technicianId] ||= {})[a.workDate] ||= []).push({ name: job.name, startTime: a.startTime || '07:00', jobId: job.id });
+      ((m[a.technicianId] ||= {})[a.workDate] ||= []).push({ name: job.name, startTime: a.startTime || '07:00', jobId: job.id, completed: !!a.completed });
     }));
     // sort each cell by start time
     Object.values(m).forEach((byDate) =>
@@ -994,7 +1006,8 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick }) {
                     {items.length === 0
                       ? <span className="free">✓ Open</span>
                       : items.map((item, i) => (
-                          <div className="jchip" key={i} onClick={() => onJobClick(item.jobId)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(item.jobId)}>
+                          <div className={`jchip${item.completed ? ' done' : ''}`} key={i} onClick={() => onJobClick(item.jobId)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(item.jobId)}>
+                            {item.completed && <span className="jdone-mark" title="Worked">✓</span>}
                             <span className="jtime">{item.startTime}</span>
                             {item.name.split('—')[0].trim()}
                           </div>

@@ -76,6 +76,17 @@ export function areEquivalent(fsStatus, sfStatus) {
 }
 
 /**
+ * SF stage → FS status with assignment awareness.
+ * "Scheduled" maps to "Assigned" in FS when the job has at least one tech
+ * assigned — "Assigned" in FS means techs are booked, "Scheduled" means the
+ * date is set but no one is attached yet.
+ */
+export function sfToFsStatus(sfStatus, hasAssignments) {
+  if (sfStatus === 'Scheduled' && hasAssignments) return 'Assigned';
+  return SF_TO_FS[sfStatus] ?? null;
+}
+
+/**
  * Decide what (if anything) to write given the current status on each side.
  *
  * Returns one of:

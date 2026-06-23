@@ -38,6 +38,22 @@ export const config = {
     oppWoNumber: 'WO_Number__c',
   },
 
+  // FS user ObjectId → SF technician name.
+  // Excludes Account Services (FL9_cUxsT0OmJLSNE9070w) and Paul Aldridge
+  // (1bxTwRMv2dt6hpNYrZMI-QAA-Q) — not field techs, not synced.
+  fsTechUsers: {
+    'Vy7n4YPQsEa-pjadx4BAGA':     'Pedro Ortiz',
+    'GemUv2xBrz3B9r8zIaKTJAAAJA': 'Mike Ellenburg',
+    'ICA8ug9SUEGTj5jtgOA-ew':     'Perry Floyd',
+    'JnO4ynVJ-EuO73og_pdGFw':     'Joseph Wyatt',
+    '7b1I9-cJ4UK0slqoKZIPGQ':     'Jay Ebeling',
+    'lGUm5YLzTEmfuY6mNZ2R2QAA2Q': 'Mason Ebeling',
+    'EhHzICfmtUG6YTGPt1Y5wQ':     'Gabor Fogarasi',
+    'F68pM1uEZ0is351UcbPrVg':     'Casey Berrier',
+    'fGIGr86tOft4m2VPMlGTZQAAZQ': 'Skip Cashion',
+    'UnYYVeGKq-9AeErKQAIl6AAA6A': 'Adrian Van Luven',
+  },
+
   // ---- Job_Assignment__c ----
   objects: {
     assignment: 'Job_Assignment__c',

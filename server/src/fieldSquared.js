@@ -125,5 +125,38 @@ export function createFs(env) {
     return true;
   }
 
-  return { getToken, getTask, listModified, updateStatus };
+  /**
+   * Replace the Users array on a task.
+   * Pass the full desired array — FS treats this as an absolute set (not a delta).
+   * Name and TaskType are required by FS even for partial updates.
+   */
+  async function updateUsers(externalId, name, taskType, userIds) {
+    const res = await fsFetch(`/api/task/${externalId}`, {
+      method: 'POST',
+      body: JSON.stringify({ Name: name, TaskType: taskType, Users: userIds }),
+    });
+    const errHeader = res.headers.get('x-errorstatusmessage');
+    if (errHeader) throw new Error(errHeader);
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    return true;
+  }
+
+  /**
+   * General-purpose task patch. Takes the full task object from getTask(), merges
+   * `fields` into it, and POSTs the complete object back to /Task/{externalId} —
+   * the same endpoint the FS web app uses. Required for Schedules updates; the
+   * /api/task endpoint silently ignores the Schedules field.
+   */
+  async function patchTask(externalId, fullTask, fields) {
+    const res = await fsFetch(`/Task/${externalId}`, {
+      method: 'POST',
+      body: JSON.stringify({ ...fullTask, ...fields, BasedOn: fullTask.VersionId }),
+    });
+    const errHeader = res.headers.get('x-errorstatusmessage');
+    if (errHeader) throw new Error(errHeader);
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    return true;
+  }
+
+  return { getToken, getTask, listModified, updateStatus, updateUsers, patchTask };
 }
