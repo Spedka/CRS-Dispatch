@@ -447,15 +447,17 @@ api.delete('/assignments/:id', async (c) => {
 
     // Pre-fetch tech name + opp ID before deleting so we can sync the removal to FS.
     let techName = null;
+    let techId = null;
     let oppId = null;
     try {
       const rows = await sf.query(
-        `SELECT ${o.assignmentOppLookup}, ${o.assignmentTechRelationship}.Name
+        `SELECT ${o.assignmentOppLookup}, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name
          FROM ${o.assignment} WHERE Id = '${esc(id)}' LIMIT 1`
       );
       if (rows[0]) {
         techName = rows[0][o.assignmentTechRelationship]?.Name ?? null;
-        oppId = rows[0][o.assignmentOppLookup] ?? null;
+        techId   = rows[0][o.assignmentTechLookup] ?? null;
+        oppId    = rows[0][o.assignmentOppLookup] ?? null;
       }
     } catch (e) {
       console.warn('[routes] Could not pre-fetch assignment for FS sync:', e.message);
@@ -475,15 +477,19 @@ api.delete('/assignments/:id', async (c) => {
         if (fsTaskId) {
           const task = await fs.getTask(fsTaskId);
           const toId = (u) => (typeof u === 'string' ? u : u?.ObjectId ?? null);
-          const updatedUsers = (Array.isArray(task.Users) ? task.Users : [])
-            .map(toId).filter(uid => uid && uid !== fsUserId);
 
-          // Mirror the board's next scheduled date. Query runs after sf.deleteRecord
-          // so the removed assignment is already gone.
+          // Query runs after sf.deleteRecord so the removed assignment is gone.
+          // Include tech ID so we can check whether this tech still has other assignments.
           const remaining = await sf.query(
-            `SELECT ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}
+            `SELECT ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted},
+                    ${o.assignmentTechLookup}
              FROM ${o.assignment} WHERE ${o.assignmentOppLookup} = '${esc(oppId)}'`
           );
+
+          // Only remove the FS user if they have no remaining assignments on this job.
+          const techStillAssigned = remaining.some(a => a[o.assignmentTechLookup] === techId);
+          const updatedUsers = (Array.isArray(task.Users) ? task.Users : [])
+            .map(toId).filter(uid => uid && (uid !== fsUserId || techStillAssigned));
           const next = remaining
             .filter(a => a[o.assignmentDate] && !a[o.assignmentCompleted])
             .sort((a, b) => {
