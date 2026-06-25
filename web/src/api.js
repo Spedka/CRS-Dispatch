@@ -18,16 +18,14 @@ export const api = {
       body: JSON.stringify(fields),
     }).then(j),
 
-  addAssignment: (oppId, technicianId, workDate, startTime) =>
-    (function() {
-      const body = { technicianId, workDate, startTime };
-      try { console.log('[API] POST /api/jobs/' + oppId + '/assignments', body); } catch (e) {}
-      return fetch(`/api/jobs/${oppId}/assignments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }).then(j);
-    })(),
+  // status and scheduledDate are optional — when provided the server also updates
+  // the SF Opportunity in the same request, eliminating a second round-trip.
+  addAssignment: (oppId, technicianId, workDate, startTime, status, scheduledDate) =>
+    fetch(`/api/jobs/${oppId}/assignments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ technicianId, workDate, startTime, status, scheduledDate }),
+    }).then(j),
 
   removeAssignment: (assignmentId) =>
     fetch(`/api/assignments/${assignmentId}`, { method: 'DELETE' }).then(j),
@@ -43,13 +41,10 @@ export const api = {
     }).then(j),
 
   updateAssignment: (assignmentId, fields) =>
-    (function() {
-      try { console.log('[API] PATCH /api/assignments/' + assignmentId, fields); } catch (e) {}
-      return fetch(`/api/assignments/${assignmentId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(fields),
-      }).then(j);
-    })(),
+    fetch(`/api/assignments/${assignmentId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+    }).then(j),
 
 };

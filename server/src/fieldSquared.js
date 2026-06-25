@@ -61,11 +61,11 @@ export function createFs(env) {
     const res = await fetch(`${FS_BASE}/${workspace}${path}`, {
       ...options,
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json;charset=UTF-8',
         Accept: 'application/json',
         'X-Workspace': workspace,
         'X-Auth-Token': token,
-        'X-Client': '3',
+        'X-Client': env.FS_CLIENT || '568',
         ...(options.headers || {}),
       },
     });
@@ -147,37 +147,36 @@ export function createFs(env) {
    * the same endpoint the FS web app uses. Required for Schedules updates; the
    * /api/task endpoint silently ignores the Schedules field.
    */
-  async function patchTask(externalId, fullTask, fields, _retried = false) {
-    // UsersExtended is a derived field — FS rejects updates when it doesn't match
-    // the new Users array. Strip it and let FS recompute it from Users.
-    const { UsersExtended, ...taskBody } = fullTask;
-    const bodyObj = { ...taskBody, ...fields, BasedOn: fullTask.VersionId };
-    console.log('[patchTask] sending', {
-      externalId,
-      attempt: _retried ? 'retry' : 'first',
-      VersionId: fullTask.VersionId,
-      fieldsKeys: Object.keys(fields),
-      fieldsStatus: fields.Status ?? null,
-      fieldsUsers: fields.Users ?? null,
-      taskUsers: fullTask.Users ?? null,
-      scheduleStart: fields.Schedules?.[0]?.Start ?? null,
-      hasUsersExtendedInBody: 'UsersExtended' in bodyObj,
-    });
+  async function patchTask(externalId, fullTask, fields) {
+    // getTask() returns ExternalId: "" (blank) — FS uses ExternalId as the upsert
+    // key and rejects a POST where it's an explicit empty string. Populate it from
+    // the URL parameter (same value as ObjectId on a linked task).
+    // BasedOn = the VersionId we read from; FS uses it for optimistic concurrency.
+    const bodyObj = {
+      ...fullTask,
+      ...fields,
+      ExternalId: externalId,
+      BasedOn: fullTask.VersionId,
+    };
+
     const res = await fsFetch(`/Task/${externalId}`, {
       method: 'POST',
       body: JSON.stringify(bodyObj),
     });
+
     const errHeader = res.headers.get('x-errorstatusmessage');
-    if (errHeader === 'Save Failed' && !_retried) {
-      const fresh = await getTask(externalId);
-      console.warn('[patchTask] Save Failed on first attempt — retrying with fresh VersionId', { externalId, oldVersionId: fullTask.VersionId, newVersionId: fresh.VersionId });
-      return patchTask(externalId, fresh, fields, true);
+    const raw = await res.text();
+
+    if (errHeader || !res.ok) {
+      console.error('[patchTask] FS rejected', {
+        externalId,
+        httpStatus: res.status,
+        errHeader,
+        responseBody: raw.slice(0, 500),
+      });
+      throw new Error(errHeader || `${res.status} ${raw}`);
     }
-    if (errHeader) {
-      console.error('[patchTask] Save Failed', { externalId, attempt: _retried ? 'retry' : 'first', httpStatus: res.status });
-      throw new Error(errHeader);
-    }
-    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+
     return true;
   }
 

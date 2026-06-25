@@ -177,20 +177,18 @@ export default function App() {
   const assign = async (job, technicianId, workDate, startTime = '07:00') => {
     const tech = techs.find((t) => t.id === technicianId);
     try {
-        console.debug('[APP] assign()', { oppId: job.id, technicianId, workDate, startTime });
-        const resp = await track(() => api.addAssignment(job.id, technicianId, workDate, startTime));
+      // Compute derived status before the call so the server can update the SF Opp
+      // in the same request — eliminating the separate updateJob round-trip.
+      const tentative = { ...job, assignments: [...job.assignments, { workDate, completed: false }] };
+      const derived = deriveJobStatusFromAssignments(tentative);
+      const resp = await track(() => api.addAssignment(job.id, technicianId, workDate, startTime, derived.status, derived.scheduledDate));
       const assignmentId = resp.assignmentId;
       const created = resp.assignment;
-      const newAssignment = created ?
-        { assignmentId: created.assignmentId, technicianId: created.technicianId, technicianName: created.technicianName, workDate: created.workDate, startTime: created.startTime || '07:00', completed: created.completed }
+      const newAssignment = created
+        ? { assignmentId: created.assignmentId, technicianId: created.technicianId, technicianName: created.technicianName, workDate: created.workDate, startTime: created.startTime || '07:00', completed: created.completed }
         : { assignmentId, technicianId, technicianName: tech?.name, workDate: workDate || null, startTime: startTime || '07:00', completed: false };
-      const updated = {
-        ...job,
-        assignments: [...job.assignments, newAssignment],
-      };
-      const derived = deriveJobStatusFromAssignments(updated);
+      const updated = { ...job, assignments: [...job.assignments, newAssignment] };
       setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updated, ...derived } : j));
-      await track(() => api.updateJob(job.id, { ...derived, _suppressRelease: true }));
       flash(`${tech?.name} added to ${job.name}`);
     } catch (e) { flash(`Could not assign: ${e.message}`); }
   };
