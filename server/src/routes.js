@@ -39,22 +39,17 @@ function toFsDateTime(dateStr, localTime) {
 // (ObjectId, Users, Teams, Data, TimeZone) so the server can match the record.
 // Pass null/empty isoDate to return [] which unschedules the task.
 function buildFsSchedules(task, isoDate, localTime = '08:00') {
-  if (!isoDate) return [];
+  if (!isoDate) return null;
   const start = toFsDateTime(isoDate, localTime);
   const h = parseInt(start.slice(11, 13), 10);
   const end = start.slice(0, 11) + String((h + 1) % 24).padStart(2, '0') + start.slice(13);
   const existing = Array.isArray(task.Schedules) ? task.Schedules[0] : null;
-  return [{
-    '__type': 'Field2Office.API.Model.Schedules.Schedule, Field2Office',
-    Workspace: task.Workspace,
-    ...(existing?.ObjectId ? { ObjectId: existing.ObjectId } : {}),
-    Start: start,
-    End: end,
-    Users: existing?.Users ?? [],
-    Teams: existing?.Teams ?? [],
-    Data: existing?.Data ?? {},
-    TimeZone: existing?.TimeZone ?? '',
-  }];
+  if (existing) {
+    // Spread existing to preserve ObjectId and all FS metadata — only update times.
+    return [{ ...existing, Start: start, End: end }];
+  }
+  // New schedule: no __type, no Workspace — just the fields FS accepts.
+  return [{ Start: start, End: end, Users: [], Teams: [], Data: {}, TimeZone: '' }];
 }
 
 function shapeJob(r) {
@@ -112,7 +107,6 @@ api.get('/jobs', async (c) => {
       ORDER BY ${f.oppScheduledDate} ASC NULLS LAST`;
 
     const records = await sf.query(soql);
-    c.executionCtx.waitUntil(runFsSync(c.env));
     return c.json(records.map(shapeJob));
   } catch (e) {
     return c.json({ error: e.message }, 500);
@@ -215,7 +209,8 @@ api.patch('/jobs/:id', async (c) => {
               if (asgn[0]?.[o.assignmentStartTime]) assignTime = asgn[0][o.assignmentStartTime];
             } catch (_) {}
           }
-          fsPatch.Schedules = buildFsSchedules(task, body.scheduledDate, assignTime);
+          const sched = buildFsSchedules(task, body.scheduledDate, assignTime);
+          if (sched) fsPatch.Schedules = sched;
         }
 
         if (Object.keys(fsPatch).length > 0) {
@@ -276,39 +271,47 @@ api.post('/jobs/:oppId/assignments', async (c) => {
     }
 
     // Sync new assignment to FS if the job has a linked FS task
+    const fsDebug = { techName: assignmentRec?.technicianName ?? null, fsUserId: null, fsTaskId: null, patch: null, error: null };
     if (assignmentRec?.technicianName) {
       const fsUserId = fsUserByTechName[assignmentRec.technicianName];
+      fsDebug.fsUserId = fsUserId ?? `NOT IN MAP (name="${assignmentRec.technicianName}")`;
       if (fsUserId) {
+        let fsTaskId = null;
         try {
           const fs = createFs(c.env);
           const opps = await sf.query(
             `SELECT ${f.oppFsTaskId}, ${f.oppScheduledDate}
              FROM Opportunity WHERE Id = '${esc(oppId)}' LIMIT 1`
           );
-          const fsTaskId = opps[0]?.[f.oppFsTaskId];
+          fsTaskId = opps[0]?.[f.oppFsTaskId];
+          fsDebug.fsTaskId = fsTaskId ?? 'NULL (not linked)';
           if (fsTaskId) {
             const task = await fs.getTask(fsTaskId);
-            const currentUsers = Array.isArray(task.Users) ? task.Users : [];
+            const toId = (u) => (typeof u === 'string' ? u : u?.ObjectId ?? null);
+            const currentUserIds = (Array.isArray(task.Users) ? task.Users : []).map(toId).filter(Boolean);
             const patch = {};
-            if (!currentUsers.includes(fsUserId)) {
-              patch.Users = [...currentUsers, fsUserId];
+            if (!currentUserIds.includes(fsUserId)) {
+              // Keep original Users format (may be objects) — /Task endpoint handles mixed arrays.
+              patch.Users = [...(task.Users ?? []), fsUserId];
             }
-            // Use the assignment's actual work date + start time for the FS schedule.
             const assignDate = workDate || opps[0]?.[f.oppScheduledDate];
             if (assignDate) {
-              patch.Schedules = buildFsSchedules(task, assignDate, startTime || '08:00');
+              const sched = buildFsSchedules(task, assignDate, startTime || '08:00');
+              if (sched) patch.Schedules = sched;
             }
+            fsDebug.patch = Object.keys(patch);
             if (Object.keys(patch).length > 0) {
               await fs.patchTask(fsTaskId, task, patch);
             }
           }
         } catch (fsErr) {
-          console.error('[routes] FS assign failed (SF kept):', fsErr.message);
+          console.error('[routes] FS assign failed (SF kept):', fsErr.message, { fsTaskId });
+          fsDebug.error = fsErr.message;
         }
       }
     }
 
-    return c.json({ assignmentId: createdId, assignment: assignmentRec });
+    return c.json({ assignmentId: createdId, assignment: assignmentRec, fsDebug });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -367,7 +370,9 @@ api.delete('/assignments/:id', async (c) => {
         const fsTaskId = opps[0]?.[f.oppFsTaskId];
         if (fsTaskId) {
           const task = await fs.getTask(fsTaskId);
-          const updatedUsers = (Array.isArray(task.Users) ? task.Users : []).filter(u => u !== fsUserId);
+          const toId = (u) => (typeof u === 'string' ? u : u?.ObjectId ?? null);
+          // Filter by normalized ID but keep original format (objects/strings) for /Task endpoint.
+          const updatedUsers = (Array.isArray(task.Users) ? task.Users : []).filter(u => toId(u) !== fsUserId);
           await fs.patchTask(fsTaskId, task, { Users: updatedUsers });
         }
       } catch (fsErr) {
@@ -492,7 +497,8 @@ api.post('/jobs/:id/fs-link', async (c) => {
       if (targetFsStatus) fsPatch.Status = targetFsStatus;
       if (sfOpp[f.oppScheduledDate]) {
         const firstTime = existingAssignments[0]?.[o.assignmentStartTime] ?? '08:00';
-        fsPatch.Schedules = buildFsSchedules(fullTask, sfOpp[f.oppScheduledDate], firstTime);
+        const sched = buildFsSchedules(fullTask, sfOpp[f.oppScheduledDate], firstTime);
+        if (sched) fsPatch.Schedules = sched;
       }
       if (Object.keys(fsPatch).length > 0) {
         await fs.patchTask(fsTaskId, fullTask, fsPatch);

@@ -165,9 +165,13 @@ export async function runFsSync(env) {
         }
       }
 
-      // FS users filtered to syncable techs only
+      // FS users filtered to syncable techs only.
+      // getTask() may return Users as objects {ObjectId, Name, ...} or plain strings —
+      // normalize to string IDs before comparing.
+      const toFsId = (u) => (typeof u === 'string' ? u : u?.ObjectId ?? null);
       const fsUserIds = new Set(
-        (Array.isArray(fullTask.Users) ? fullTask.Users : []).filter(uid => uid in fsTechUsers)
+        (Array.isArray(fullTask.Users) ? fullTask.Users : [])
+          .map(toFsId).filter(uid => uid && uid in fsTechUsers)
       );
 
       const sfAssignedByName = new Map(
