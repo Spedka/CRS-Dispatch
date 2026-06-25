@@ -9,7 +9,7 @@ const STATUS_CLASS = {
   'Ready to be scheduled': 'needs',   // amber — needs a tech assigned
   'Scheduled': 'scheduled',           // blue — booked
   'In Progress': 'dispatched',        // indigo — tech on site
-  'Installation Complete': 'dispatched',
+  'Installation Completed': 'dispatched',
   'Waiting on Payment': 'emergency',  // red — done, awaiting payment
   'Billing Complete': 'scheduled',
   'Project Complete': 'scheduled',
@@ -23,7 +23,7 @@ const TERMINAL_STATUSES = ['Billing Complete', 'Project Complete'];
 // Everything that stays on the board (mirrors config.jobStatusValues).
 const BOARD_STATUSES = [
   'Pending Customer Approval', 'Quoted', 'Parts Ordered', 'Ready to be scheduled',
-  'Scheduled', 'In Progress', 'Installation Complete', 'Waiting on Payment',
+  'Scheduled', 'In Progress', 'Installation Completed', 'Waiting on Payment',
 ];
 // A dispatcher can set any board status. Billing/Project Complete are excluded —
 // those happen in Field Squared. Strings must match the Salesforce picklist EXACTLY.

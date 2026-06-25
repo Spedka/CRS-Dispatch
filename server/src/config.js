@@ -16,7 +16,7 @@ export const config = {
     'Ready to be scheduled',
     'Scheduled',
     'In Progress',
-    'Installation Complete',
+    'Installation Completed',
     'Waiting on Payment',
   ],
 
