@@ -566,6 +566,115 @@ api.get('/fs-search', async (c) => {
   }
 });
 
+// Returns every field on Account with its API name, label, and type.
+// Hit this once to know what you can query.
+api.get('/test/account-fields', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const describe = await sf.raw('/sobjects/Account/describe');
+    const fields = describe.fields.map((f) => ({
+      name: f.name,
+      label: f.label,
+      type: f.type,
+      custom: f.custom,
+    }));
+    return c.json({ total: fields.length, fields });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Returns 5 raw Account records with nested Contacts so you can see
+// the actual data shape and figure out which fields to use.
+// Also attempts AccountContactRelation to detect multi-account contacts.
+api.get('/test/accounts', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+
+    const accounts = await sf.query(`
+      SELECT Id, Name, LID__c, Property_Contact_Name__c, Phone, Website, Type, Industry,
+             ShippingStreet, ShippingCity, ShippingState, ShippingPostalCode,
+             (SELECT Id, Name, FirstName, LastName, Email, Phone, Title FROM Contacts LIMIT 10)
+      FROM Account
+      LIMIT 5
+    `);
+
+    // Check if AccountContactRelation exists (Contacts to Multiple Accounts feature).
+    let multiAccountSample = null;
+    try {
+      multiAccountSample = await sf.query(
+        `SELECT Id, AccountId, ContactId, Contact.Name, Account.Name, Account.LID__c
+         FROM AccountContactRelation
+         LIMIT 5`
+      );
+    } catch (_) {
+      multiAccountSample = 'AccountContactRelation not available in this org';
+    }
+
+    return c.json({ accounts, multiAccountSample });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+api.patch('/accounts/:id/contact', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const id = c.req.param('id');
+    const { contactId } = await c.req.json();
+    if (!contactId) return c.json({ error: 'contactId required' }, 400);
+
+    await sf.updateRecord('Account', id, {
+      Property_Contact_Name__c: contactId,
+    });
+
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+api.get('/contacts', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+
+    // Pull contacts and accounts that name a property contact in parallel.
+    // Property_Contact_Name__c on Account is a Contact lookup — one person can be
+    // the property contact for many buildings, so we group accounts by that field.
+    const [contactRecords, accountRecords] = await Promise.all([
+      sf.query(`SELECT Id, FirstName, LastName, Name, Email, Phone, Title,
+                       AccountId, Account.Name, LastModifiedDate
+                FROM Contact ORDER BY LastName, FirstName`),
+      sf.query(`SELECT Id, Name, LID__c, Property_Contact_Name__c, ParentId, Parent.Name
+                FROM Account WHERE Property_Contact_Name__c != null`),
+    ]);
+
+    // contactId → [{ id, name, lid }]
+    const accountsByContact = new Map();
+    for (const a of accountRecords) {
+      const contactId = a.Property_Contact_Name__c;
+      const arr = accountsByContact.get(contactId) ?? [];
+      arr.push({ id: a.Id, name: a.Name, lid: a.LID__c ?? null, parentId: a.ParentId ?? null, parentName: a.Parent?.Name ?? null });
+      accountsByContact.set(contactId, arr);
+    }
+
+    return c.json(contactRecords.map((r) => ({
+      id: r.Id,
+      firstName: r.FirstName ?? null,
+      lastName: r.LastName ?? null,
+      name: r.Name,
+      email: r.Email ?? null,
+      phone: r.Phone ?? null,
+      title: r.Title ?? null,
+      company: r.Account?.Name ?? null,
+      accounts: accountsByContact.get(r.Id) ?? [],
+      lastModifiedDate: r.LastModifiedDate ?? null,
+    })));
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 // Manually stamp an FS task ID onto a SF opportunity, then immediately reconcile
 // status and user assignments from the FS task so the board reflects reality.
 api.post('/jobs/:id/fs-link', async (c) => {

@@ -31,6 +31,30 @@ const ASSIGNABLE_STATUSES = BOARD_STATUSES;
 
 const POLL_MS = 5 * 60 * 1000; // refresh from Salesforce every 5 minutes
 
+function levenshtein(a, b) {
+  if (Math.abs(a.length - b.length) > 3) return 99;
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++)
+    for (let j = 1; j <= b.length; j++)
+      dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+  return dp[a.length][b.length];
+}
+
+function fuzzyNameMatch(query, name) {
+  const q = query.toLowerCase().trim();
+  const n = name.toLowerCase();
+  if (!q) return true;
+  if (n.includes(q)) return true;
+  const qTokens = q.split(/\s+/).filter(Boolean);
+  const nTokens = n.split(/\s+/).filter(Boolean);
+  return qTokens.every((qt) => {
+    if (nTokens.some((nt) => nt.includes(qt))) return true;
+    const maxDist = qt.length >= 5 ? 2 : qt.length >= 3 ? 1 : 0;
+    return nTokens.some((nt) => levenshtein(qt, nt) <= maxDist);
+  });
+}
+
 // Statuses that auto-advance to "Scheduled" the moment a job is given a date.
 // (Already-advanced statuses like In Progress are left alone.)
 const PRE_SCHEDULED = ['Quoted', 'Parts Ordered', 'Ready to be scheduled'];
@@ -96,6 +120,9 @@ export default function App() {
   const [draftJob, setDraftJob] = useState(null);
   const [draftPendingAdd, setDraftPendingAdd] = useState({ techId: '', date: '', time: '' });
   const [modalSaving, setModalSaving] = useState(false);
+  const [contacts, setContacts] = useState([]);
+  const [contactsLoading, setContactsLoading] = useState(false);
+  const [contactsLoaded, setContactsLoaded] = useState(false);
 
   // Count of in-flight writes. While > 0 the poll holds off so a background
   // refresh can't overwrite a change you just made but that hasn't saved yet.
@@ -152,6 +179,15 @@ export default function App() {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    if (tab !== 'contacts' || contactsLoaded) return;
+    setContactsLoading(true);
+    api.getContacts()
+      .then((c) => { setContacts(c); setContactsLoaded(true); })
+      .catch((e) => flash(`Contacts error: ${e.message}`))
+      .finally(() => setContactsLoading(false));
+  }, [tab, contactsLoaded]);
 
   // Terminal statuses aren't pulled with the board (could be huge history), so
   // fetch them on demand the moment such a filter is picked.
@@ -449,6 +485,7 @@ export default function App() {
       <nav className="tabs">
         <button className={`tab ${tab === 'jobs' ? 'active' : ''}`} onClick={() => setTab('jobs')}>Outstanding Jobs</button>
         <button className={`tab ${tab === 'schedule' ? 'active' : ''}`} onClick={() => setTab('schedule')}>Tech Schedule</button>
+        <button className={`tab ${tab === 'contacts' ? 'active' : ''}`} onClick={() => setTab('contacts')}>Contacts</button>
       </nav>
 
       <main>
@@ -721,6 +758,13 @@ export default function App() {
         )}
 
         {!loading && !error && tab === 'schedule' && <Schedule jobs={jobs} techs={techs} onJobClick={setSelectedJobId} />}
+        {tab === 'contacts' && (
+          <ContactsTab
+            contacts={contacts}
+            loading={contactsLoading}
+            onRefresh={async () => { const c = await api.getContacts(); setContacts(c); }}
+          />
+        )}
       </main>
 
       {toast && <div className="toast">{toast}<span className="tsf">→ Salesforce</span></div>}
@@ -837,6 +881,253 @@ export default function App() {
         </div>
       )}
     </>
+  );
+}
+
+function SearchableSelect({ value, onChange, options, placeholder }) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const selectedLabel = options.find(([id]) => id === value)?.[1] ?? null;
+  const matches = options.filter(([, label]) => label.toLowerCase().includes(query.toLowerCase()));
+
+  if (value) {
+    return (
+      <button className="ss-selected" onClick={() => onChange('')}>
+        {selectedLabel}<span className="ss-clear">×</span>
+      </button>
+    );
+  }
+
+  return (
+    <div className="ss-wrap" ref={ref}>
+      <input
+        className="ss-input"
+        type="text"
+        placeholder={placeholder}
+        value={query}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+      />
+      {open && (
+        <div className="ss-dropdown">
+          {matches.length === 0
+            ? <div className="ss-empty">No matches</div>
+            : matches.map(([id, label]) => (
+                <button key={id} className="ss-option" onMouseDown={() => { onChange(id); setQuery(''); setOpen(false); }}>
+                  {label}
+                </button>
+              ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContactsTab({ contacts, loading, onRefresh }) {
+  const [search, setSearch] = useState('');
+  const [parentFilter, setParentFilter] = useState('');
+  const [accountFilter, setAccountFilter] = useState('');
+  const [lidFilter, setLidFilter] = useState('');
+  const [expanded, setExpanded] = useState(new Set());
+  const [changingContact, setChangingContact] = useState(null); // accountId being reassigned
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const toggle = (id) => setExpanded((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const contactOptions = useMemo(() =>
+    contacts
+      .map((c) => [c.id, c.name, c.company])
+      .sort((a, b) => a[1].localeCompare(b[1]))
+  , [contacts]);
+
+  const handleChangeContact = async (accountId, contactId) => {
+    setSaving(true);
+    try {
+      await api.updateAccountContact(accountId, contactId);
+      setChangingContact(null);
+      setPickerQuery('');
+      await onRefresh();
+    } catch (e) {
+      alert(`Failed to update contact: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const parents = useMemo(() => {
+    const map = new Map();
+    contacts.forEach((c) => c.accounts.forEach((a) => { if (a.parentId && a.parentName) map.set(a.parentId, a.parentName); }));
+    return [...map.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [contacts]);
+
+  const accounts = useMemo(() => {
+    const map = new Map();
+    contacts.forEach((c) => c.accounts.forEach((a) => { if (a.id && a.name) map.set(a.id, a.name); }));
+    return [...map.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [contacts]);
+
+  const lids = useMemo(() => {
+    const set = new Set();
+    contacts.forEach((c) => c.accounts.forEach((a) => { if (a.lid != null && a.lid !== '') set.add(String(a.lid)); }));
+    return [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [contacts]);
+
+  const filtered = useMemo(() => contacts.filter((c) => {
+    if (parentFilter && !c.accounts.some((a) => a.parentId === parentFilter)) return false;
+    if (accountFilter && !c.accounts.some((a) => a.id === accountFilter)) return false;
+    if (lidFilter && !c.accounts.some((a) => String(a.lid) === lidFilter)) return false;
+    if (search.trim() && !fuzzyNameMatch(search, c.name)) return false;
+    return true;
+  }), [contacts, search, parentFilter, accountFilter, lidFilter]);
+
+  const hasFilter = search || parentFilter || accountFilter || lidFilter;
+
+  return (
+    <section>
+      <div className="view-head">
+        <div><h2>Contacts</h2><p>{loading ? 'Loading…' : `${contacts.length} contacts from Salesforce`}</p></div>
+      </div>
+
+      <div className="contacts-toolbar">
+        <div className="searchbox" style={{ marginBottom: 0 }}>
+          <span className="si">⌕</span>
+          <input
+            className="searchinput"
+            type="text"
+            placeholder="Search by name (typos OK)…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <SearchableSelect
+          value={parentFilter}
+          onChange={setParentFilter}
+          options={parents}
+          placeholder="Management company…"
+        />
+        <SearchableSelect
+          value={accountFilter}
+          onChange={setAccountFilter}
+          options={accounts}
+          placeholder="Building…"
+        />
+        <SearchableSelect
+          value={lidFilter}
+          onChange={setLidFilter}
+          options={lids.map((l) => [l, `LID ${l}`])}
+          placeholder="LID…"
+        />
+        {hasFilter && (
+          <button className="clearrange" onClick={() => { setSearch(''); setParentFilter(''); setAccountFilter(''); setLidFilter(''); }}>
+            Clear filters
+          </button>
+        )}
+        {!loading && <span className="contact-count">{filtered.length} shown</span>}
+      </div>
+
+      {loading && <div className="state">Loading contacts from Salesforce…</div>}
+      {!loading && filtered.length === 0 && (
+        <div className="empty">{hasFilter ? 'No contacts match those filters.' : 'No contacts found.'}</div>
+      )}
+      {!loading && filtered.length > 0 && (
+        <div className="contacts-wrap">
+          <table className="contacts-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Buildings</th>
+                <th>Phone</th>
+                <th>Email</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((c) => (
+                <tr key={c.id}>
+                  <td>
+                    <div className="contact-name">{c.name}</div>
+                    {c.company && <div className="contact-title">{c.company}</div>}
+                    {c.title && <div className="contact-title">{c.title}</div>}
+                  </td>
+                  <td>
+                    {c.accounts.length === 0
+                      ? <span className="na">—</span>
+                      : <div className="contact-buildings">
+                          <button className="buildings-toggle" onClick={() => toggle(c.id)}>
+                            <span className="buildings-chevron">{expanded.has(c.id) ? '▾' : '▸'}</span>
+                            <span>{c.accounts.length} {c.accounts.length === 1 ? 'building' : 'buildings'}</span>
+                          </button>
+                          {expanded.has(c.id) && c.accounts.map((a) => (
+                            <div key={a.id} className="contact-building-row">
+                              <div className="contact-building-meta">
+                                <span className="contact-building-name">{a.name}</span>
+                                {a.lid && <span className="lidtag">LID {a.lid}</span>}
+                              </div>
+                              <button
+                                className="change-contact-btn"
+                                onClick={() => {
+                                  setChangingContact(changingContact === a.id ? null : a.id);
+                                  setPickerQuery('');
+                                }}
+                              >
+                                Change contact
+                              </button>
+                              {changingContact === a.id && (
+                                <div className="inline-contact-picker">
+                                  <input
+                                    className="icp-input"
+                                    type="text"
+                                    placeholder="Search contacts…"
+                                    value={pickerQuery}
+                                    onChange={(e) => setPickerQuery(e.target.value)}
+                                    autoFocus
+                                  />
+                                  <div className="icp-list">
+                                    {contactOptions
+                                      .filter(([, name]) => !pickerQuery.trim() || fuzzyNameMatch(pickerQuery, name))
+                                      .slice(0, 8)
+                                      .map(([id, name, company]) => (
+                                        <button
+                                          key={id}
+                                          className="icp-option"
+                                          disabled={saving}
+                                          onClick={() => handleChangeContact(a.id, id)}
+                                        >
+                                          <span className="icp-name">{name}</span>
+                                          {company && <span className="icp-company">{company}</span>}
+                                        </button>
+                                      ))}
+                                  </div>
+                                  <button className="icp-cancel" onClick={() => { setChangingContact(null); setPickerQuery(''); }}>
+                                    Cancel
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>}
+                  </td>
+                  <td>{c.phone ? <a href={`tel:${c.phone}`} className="contact-link">{c.phone}</a> : <span className="na">—</span>}</td>
+                  <td>{c.email ? <a href={`mailto:${c.email}`} className="contact-link">{c.email}</a> : <span className="na">—</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 

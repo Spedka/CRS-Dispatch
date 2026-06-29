@@ -60,7 +60,20 @@ export function createSalesforce(env) {
     async query(soql) {
       const res = await sfFetch(`/query?q=${encodeURIComponent(soql)}`);
       if (!res.ok) throw new Error(`SOQL failed: ${res.status} ${await res.text()}`);
-      return (await res.json()).records;
+      const first = await res.json();
+      const records = first.records;
+      let next = first.nextRecordsUrl;
+      while (next) {
+        const { token, instanceUrl } = await getToken();
+        const page = await fetch(`${instanceUrl}${next}`, {
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        });
+        if (!page.ok) throw new Error(`SOQL pagination failed: ${page.status} ${await page.text()}`);
+        const data = await page.json();
+        records.push(...data.records);
+        next = data.nextRecordsUrl;
+      }
+      return records;
     },
     async createRecord(object, fields) {
       const res = await sfFetch(`/sobjects/${object}`, { method: 'POST', body: JSON.stringify(fields) });
@@ -76,6 +89,11 @@ export function createSalesforce(env) {
       const res = await sfFetch(`/sobjects/${object}/${id}`, { method: 'PATCH', body: JSON.stringify(fields) });
       if (res.status !== 204) throw new Error(`Update failed: ${res.status} ${await res.text()}`);
       return { success: true };
+    },
+    async raw(path) {
+      const res = await sfFetch(path);
+      if (!res.ok) throw new Error(`SF request failed: ${res.status} ${await res.text()}`);
+      return res.json();
     },
   };
 }

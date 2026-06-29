@@ -47,4 +47,13 @@ export const api = {
       body: JSON.stringify(fields),
     }).then(j),
 
+  getContacts: () => fetch('/api/contacts').then(j),
+
+  updateAccountContact: (accountId, contactId) =>
+    fetch(`/api/accounts/${accountId}/contact`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contactId }),
+    }).then(j),
+
 };
