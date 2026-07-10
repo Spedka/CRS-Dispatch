@@ -56,4 +56,38 @@ export const api = {
       body: JSON.stringify({ contactId }),
     }).then(j),
 
+  updateContact: (contactId, fields) =>
+    fetch(`/api/contacts/${contactId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+    }).then(j),
+
+  getScheduleRequests: () => fetch('/api/schedule-requests').then(j),
+
+  // opportunityId only required for isNewWo rows — the server 400s otherwise.
+  approveScheduleRequest: (id, opportunityId) =>
+    fetch(`/api/schedule-requests/${id}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opportunityId ? { opportunityId } : {}),
+    }).then(j),
+
+  counterScheduleRequest: (id, { date, start, end, officeNote }) =>
+    fetch(`/api/schedule-requests/${id}/counter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, start, end, officeNote }),
+    }).then(j),
+
+  denyScheduleRequest: (id, officeNote) =>
+    fetch(`/api/schedule-requests/${id}/deny`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ officeNote }),
+    }).then(j),
+
+  getTimeOff: (start, end) =>
+    fetch(`/api/time-off?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`).then(j),
+
 };

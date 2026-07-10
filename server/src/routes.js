@@ -4,70 +4,12 @@ import { createSalesforce } from './salesforce.js';
 import { createFs } from './fieldSquared.js';
 import { FS_TO_SF, SF_TO_FS, reconcile, sfToFsStatus } from './statusMap.js';
 import { runFsSync } from './fsSync.js';
+import { createAssignment, esc, normTime, toSfTime, fsUserByTechName, buildFsSchedules } from './assignments.js';
+import { scheduleRequests } from './scheduleRequests.js';
 
 const f = config.fields;
 const o = config.objects;
-const esc = (s) => String(s).replace(/'/g, "\\'");
 const FS_TASK_TYPE = 'CCTV Job/Work Order'; // only task type currently synced;
-
-// Reverse of config.fsTechUsers: SF tech name → FS user ObjectId
-const fsUserByTechName = Object.fromEntries(
-  Object.entries(config.fsTechUsers).map(([fsId, name]) => [name, fsId])
-);
-const normTime = (v) => (v ? String(v).slice(0, 5) : null);
-const toSfTime = (hhmm) => (hhmm ? `${hhmm}:00.000Z` : null);
-
-// US Eastern DST: second Sunday of March → first Sunday of November.
-function nthSunday(year, month, n) {
-  const first = new Date(Date.UTC(year, month - 1, 1));
-  const day = first.getUTCDay();
-  return new Date(Date.UTC(year, month - 1, (day === 0 ? 1 : 8 - day) + (n - 1) * 7));
-}
-function easternOffsetHours(dateStr) {
-  const year = +dateStr.slice(0, 4);
-  const d = new Date(`${dateStr}T12:00:00Z`);
-  return d >= nthSunday(year, 3, 2) && d < nthSunday(year, 11, 1) ? 4 : 5;
-}
-// Convert SF date (YYYY-MM-DD) + Eastern local time ("HH:MM" or "HH:MM:SS.000Z") to UTC ISO.
-function toFsDateTime(dateStr, localTime) {
-  const [hh, mm] = localTime.split(':').map(Number);
-  const h = hh + easternOffsetHours(dateStr);
-  if (h < 24) return `${dateStr}T${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00Z`;
-  const next = new Date(new Date(`${dateStr}T00:00:00Z`).getTime() + 86400000);
-  return `${next.toISOString().slice(0, 10)}T${String(h - 24).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00Z`;
-}
-// Build the Schedules array to POST to FS. Preserves existing entry metadata
-// FS ObjectIds are base64url-encoded 16-byte GUIDs (no padding).
-// The web app mints these client-side; FS keys the Schedules array by ObjectId
-// and rejects entries that omit it rather than auto-generating one server-side.
-function fsObjectId() {
-  const b = crypto.getRandomValues(new Uint8Array(16));
-  return btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-// Pass null/empty isoDate to return null which skips the Schedules write.
-function buildFsSchedules(task, isoDate, localTime = '08:00') {
-  if (!isoDate) return null;
-  const start = toFsDateTime(isoDate, localTime);
-  const h = parseInt(start.slice(11, 13), 10);
-  const end = start.slice(0, 11) + String((h + 1) % 24).padStart(2, '0') + start.slice(13);
-  const existing = Array.isArray(task.Schedules) ? task.Schedules[0] : null;
-  const toId = (u) => (typeof u === 'string' ? u : u?.ObjectId ?? null);
-  if (existing) {
-    return [{
-      ...(existing.ObjectId ? { ObjectId: existing.ObjectId } : {}),
-      Start: start,
-      End: end,
-      Users: Array.isArray(existing.Users) ? existing.Users.map(toId).filter(Boolean) : [],
-      Teams: existing.Teams ?? [],
-      Data: existing.Data ?? {},
-      TimeZone: existing.TimeZone ?? '',
-    }];
-  }
-  // No existing schedule — mint a client-side ObjectId. FS keys the Schedules
-  // array by ObjectId and rejects entries that omit it.
-  return [{ ObjectId: fsObjectId(), Start: start, End: end, Users: [], Teams: [], Data: {}, TimeZone: '' }];
-}
 
 function shapeJob(r) {
   const child = r[o.assignmentChildRelationship];
@@ -81,8 +23,7 @@ function shapeJob(r) {
         completed: a[o.assignmentCompleted] === true,
       }))
     : [];
-  const acct = r.Account || {};
-  const address = [acct.ShippingStreet, acct.ShippingCity].filter(Boolean).join(', ');
+  const address = [r[f.addrStreet], r[f.addrCity], r[f.addrState], r[f.addrZip]].filter(Boolean).join(', ');
   return {
     id: r.Id,
     name: r[f.oppName],
@@ -95,10 +36,17 @@ function shapeJob(r) {
     assignments,
     // FS integration fields
     fsTaskId: r[f.oppFsTaskId] ?? null,
+    // Raw FS status snapshot — written only by the FS sync path (fsSync.js,
+    // fs-link). Never normalized, never touched by the dispatch-status write
+    // path. Used purely for the drift badge, not for board filtering/logic.
+    fsStatus: r[f.oppFsStatus] ?? null,
+    fsLastModified: r[f.oppFsLastModified] ?? null,
+    opportunityType: r[f.oppType] ?? null,
   };
 }
 
 export const api = new Hono();
+api.route('/', scheduleRequests);
 
 api.get('/jobs', async (c) => {
   try {
@@ -112,8 +60,8 @@ api.get('/jobs', async (c) => {
 
     const soql = `
       SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}, ${f.oppScheduledDate},
-             ${f.oppFsTaskId}, CreatedDate, CloseDate,
-             ${f.addrStreet}, ${f.addrCity},
+             ${f.oppFsTaskId}, ${f.oppFsStatus}, ${f.oppFsLastModified}, ${f.oppType}, CreatedDate, CloseDate,
+             ${f.addrStreet}, ${f.addrCity}, ${f.addrState}, ${f.addrZip},
              (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
                      ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}
               FROM ${o.assignmentChildRelationship})
@@ -137,6 +85,41 @@ api.get('/technicians', async (c) => {
                   WHERE ${o.technicianActive} = true ORDER BY Name`;
     const recs = await sf.query(soql);
     return c.json(recs.map((t) => ({ id: t.Id, name: t.Name })));
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Approved time off lives as Job_Assignment__c rows against the hidden
+// TIME_OFF_OPPORTUNITY_ID sentinel — invisible to GET /jobs (that query filters
+// Opportunity by Project_Status__c and pulls assignments as a child subquery, so
+// the sentinel itself is never selected). This overlays those rows for the board.
+api.get('/time-off', async (c) => {
+  try {
+    const start = c.req.query('start');
+    const end = c.req.query('end');
+    const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+    // Work_Date__c is a Date field — SOQL date literals are unquoted, so esc()'s
+    // quote-escaping doesn't apply here. Validate the shape instead of quoting.
+    if (!start || !end || !isoDate.test(start) || !isoDate.test(end)) {
+      return c.json({ error: 'start and end are required, as YYYY-MM-DD' }, 400);
+    }
+
+    const sf = createSalesforce(c.env);
+    const soql = `
+      SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
+             ${o.assignmentDate}, ${o.assignmentStartTime}
+      FROM ${o.assignment}
+      WHERE ${o.assignmentOppLookup} = '${esc(c.env.TIME_OFF_OPPORTUNITY_ID)}'
+        AND ${o.assignmentDate} >= ${start} AND ${o.assignmentDate} <= ${end}`;
+    const records = await sf.query(soql);
+    return c.json(records.map((r) => ({
+      id: r.Id,
+      technicianId: r[o.assignmentTechLookup],
+      technicianName: r[o.assignmentTechRelationship]?.Name ?? null,
+      workDate: r[o.assignmentDate] ?? null,
+      startTime: normTime(r[o.assignmentStartTime]),
+    })));
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -254,105 +237,14 @@ api.patch('/jobs/:id', async (c) => {
 
 api.post('/jobs/:oppId/assignments', async (c) => {
   try {
-    const sf = createSalesforce(c.env);
     const oppId = c.req.param('oppId');
-    const { technicianId, workDate, startTime, status, scheduledDate } = await c.req.json();
+    const { technicianId, workDate, startTime, status, scheduledDate, deriveScheduledDate } = await c.req.json();
     if (!technicianId) return c.json({ error: 'technicianId required' }, 400);
 
-    const fields = {
-      [o.assignmentOppLookup]: oppId,
-      [o.assignmentTechLookup]: technicianId,
-      [o.assignmentStartTime]: toSfTime(startTime || '07:00'),
-    };
-    if (typeof workDate !== 'undefined') {
-      fields[o.assignmentDate] = workDate === '' ? null : workDate;
-    }
-
-    const result = await sf.createRecord(o.assignment, fields);
-    const createdId = result?.id;
-
-    let assignmentRec = null;
-    try {
-      const recs = await sf.query(
-        `SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentDate}, ${o.assignmentStartTime},
-                ${o.assignmentCompleted}, ${o.assignmentTechRelationship}.Name
-         FROM ${o.assignment} WHERE Id='${esc(createdId)}'`
-      );
-      if (recs?.[0]) {
-        const r = recs[0];
-        assignmentRec = {
-          assignmentId: r.Id,
-          technicianId: r[o.assignmentTechLookup],
-          technicianName: r[o.assignmentTechRelationship]?.Name ?? null,
-          workDate: r[o.assignmentDate] ?? null,
-          startTime: normTime(r[o.assignmentStartTime]) || '07:00',
-          completed: r[o.assignmentCompleted] === true,
-        };
-      }
-    } catch (e) {
-      console.log('[API] Warning: could not fetch created assignment', e.message);
-    }
-
-    // Sync new assignment to FS if the job has a linked FS task
-    const fsDebug = { techName: assignmentRec?.technicianName ?? null, fsUserId: null, fsTaskId: null, patch: null, error: null };
-    if (assignmentRec?.technicianName) {
-      const fsUserId = fsUserByTechName[assignmentRec.technicianName];
-      fsDebug.fsUserId = fsUserId ?? `NOT IN MAP (name="${assignmentRec.technicianName}")`;
-      if (fsUserId) {
-        let fsTaskId = null;
-        try {
-          const fs = createFs(c.env);
-          const opps = await sf.query(
-            `SELECT ${f.oppFsTaskId}, ${f.oppScheduledDate}
-             FROM Opportunity WHERE Id = '${esc(oppId)}' LIMIT 1`
-          );
-          fsTaskId = opps[0]?.[f.oppFsTaskId];
-          fsDebug.fsTaskId = fsTaskId ?? 'NULL (not linked)';
-          if (fsTaskId) {
-            const task = await fs.getTask(fsTaskId);
-            const toId = (u) => (typeof u === 'string' ? u : u?.ObjectId ?? null);
-            const currentUserIds = (Array.isArray(task.Users) ? task.Users : []).map(toId).filter(Boolean);
-            const fsPatch = {};
-            if (!currentUserIds.includes(fsUserId)) {
-              fsPatch.Users = [...currentUserIds, fsUserId];
-            }
-            if (status) {
-              const fsStatus = sfToFsStatus(status, true); // always has assignments — just added one
-              if (fsStatus) fsPatch.Status = fsStatus;
-            }
-            // scheduledDate = earliest assignment date (derived by client); use it
-            // rather than workDate so adding a later assignment doesn't move FS forward.
-            const assignDate = scheduledDate ?? workDate ?? opps[0]?.[f.oppScheduledDate];
-            if (assignDate) {
-              const sched = buildFsSchedules(task, assignDate, startTime || '08:00');
-              if (sched) fsPatch.Schedules = sched;
-            }
-            fsDebug.patch = Object.keys(fsPatch);
-            if (Object.keys(fsPatch).length > 0) {
-              await fs.patchTask(fsTaskId, task, fsPatch);
-            }
-          }
-        } catch (fsErr) {
-          console.error('[routes] FS assign failed (SF kept):', fsErr.message, { fsTaskId });
-          fsDebug.error = fsErr.message;
-        }
-      }
-    }
-
-    // Update SF Opp status/scheduledDate in the same request so the caller
-    // doesn't need a separate updateJob round-trip.
-    if (status != null || scheduledDate != null) {
-      try {
-        const oppPayload = {};
-        if (status != null) oppPayload[f.oppStatus] = status || null;
-        if (scheduledDate != null) oppPayload[f.oppScheduledDate] = scheduledDate === '' ? null : scheduledDate;
-        if (Object.keys(oppPayload).length > 0) await sf.updateRecord('Opportunity', oppId, oppPayload);
-      } catch (oppErr) {
-        console.error('[routes] SF Opp update failed (assignment kept):', oppErr.message);
-      }
-    }
-
-    return c.json({ assignmentId: createdId, assignment: assignmentRec, fsDebug });
+    const result = await createAssignment(c.env, oppId, {
+      technicianId, workDate, startTime, status, scheduledDate, deriveScheduledDate,
+    });
+    return c.json(result);
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -634,6 +526,29 @@ api.patch('/accounts/:id/contact', async (c) => {
   }
 });
 
+api.patch('/contacts/:id', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const id = c.req.param('id');
+    const body = await c.req.json();
+
+    const fields = {};
+    if ('name' in body) {
+      const parts = String(body.name || '').trim().split(/\s+/);
+      fields.LastName = parts.length > 1 ? parts.slice(1).join(' ') : parts[0];
+      if (parts.length > 1) fields.FirstName = parts[0];
+    }
+    if ('email' in body) fields.Email = body.email || null;
+    if ('phone' in body) fields.Phone = body.phone || null;
+
+    if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
+    await sf.updateRecord('Contact', id, fields);
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 api.get('/contacts', async (c) => {
   try {
     const sf = createSalesforce(c.env);
@@ -703,6 +618,14 @@ api.post('/jobs/:id/fs-link', async (c) => {
       ]);
       const sfOpp = oppRows[0];
       if (!sfOpp) throw new Error('Opp not found');
+
+      // Stamp the raw FS status snapshot now that we have the full task —
+      // same fields fsSync.js's cron writes, kept isolated from the reconcile
+      // write below so the badge reflects FS's actual state either way.
+      await sf.updateRecord('Opportunity', id, {
+        [f.oppFsStatus]: fullTask.Status ?? null,
+        [f.oppFsLastModified]: fullTask.LastUpdated ?? null,
+      });
 
       // Sync users: FS → SF — find techs in FS not yet in SF.
       const syncableUserIds = (Array.isArray(fullTask.Users) ? fullTask.Users : [])
@@ -774,3 +697,59 @@ api.post('/jobs/:id/fs-link', async (c) => {
     return c.json({ error: e.message }, 500);
   }
 });
+
+// ============================================================================
+// TEMPORARY — Field Squared Documents API exploration. REMOVE THIS ROUTE
+// once the investigation is done. No persistence, no SF writes, no UI wiring.
+// Uses createFs(c.env) / getToken() from fieldSquared.js — never calls
+// /Authentication directly.
+//
+// Usage:
+//   GET /api/debug/documents                     — step 1: enumerate types
+//   GET /api/debug/documents?externalId=<id>      — also runs step 2 for that doc
+//   GET /api/debug/documents?raw=<query string>   — passthrough for experimenting
+//                                                    with /api/document filter params
+//                                                    without redeploying, e.g.
+//                                                    ?raw=modifiedsince%3D2026-01-01
+// ============================================================================
+api.get('/debug/documents', async (c) => {
+  try {
+    const fs = createFs(c.env);
+    const externalId = c.req.query('externalId');
+    const raw = c.req.query('raw');
+
+    const asJson = (r) => {
+      let body = r.body;
+      try { body = JSON.parse(r.body); } catch (_) { /* leave as raw text */ }
+      return { status: r.status, ok: r.ok, errHeader: r.errHeader ?? null, body };
+    };
+
+    // Raw passthrough mode — skip steps 1/2 entirely.
+    if (raw !== undefined) {
+      return c.json({ raw: asJson(await fs.rawDocumentQuery(raw)) });
+    }
+
+    // Step 1 — enumerate document types. Try no filter plus each of the
+    // four CRS-configured types; raw error bodies are returned as-is if FS
+    // rejects a type name/casing.
+    const candidateTypes = [null, 'Service Acknowledgement', 'Work Order', 'Test & Inspection', 'Work Order Email - 1'];
+    const types = {};
+    for (const t of candidateTypes) {
+      types[t ?? '(no filter)'] = asJson(await fs.listDocuments(t));
+    }
+
+    const result = { types };
+
+    // Step 2 — pull a known document's full record, if provided.
+    if (externalId) {
+      result.document = asJson(await fs.getDocument(externalId));
+    }
+
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+// ============================================================================
+// END TEMPORARY DEBUG ROUTE
+// ============================================================================

@@ -37,7 +37,7 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
 .state{padding:48px;text-align:center;color:var(--ink-soft);}
 .state.err{color:var(--emergency);background:var(--emergency-bg);border-radius:var(--radius);}
 .state small{color:var(--ink-faint);}
-.view-head{margin-bottom:18px;}
+.view-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px;}
 .view-head h2{font-family:'Space Grotesk',sans-serif;font-size:21px;font-weight:600;}
 .view-head p{margin:2px 0 0;color:var(--ink-soft);font-size:13px;}
 
@@ -214,6 +214,11 @@ td.open{background:var(--open-bg);}
 .sched th.todaycol,.sched td.todaycol{background:#EAF6F3;}
 .sched td.todaycol.open{background:#DCF0E7;}
 
+/* approved time off — overlaid on the tech schedule, distinct from job chips */
+.sched td.offcol{background:#F5F0FA;}
+.offchip{background:#EDE4F7;border:1px solid #D3BFEC;color:#6B3FA0;border-radius:7px;padding:6px 9px;margin-bottom:6px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;}
+.offchip:last-child{margin-bottom:0;}
+
 /* month grid */
 .month{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);}
 .month>*:nth-child(7n){border-right:none;}
@@ -259,6 +264,16 @@ td.open{background:var(--open-bg);}
 .fs-badge.linked{color:var(--brand);background:#E6F4EC;border:1px solid #A9D9BF;}
 .fs-badge.unlinked{color:var(--ink-faint);background:var(--surface-2);border:1px dashed var(--line-strong);}
 .fs-attach-btn{cursor:pointer;font:inherit;transition:color .15s,border-color .15s,background .15s;}
+
+/* FS drift badge — dispatch status vs FS's own reported status.
+   Reuses the same green/grey as .fs-badge.linked/.unlinked above so the
+   two badges read as one visual family; amber/red borrow the existing
+   .needs/.emergency status-chip palette. */
+.fs-drift-badge{font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:6px;letter-spacing:.3px;flex-shrink:0;white-space:nowrap;}
+.fs-drift-badge.fs-drift-agree{color:var(--brand);background:#E6F4EC;border:1px solid #A9D9BF;}
+.fs-drift-badge.fs-drift-contradiction{color:var(--emergency);background:var(--emergency-bg);border:1px solid #F3B4B4;}
+.fs-drift-badge.fs-drift-disconnected{color:var(--ink-faint);background:var(--surface-2);border:1px dashed var(--line-strong);}
+.fs-drift-badge.fs-drift-pending{color:var(--ink-faint);background:var(--surface-2);border:1px solid var(--line-strong);}
 .fs-attach-btn:hover{color:var(--brand);border-color:#A9D9BF;background:#E6F4EC;}
 
 /* FS manual-link panel */
@@ -298,6 +313,14 @@ td.open{background:var(--open-bg);}
 .contact-title{font-size:11.5px;color:var(--ink-faint);margin-top:2px;}
 .contact-link{color:var(--brand);text-decoration:none;font-size:13px;}
 .contact-link:hover{text-decoration:underline;text-underline-offset:2px;}
+.contact-editable{cursor:text;border-radius:4px;display:inline-block;}
+.contact-editable:hover{background:var(--scheduled-bg);color:var(--scheduled);}
+.contact-edit-row{display:flex;align-items:center;gap:6px;}
+.contact-edit-input{font:inherit;font-size:13.5px;border:none;border-bottom:2px solid var(--brand);background:transparent;outline:none;padding:0;flex:1;min-width:0;color:var(--ink);}
+.contact-edit-save{font:inherit;font-size:12px;font-weight:500;padding:3px 10px;border-radius:7px;border:none;background:var(--brand);color:#fff;cursor:pointer;white-space:nowrap;}
+.contact-edit-save:hover{background:var(--brand-bright);}
+.contact-edit-cancel{font:inherit;font-size:12px;padding:3px 10px;border-radius:7px;border:1px solid var(--line-strong);background:transparent;color:var(--ink-faint);cursor:pointer;white-space:nowrap;}
+.contact-edit-cancel:hover{color:var(--ink);border-color:var(--ink-faint);}
 .na{color:var(--ink-faint);}
 /* Searchable select */
 .ss-wrap{position:relative;}
@@ -331,3 +354,103 @@ td.open{background:var(--open-bg);}
 .icp-company{font-size:11px;color:var(--ink-faint);}
 .icp-cancel{font:inherit;font-size:12px;font-weight:500;color:var(--ink-faint);background:none;border:none;cursor:pointer;text-align:left;padding:2px 4px;text-decoration:underline;text-underline-offset:2px;}
 .icp-cancel:hover{color:var(--ink);}
+
+/* Schedule requests tab */
+.req-list{display:flex;flex-direction:column;gap:10px;}
+.req-row{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 16px;display:flex;flex-direction:column;gap:10px;transition:box-shadow .15s,border-color .15s;}
+.req-row:hover{border-color:var(--line-strong);box-shadow:0 2px 4px rgba(22,32,46,.08),0 12px 28px rgba(22,32,46,.08);}
+.req-main{display:flex;flex-direction:column;gap:6px;}
+.req-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.req-tech{font-weight:600;font-size:14px;color:var(--ink);}
+.req-job{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px;color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line-strong);}
+.req-job.timeoff{color:#6B3FA0;background:#EDE4F7;border-color:#D3BFEC;}
+.req-job.newwo{color:var(--needs);background:var(--needs-bg);border-color:#E4C088;}
+.req-turn{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:3px 9px 3px 8px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;}
+.req-turn::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0;}
+.req-turn.office{color:var(--scheduled);background:var(--scheduled-bg);}
+.req-turn.tech{color:var(--open);background:var(--open-bg);}
+.req-age{margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink-faint);}
+.req-window{font-size:12.5px;color:var(--ink-soft);}
+.req-window .ic{color:var(--ink-faint);margin-right:6px;}
+.req-note{font-size:12.5px;color:var(--ink);font-style:italic;}
+.req-officenote{font-size:12.5px;color:var(--ink-soft);}
+
+.req-actions{display:flex;gap:8px;border-top:1px solid var(--line);padding-top:10px;}
+.req-btn{display:inline-flex;align-items:center;font:inherit;font-size:12.5px;font-weight:600;border-radius:999px;padding:7px 16px;cursor:pointer;border:1px solid transparent;transition:background .15s,border-color .15s,box-shadow .15s;}
+.req-btn:disabled{opacity:.5;cursor:default;}
+.req-btn.approve{color:var(--open);background:var(--open-bg);border-color:#A9D9BF;}
+.req-btn.approve:hover:not(:disabled){border-color:var(--open);}
+.req-btn.approve.on{background:var(--open);color:#fff;box-shadow:0 2px 6px rgba(15,138,95,.25);}
+.req-btn.counter{color:var(--scheduled);background:var(--scheduled-bg);border-color:#B9CCF4;}
+.req-btn.counter:hover:not(:disabled){border-color:var(--scheduled);}
+.req-btn.counter.on{background:var(--scheduled);color:#fff;box-shadow:0 2px 6px rgba(37,99,235,.25);}
+.req-btn.deny{color:var(--emergency);background:var(--emergency-bg);border-color:#F3B4B4;}
+.req-btn.deny:hover:not(:disabled){border-color:var(--emergency);}
+.req-btn.deny.on{background:var(--emergency);color:#fff;box-shadow:0 2px 6px rgba(220,38,38,.25);}
+
+.req-panel{display:flex;flex-direction:column;gap:12px;background:var(--surface-2);border:1.5px solid var(--line-strong);border-radius:12px;padding:14px 16px;box-shadow:0 2px 10px rgba(22,32,46,.06);}
+.req-panel.approve{border-color:#A9D9BF;background:#F3FAF6;}
+.req-panel.counter{border-color:#B9CCF4;background:#F3F6FE;}
+.req-panel.deny{border-color:#F3B4B4;background:#FDF4F4;}
+.req-panel-title{font-size:10.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--ink-soft);}
+.req-panel.approve .req-panel-title{color:var(--open);}
+.req-panel.counter .req-panel-title{color:var(--scheduled);}
+.req-panel.deny .req-panel-title{color:var(--emergency);}
+.req-panel-row{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;}
+.req-field{display:flex;flex-direction:column;gap:5px;}
+.req-field-wide{width:100%;}
+.req-field-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-faint);}
+.req-note-input{font:inherit;font-size:13px;border:1px solid var(--line-strong);border-radius:7px;padding:8px 11px;color:var(--ink);background:var(--surface);width:100%;}
+.req-note-input:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
+.req-time{font:inherit;font-family:'IBM Plex Mono',monospace;font-size:13px;border:1px solid var(--line-strong);border-radius:7px;padding:7px 8px;color:var(--ink);background:var(--surface);width:150px;cursor:pointer;}
+.req-time:hover{border-color:var(--ink-faint);}
+.req-time:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
+.dp-wrap.dp-req .dp-trigger{font-size:13px;padding:7px 10px;border-radius:7px;}
+.req-panel-actions{display:flex;gap:8px;border-top:1px solid rgba(22,32,46,.08);padding-top:12px;}
+/* .add-btn/.cancel-btn's base rules are scoped to .inline-add, which these
+   aren't nested in — style them here instead, tinted to match each panel. */
+.req-panel-actions .add-btn,.req-panel-actions .cancel-btn{font:inherit;font-size:13px;font-weight:600;padding:9px 18px;border-radius:8px;cursor:pointer;}
+.req-panel-actions .add-btn{background:var(--open);color:#fff;border:none;}
+.req-panel-actions .add-btn:hover:not(:disabled){background:#0c7350;}
+.req-panel-actions .add-btn:disabled{opacity:.55;cursor:default;}
+.req-panel.counter .req-panel-actions .add-btn{background:var(--scheduled);}
+.req-panel.counter .req-panel-actions .add-btn:hover:not(:disabled){background:#1d4fd6;}
+.req-panel.deny .req-panel-actions .add-btn{background:var(--emergency);}
+.req-panel-actions .cancel-btn{background:var(--surface);color:var(--ink-soft);font-weight:500;border:1px solid var(--line-strong);}
+.req-panel-actions .cancel-btn:hover:not(:disabled){color:var(--ink);border-color:var(--ink-faint);}
+.req-panel-actions .cancel-btn:disabled{opacity:.55;cursor:default;}
+.add-btn.deny{background:var(--emergency);}
+.add-btn.deny:hover{background:#c22323;}
+
+/* Custom calendar dropdown — replaces native <input type="date"> everywhere */
+.dp-wrap{position:relative;display:inline-flex;}
+.dateinput.ro{display:inline-flex;align-items:center;font:inherit;font-family:'IBM Plex Mono',monospace;font-size:12px;border:1px solid var(--line-strong);border-radius:7px;padding:4px 9px;color:var(--ink-soft);background:var(--surface-2);}
+.dp-trigger{display:inline-flex;align-items:center;gap:6px;font:inherit;font-family:'IBM Plex Mono',monospace;font-size:12px;border:1px solid var(--line-strong);border-radius:7px;padding:4px 9px;color:var(--ink);background:var(--surface);cursor:pointer;white-space:nowrap;}
+.dp-trigger:hover{border-color:var(--ink-faint);}
+.dp-trigger.empty{color:var(--ink-faint);}
+.dp-trigger .dp-ic{font-size:11px;line-height:1;flex-shrink:0;filter:grayscale(1) opacity(.6);}
+.dp-trigger .dp-clear{margin-left:1px;color:var(--ink-faint);font-size:13px;line-height:1;border-radius:50%;padding:1px 3px;}
+.dp-trigger .dp-clear:hover{color:var(--emergency);background:var(--emergency-bg);}
+.dp-wrap.dp-adate .dp-trigger{font-size:11.5px;padding:3px 7px;}
+
+/* position:fixed + portaled to <body> in DatePicker — top/left set inline from
+   the trigger's getBoundingClientRect() so overflow:hidden ancestors (e.g. .job's
+   rounded status stripe) can't clip it. z-index clears the job modal (200). */
+.dp-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:12px;width:250px;}
+.dp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
+.dp-month{font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:600;color:var(--ink);}
+.dp-nav{font:inherit;font-size:13px;font-weight:700;width:26px;height:26px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface-2);color:var(--ink-soft);cursor:pointer;}
+.dp-nav:hover{border-color:var(--ink-faint);color:var(--ink);}
+.dp-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;}
+.dp-wd{font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;color:var(--ink-faint);text-align:center;padding:4px 0;}
+.dp-day{font:inherit;font-size:12.5px;font-weight:500;color:var(--ink);background:none;border:none;border-radius:7px;padding:6px 0;cursor:pointer;}
+.dp-day:hover{background:var(--surface-2);}
+.dp-day.out{color:var(--ink-faint);}
+.dp-day.today{color:var(--brand);font-weight:700;box-shadow:inset 0 0 0 1.5px var(--brand-bright);}
+.dp-day.sel{background:var(--brand);color:#fff;font-weight:700;}
+.dp-day.sel:hover{background:var(--brand-bright);}
+.dp-foot{display:flex;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line);}
+.dp-today-btn,.dp-clear-btn{font:inherit;font-size:11.5px;font-weight:600;background:none;border:none;cursor:pointer;color:var(--brand);padding:4px 6px;border-radius:6px;}
+.dp-today-btn:hover,.dp-clear-btn:hover{background:var(--surface-2);}
+.dp-clear-btn{color:var(--ink-faint);}
+.dp-clear-btn:hover{color:var(--emergency);}

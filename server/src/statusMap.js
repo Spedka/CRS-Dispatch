@@ -34,33 +34,18 @@ export const SF_TO_FS = {
   'Project Complete':          'Billing Completed',
 };
 
-// Numeric rank for furthest-ahead tiebreaker when timestamps are too close.
-const FS_RANK = {
-  'Entered':           1,
-  'Scheduled':         2,
-  'Assigned':          3,
-  'En-Route':          4,
-  'In-Progress':       5,
-  'Rescheduled':       2,
-  'Return Trip':       5,
-  'Completed':         6,
-  'In-review':         6,
-  'Billing Completed': 7,
-  'Warranty':          7,
-};
-
-const SF_RANK = {
-  'Pending Customer Approval': 1,
-  'Quoted':                    1,
-  'Parts Ordered':             1,
-  'Ready to be scheduled':     1,
-  'Scheduled':                 2,
-  'In Progress':               5,
-  'Installation Completed':     6,
-  'Waiting on Payment':        7,
-  'Billing Complete':          8,
-  'Project Complete':          8,
-};
+// SF stages where billing has actually closed out. Once here, FS can never
+// pull SF backward — no matter how recent FS's LastUpdated looks.
+// Why: FS LastUpdated changes on any field edit, not just status, and jobs
+// are sometimes billed ahead of the field work finishing (e.g. a test/
+// inspection billed in advance while FS still shows an earlier status).
+// A fresh-looking FS timestamp in that case doesn't mean the job regressed —
+// reconcile() skips rather than trusting it. This is a business decision,
+// not a general "furthest-ahead-wins" rule: "Waiting on Payment" (billing
+// not yet closed) is NOT in this set on purpose — FS must stay free to pull
+// SF back down to Scheduled/In Progress/etc. after a job is billed early,
+// otherwise a pre-billed job could never move again on the board.
+const SF_TERMINAL_LOCKED = new Set(['Billing Complete', 'Project Complete']);
 
 // Two statuses are equivalent if they map to the same canonical value,
 // or if they are the special Billing Completed <-> Billing Complete pair
@@ -111,45 +96,27 @@ export function reconcile(fsStatus, sfStatus, fsLastUpdated, sfLastModifiedDate)
   // Already equivalent — nothing to do.
   if (areEquivalent(fsStatus, sfStatus)) return { action: 'noop' };
 
-  // Compare recency. Whichever side changed more recently wins outright,
-  // unless the timestamps are too close to be meaningful (simultaneous edits).
-  const fsTime = new Date(fsLastUpdated).getTime();
-  const sfTime = new Date(sfLastModifiedDate).getTime();
-  const THRESHOLD_MS = 60_000; // within 60 s → use rank instead
-
-  if (Math.abs(fsTime - sfTime) > THRESHOLD_MS) {
-    if (fsTime > sfTime) {
-      // FS is newer — write to SF.
-      // Special case: if SF is already at Billing Complete, don't demote.
-      if (fsStatus === 'Billing Completed' && sfStatus === 'Billing Complete') {
-        return { action: 'noop' };
-      }
-      const sfTarget = FS_TO_SF[fsStatus];
-      if (!sfTarget) return { action: 'skip', reason: `No SF mapping for FS="${fsStatus}"` };
-      return { action: 'write', target: 'sf', value: sfTarget };
-    } else {
-      // SF is newer — write to FS.
-      const fsTarget = SF_TO_FS[sfStatus];
-      if (!fsTarget) return { action: 'skip', reason: `No FS mapping for SF="${sfStatus}"` };
-      return { action: 'write', target: 'fs', value: fsTarget };
-    }
+  // Billing has actually closed on the SF side — frozen regardless of what
+  // FS's timestamp says. See SF_TERMINAL_LOCKED comment above for why.
+  if (SF_TERMINAL_LOCKED.has(sfStatus)) {
+    return { action: 'skip', reason: `SF status "${sfStatus}" is terminal — not writable from FS` };
   }
 
-  // Timestamps too close — fall back to furthest-ahead rank.
-  const fsRank = FS_RANK[fsStatus] ?? 0;
-  const sfRank = SF_RANK[sfStatus] ?? 0;
+  // Pure recency: whichever side was actually edited more recently wins.
+  const fsTime = new Date(fsLastUpdated).getTime();
+  const sfTime = new Date(sfLastModifiedDate).getTime();
 
-  if (fsRank > sfRank) {
+  if (Number.isNaN(fsTime) || Number.isNaN(sfTime) || fsTime === sfTime) {
+    return { action: 'noop' }; // no usable signal to break the tie
+  }
+
+  if (fsTime > sfTime) {
     const sfTarget = FS_TO_SF[fsStatus];
     if (!sfTarget) return { action: 'skip', reason: `No SF mapping for FS="${fsStatus}"` };
     return { action: 'write', target: 'sf', value: sfTarget };
   }
-  if (sfRank > fsRank) {
-    const fsTarget = SF_TO_FS[sfStatus];
-    if (!fsTarget) return { action: 'skip', reason: `No FS mapping for SF="${sfStatus}"` };
-    return { action: 'write', target: 'fs', value: fsTarget };
-  }
 
-  // Same rank, same timestamp — genuinely ambiguous.
-  return { action: 'noop' };
+  const fsTarget = SF_TO_FS[sfStatus];
+  if (!fsTarget) return { action: 'skip', reason: `No FS mapping for SF="${sfStatus}"` };
+  return { action: 'write', target: 'fs', value: fsTarget };
 }

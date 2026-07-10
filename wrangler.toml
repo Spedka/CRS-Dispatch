@@ -16,6 +16,14 @@ crons = ["*/5 * * * *"]
 # Client-credentials token endpoint = your My Domain (prod), NOT test.salesforce.com.
 SF_LOGIN_URL = "https://crsbuilding.my.salesforce.com"
 
+# Hidden sentinel Opportunities (record IDs, not secrets). TIME_OFF_OPPORTUNITY_ID
+# guards createAssignment() so approved time off can never rewrite the sentinel's
+# Project_Status__c into a real board status. NEW_WO_OPPORTUNITY_ID marks a
+# schedule request as "New WO Required" until the office re-points it at a real
+# Opportunity. FS_Task_Id__c on both must remain null forever — see CLAUDE.md.
+TIME_OFF_OPPORTUNITY_ID = "006Uh00000v6XJpIAM"
+NEW_WO_OPPORTUNITY_ID   = "006Uh00000v5szqIAA"
+
 # Optional: second-layer token cache so cold isolates don't each re-auth.
 [[kv_namespaces]]
 binding = "SF_TOKENS"

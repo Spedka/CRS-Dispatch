@@ -180,5 +180,47 @@ export function createFs(env) {
     return true;
   }
 
-  return { getToken, getTask, listModified, updateStatus, updateUsers, patchTask };
+  // ---- TEMPORARY — Documents API exploration (remove after investigation) --
+  // Returns raw {status, ok, body} instead of throwing/parsing so the debug
+  // route can surface FS errors verbatim, exactly as they came back.
+
+  /**
+   * TEMPORARY. List documents, optionally filtered by `type`.
+   * GET /{workspace}/api/document[?type=...]
+   */
+  async function listDocuments(type) {
+    const qs = type ? `?type=${encodeURIComponent(type)}` : '';
+    const res = await fsFetch(`/api/document${qs}`);
+    const body = await res.text();
+    const errHeader = res.headers.get('x-errorstatusmessage');
+    return { status: res.status, ok: res.ok, errHeader, body };
+  }
+
+  /**
+   * TEMPORARY. Fetch a single document's full record by ExternalId.
+   * GET /{workspace}/api/document/{externalId}
+   */
+  async function getDocument(externalId) {
+    const res = await fsFetch(`/api/document/${externalId}`);
+    const body = await res.text();
+    const errHeader = res.headers.get('x-errorstatusmessage');
+    return { status: res.status, ok: res.ok, errHeader, body };
+  }
+
+  /**
+   * TEMPORARY. Passthrough for experimenting with /api/document filter params
+   * without redeploying — caller supplies the raw (already-encoded) query string.
+   */
+  async function rawDocumentQuery(qs) {
+    const res = await fsFetch(`/api/document${qs ? `?${qs}` : ''}`);
+    const body = await res.text();
+    const errHeader = res.headers.get('x-errorstatusmessage');
+    return { status: res.status, ok: res.ok, errHeader, body };
+  }
+
+  return {
+    getToken, getTask, listModified, updateStatus, updateUsers, patchTask,
+    // TEMPORARY — remove along with the /debug/documents route.
+    listDocuments, getDocument, rawDocumentQuery,
+  };
 }
