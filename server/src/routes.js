@@ -6,6 +6,7 @@ import { FS_TO_SF, SF_TO_FS, reconcile, sfToFsStatus } from './statusMap.js';
 import { runFsSync } from './fsSync.js';
 import { createAssignment, esc, normTime, toSfTime, buildFsSchedules, getTechDirectory, invalidateTechDirectory } from './assignments.js';
 import { scheduleRequests } from './scheduleRequests.js';
+import { mintMagicLink } from './authLink.js';
 
 const f = config.fields;
 const o = config.objects;
@@ -104,6 +105,28 @@ api.post('/technicians', async (c) => {
     const result = await sf.createRecord(o.technician, fields);
     invalidateTechDirectory();
     return c.json({ id: result?.id, name: name.trim() });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Mints a chalkboard magic link for a technician (15 min TTL, stateless —
+// nothing is stored, so there's nothing to list/revoke; re-minting is the
+// only "management" action). Resolves the name server-side from technicianId
+// rather than trusting client-supplied text, since the name is the entire
+// identity embedded in the signed token.
+api.post('/tech-link', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const { technicianId } = await c.req.json();
+    if (!technicianId) return c.json({ error: 'technicianId required' }, 400);
+
+    const rows = await sf.query(`SELECT Name FROM ${o.technician} WHERE Id = '${esc(technicianId)}' LIMIT 1`);
+    const name = rows[0]?.Name;
+    if (!name) return c.json({ error: 'Technician not found' }, 404);
+
+    const { link, expiresAt } = await mintMagicLink(c.env, name);
+    return c.json({ link, expiresAt });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }

@@ -18,6 +18,13 @@ export const api = {
       body: JSON.stringify({ name, fsUserId }),
     }).then(j),
 
+  getTechLink: (technicianId) =>
+    fetch('/api/tech-link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ technicianId }),
+    }).then(j),
+
   getFsUsers: () => fetch('/api/fs-users').then(j),
 
   updateJob: (oppId, fields) =>

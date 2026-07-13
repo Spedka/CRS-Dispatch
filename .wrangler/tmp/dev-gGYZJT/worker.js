@@ -3067,6 +3067,49 @@ scheduleRequests.post("/schedule-requests/:id/deny", async (c) => {
   }
 });
 
+// server/src/authLink.js
+var DEV_FALLBACK_SECRET = "chalkboard-dev-insecure-secret-do-not-use-in-prod";
+var MAGIC_LINK_TTL_MS = 15 * 60 * 1e3;
+function base64url(bytes) {
+  const arr = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
+  return btoa(String.fromCharCode(...arr)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+__name(base64url, "base64url");
+function base64urlEncodeString(str) {
+  return base64url(new TextEncoder().encode(str));
+}
+__name(base64urlEncodeString, "base64urlEncodeString");
+var warnedDevSecret = false;
+function getAuthSecret(env) {
+  if (env.AUTH_SECRET) return env.AUTH_SECRET;
+  if (!warnedDevSecret) {
+    console.warn("[authLink] AUTH_SECRET not set \u2014 using insecure dev fallback. Set via `wrangler secret put AUTH_SECRET` (same value as the chalkboard worker) before relying on this in production.");
+    warnedDevSecret = true;
+  }
+  return DEV_FALLBACK_SECRET;
+}
+__name(getAuthSecret, "getAuthSecret");
+async function signPayload(env, payload) {
+  const encodedPayload = base64urlEncodeString(JSON.stringify(payload));
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(getAuthSecret(env)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(encodedPayload));
+  return `${encodedPayload}.${base64url(sig)}`;
+}
+__name(signPayload, "signPayload");
+async function mintMagicLink(env, name) {
+  const exp = Date.now() + MAGIC_LINK_TTL_MS;
+  const token = await signPayload(env, { kind: "magic", name, exp });
+  const appUrl = (env.CHALKBOARD_APP_URL || "https://chalkboard.crsbas.workers.dev").replace(/\/+$/, "");
+  return { link: `${appUrl}/?token=${token}`, expiresAt: exp };
+}
+__name(mintMagicLink, "mintMagicLink");
+
 // server/src/routes.js
 var f3 = config.fields;
 var o3 = config.objects;
@@ -3152,6 +3195,20 @@ api.post("/technicians", async (c) => {
     const result = await sf.createRecord(o3.technician, fields);
     invalidateTechDirectory();
     return c.json({ id: result?.id, name: name.trim() });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+api.post("/tech-link", async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const { technicianId } = await c.req.json();
+    if (!technicianId) return c.json({ error: "technicianId required" }, 400);
+    const rows = await sf.query(`SELECT Name FROM ${o3.technician} WHERE Id = '${esc(technicianId)}' LIMIT 1`);
+    const name = rows[0]?.Name;
+    if (!name) return c.json({ error: "Technician not found" }, 404);
+    const { link, expiresAt } = await mintMagicLink(c.env, name);
+    return c.json({ link, expiresAt });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -3765,7 +3822,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-koRh9i/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-WJbhaJ/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -3797,7 +3854,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-koRh9i/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-WJbhaJ/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;

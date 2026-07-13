@@ -24,6 +24,9 @@ SF_LOGIN_URL = "https://crsbuilding.my.salesforce.com"
 TIME_OFF_OPPORTUNITY_ID = "006Uh00000v6XJpIAM"
 NEW_WO_OPPORTUNITY_ID   = "006Uh00000v5szqIAA"
 
+# Public URL of the chalkboard app — magic links from POST /api/tech-link point here.
+CHALKBOARD_APP_URL = "https://chalkboard.crsbas.workers.dev"
+
 # Optional: second-layer token cache so cold isolates don't each re-auth.
 [[kv_namespaces]]
 binding = "SF_TOKENS"

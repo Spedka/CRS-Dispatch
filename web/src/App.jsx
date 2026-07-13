@@ -412,6 +412,7 @@ export default function App() {
   const [newTechName, setNewTechName] = useState('');
   const [newTechFsId, setNewTechFsId] = useState('');
   const [addTechSaving, setAddTechSaving] = useState(false);
+  const [techLinksOpen, setTechLinksOpen] = useState(false);
   const [fsUsers, setFsUsers] = useState([]);
   const [fsUsersLoading, setFsUsersLoading] = useState(false);
 
@@ -898,6 +899,7 @@ export default function App() {
         </div>
         <div className="bar-spacer" />
         <button className="refresh" onClick={() => setAddTechOpen(true)} title="Add a technician">+ Add Tech</button>
+        <button className="refresh" onClick={() => setTechLinksOpen(true)} title="Get a chalkboard sign-in link for a technician">Tech Links</button>
         <button className="refresh" onClick={() => load()} title="Reload from Salesforce">↻ Refresh</button>
         <div className="synced">
           <span className="dot" />
@@ -1230,7 +1232,59 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {techLinksOpen && (
+        <TechLinksModal techs={techs} onClose={() => setTechLinksOpen(false)} />
+      )}
     </>
+  );
+}
+
+function TechLinksModal({ techs, onClose }) {
+  const [minting, setMinting] = useState(null); // technicianId currently being minted
+  const [copiedId, setCopiedId] = useState(null); // technicianId just copied, brief confirmation
+
+  const copyLink = async (tech) => {
+    setMinting(tech.id);
+    try {
+      const { link } = await api.getTechLink(tech.id);
+      await navigator.clipboard.writeText(link);
+      setCopiedId(tech.id);
+      setTimeout(() => setCopiedId((id) => (id === tech.id ? null : id)), 2000);
+    } catch (e) {
+      alert(`Could not get link: ${e.message}`);
+    } finally {
+      setMinting(null);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Chalkboard sign-in links</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          <p className="tech-links-hint">
+            Each link is freshly minted and expires in 15 minutes. Nothing is stored, so there's nothing to revoke — copy a new one whenever a tech needs to sign in.
+          </p>
+          <div className="tech-links-list">
+            {techs.map((t) => (
+              <div className="tech-link-row" key={t.id}>
+                <span className="tech-link-name">{t.name}</span>
+                <button className="req-btn approve" onClick={() => copyLink(t)} disabled={minting === t.id}>
+                  {minting === t.id ? 'Copying…' : copiedId === t.id ? 'Copied' : 'Copy Link'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="modal-cancel-btn" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
