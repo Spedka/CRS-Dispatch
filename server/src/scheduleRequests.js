@@ -60,7 +60,7 @@ scheduleRequests.post('/schedule-requests/:id/approve', async (c) => {
     const { opportunityId } = await c.req.json().catch(() => ({}));
 
     const rows = await sf.query(
-      `SELECT Id, ${sr.job}, ${sr.type}, ${sr.tech}, ${sr.proposedDate}, ${sr.proposedStart},
+      `SELECT Id, ${sr.job}, ${sr.type}, ${sr.tech}, ${sr.proposedDate}, ${sr.proposedStart}, ${sr.proposedEnd},
               ${sr.status}, ${sr.lastOfferBy}
        FROM ${sr.sobject} WHERE Id = '${esc(id)}' LIMIT 1`
     );
@@ -75,14 +75,21 @@ scheduleRequests.post('/schedule-requests/:id/approve', async (c) => {
       return c.json({ error: 'Cannot approve — waiting on technician response' }, 409);
     }
 
-    let targetOppId = reqRec[sr.job];
-    if (targetOppId === c.env.NEW_WO_OPPORTUNITY_ID && !opportunityId) {
-      return c.json({ error: 'opportunityId required to approve a "New WO Required" request' }, 400);
-    }
-    if (opportunityId) {
-      // Re-point first — preserves the trail from the original ask to the real job.
-      await sf.updateRecord(sr.sobject, id, { [sr.job]: opportunityId });
-      targetOppId = opportunityId;
+    // Time off isn't tied to a job — Job__c may be blank on these records — so
+    // the target is derived from Type__c, not read off Job__c. Everything else
+    // (job requests, "New WO Required") does use Job__c as the target.
+    const isTimeOff = reqRec[sr.type] === 'Time off';
+    let targetOppId = isTimeOff ? c.env.TIME_OFF_OPPORTUNITY_ID : reqRec[sr.job];
+
+    if (!isTimeOff) {
+      if (targetOppId === c.env.NEW_WO_OPPORTUNITY_ID && !opportunityId) {
+        return c.json({ error: 'opportunityId required to approve a "New WO Required" request' }, 400);
+      }
+      if (opportunityId) {
+        // Re-point first — preserves the trail from the original ask to the real job.
+        await sf.updateRecord(sr.sobject, id, { [sr.job]: opportunityId });
+        targetOppId = opportunityId;
+      }
     }
 
     // status passed unconditionally — createAssignment's time-off sentinel guard
@@ -91,6 +98,7 @@ scheduleRequests.post('/schedule-requests/:id/approve', async (c) => {
       technicianId: reqRec[sr.tech],
       workDate: reqRec[sr.proposedDate],
       startTime: normTime(reqRec[sr.proposedStart]),
+      endTime: normTime(reqRec[sr.proposedEnd]),
       status: 'Scheduled',
       deriveScheduledDate: true,
     });

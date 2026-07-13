@@ -110,6 +110,17 @@ export function createFs(env) {
   }
 
   /**
+   * List FS users modified since a given ISO date string. Response shape:
+   * { ExternalId, Name, Initials, Phone, Email, UserType, Enabled, Teams, ... }[]
+   * ExternalId here is the same "FS user ObjectId" used in a task's Users array.
+   */
+  async function listUsers(since) {
+    const res = await fsFetch(`/api/user?modifiedsince=${since}`);
+    if (!res.ok) throw new Error(`FS listUsers failed: ${res.status} ${await res.text()}`);
+    return res.json(); // array of user objects
+  }
+
+  /**
    * Update a task's status (and any other top-level fields).
    * Name and TaskType are required by FS even for partial updates.
    */
@@ -219,7 +230,7 @@ export function createFs(env) {
   }
 
   return {
-    getToken, getTask, listModified, updateStatus, updateUsers, patchTask,
+    getToken, getTask, listModified, listUsers, updateStatus, updateUsers, patchTask,
     // TEMPORARY — remove along with the /debug/documents route.
     listDocuments, getDocument, rawDocumentQuery,
   };

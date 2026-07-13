@@ -49,6 +49,7 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
 .chip.on .ct{background:rgba(255,255,255,.18);color:#fff;}
 
 .jobs{display:flex;flex-direction:column;gap:10px;}
+.scroll-sentinel{height:1px;}
 .empty{padding:40px;text-align:center;color:var(--ink-faint);background:var(--surface);border:1px dashed var(--line-strong);border-radius:var(--radius);}
 .job{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);display:grid;grid-template-columns:4px 1fr;overflow:hidden;}
 .stripe{width:4px;}
@@ -216,8 +217,9 @@ td.open{background:var(--open-bg);}
 
 /* approved time off — overlaid on the tech schedule, distinct from job chips */
 .sched td.offcol{background:#F5F0FA;}
-.offchip{background:#EDE4F7;border:1px solid #D3BFEC;color:#6B3FA0;border-radius:7px;padding:6px 9px;margin-bottom:6px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;}
+.offchip{background:#EDE4F7;border:1px solid #D3BFEC;color:#6B3FA0;border-radius:7px;padding:6px 9px;margin-bottom:6px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer;transition:background .12s;}
 .offchip:last-child{margin-bottom:0;}
+.offchip:hover{background:#E1D3F5;}
 
 /* month grid */
 .month{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);}
@@ -238,12 +240,19 @@ td.open{background:var(--open-bg);}
 .dayjob .jn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--ink);}
 .dayjob .inits{font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:var(--ink-faint);white-space:nowrap;}
 
+.dayoff{display:flex;align-items:center;gap:6px;font-size:11px;background:#EDE4F7;border-left:3px solid #B98FE0;border-radius:5px;padding:3px 7px;cursor:pointer;}
+.dayoff:hover{background:#E1D3F5;}
+.dayoff .jn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:#6B3FA0;}
+
 .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;padding:11px 18px;border-radius:10px;font-size:13px;font-weight:500;display:flex;align-items:center;gap:10px;box-shadow:0 12px 32px rgba(22,32,46,.28);z-index:50;}
 .toast .tsf{font-family:'IBM Plex Mono',monospace;font-size:11px;color:#9FB0C4;}
 
 /* Job detail modal */
 .modal-backdrop{position:fixed;inset:0;background:rgba(22,32,46,.5);display:flex;align-items:center;justify-content:center;z-index:200;padding:24px;}
 .modal{background:var(--surface);border-radius:var(--radius);box-shadow:0 24px 80px rgba(22,32,46,.3);width:100%;max-width:660px;max-height:88vh;overflow:auto;display:flex;flex-direction:column;}
+.modal.modal-sm{max-width:420px;}
+.modal.modal-sm .modal-body{gap:14px;}
+.fs-users-loading{font-size:12.5px;color:var(--ink-faint);padding:8px 0;}
 .modal-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 14px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--surface);z-index:1;}
 .modal-title-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 .modal-close{border:none;background:none;cursor:pointer;font-size:22px;line-height:1;color:var(--ink-faint);padding:2px 6px;border-radius:6px;flex-shrink:0;}
@@ -252,6 +261,7 @@ td.open{background:var(--open-bg);}
 .modal-body .meta{flex-wrap:wrap;}
 .modal-body .assignlist{border-top:none;padding-top:0;}
 .modal-footer{display:flex;align-items:center;gap:10px;padding:14px 20px;border-top:1px solid var(--line);background:var(--surface-2);border-radius:0 0 var(--radius) var(--radius);}
+.modal-footer-spacer{flex:1;}
 .modal-save-btn{font:inherit;font-size:13px;font-weight:600;background:var(--brand);color:#fff;border:none;border-radius:8px;padding:9px 20px;cursor:pointer;}
 .modal-save-btn:hover{background:var(--brand-bright);}
 .modal-save-btn:disabled{opacity:.6;cursor:default;}

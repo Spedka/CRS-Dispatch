@@ -10,10 +10,37 @@ export const esc = (s) => String(s).replace(/'/g, "\\'");
 export const normTime = (v) => (v ? String(v).slice(0, 5) : null);
 export const toSfTime = (hhmm) => (hhmm ? `${hhmm}:00.000Z` : null);
 
-// Reverse of config.fsTechUsers: SF tech name → FS user ObjectId
-export const fsUserByTechName = Object.fromEntries(
-  Object.entries(config.fsTechUsers).map(([fsId, name]) => [name, fsId])
-);
+// Live FS↔SF technician directory, read from Salesforce (Technician__c +
+// FS_User_Id__c) instead of a hardcoded map — this is what lets "Add Tech" in
+// the board UI take effect without a code deploy. Cached per-isolate for a
+// short window since it's queried on most assignment/sync operations;
+// invalidateTechDirectory() clears it right after a new tech is created so
+// the next call sees them immediately.
+const TECH_DIR_TTL_MS = 60_000;
+let techDirCache = { data: null, expires: 0 };
+
+export async function getTechDirectory(sf) {
+  const now = Date.now();
+  if (techDirCache.data && now < techDirCache.expires) return techDirCache.data;
+
+  const rows = await sf.query(
+    `SELECT Id, Name, ${o.technicianFsUserId} FROM ${o.technician} WHERE ${o.technicianActive} = true`
+  );
+  const byName = {};
+  const byFsId = {};
+  for (const r of rows) {
+    const fsUserId = r[o.technicianFsUserId] || null;
+    byName[r.Name] = { sfId: r.Id, fsUserId };
+    if (fsUserId) byFsId[fsUserId] = { sfId: r.Id, name: r.Name };
+  }
+  const data = { byName, byFsId };
+  techDirCache = { data, expires: now + TECH_DIR_TTL_MS };
+  return data;
+}
+
+export function invalidateTechDirectory() {
+  techDirCache = { data: null, expires: 0 };
+}
 
 // US Eastern DST: second Sunday of March → first Sunday of November.
 function nthSunday(year, month, n) {
@@ -71,6 +98,7 @@ export async function createAssignment(env, oppId, {
   technicianId,
   workDate,
   startTime,
+  endTime,
   status,
   scheduledDate,
   deriveScheduledDate = false,
@@ -79,7 +107,8 @@ export async function createAssignment(env, oppId, {
   // Opportunity. Its Project_Status__c sits outside jobStatusValues on
   // purpose — that's what keeps it off the board. Guard here, not in each
   // caller, so nothing can rewrite the sentinel into a real board status.
-  if (oppId === env.TIME_OFF_OPPORTUNITY_ID) {
+  const isTimeOff = oppId === env.TIME_OFF_OPPORTUNITY_ID;
+  if (isTimeOff) {
     status = null;
     scheduledDate = null;
     deriveScheduledDate = false;
@@ -92,6 +121,10 @@ export async function createAssignment(env, oppId, {
     [o.assignmentTechLookup]: technicianId,
     [o.assignmentStartTime]: toSfTime(startTime || '07:00'),
   };
+  if (endTime) fields[o.assignmentEndTime] = toSfTime(endTime);
+  // Time_Off__c, not the sentinel Opportunity Id, is how the tech app tells a
+  // time-off assignment apart from a real job assignment.
+  if (isTimeOff) fields[o.assignmentTimeOff] = true;
   if (typeof workDate !== 'undefined') {
     fields[o.assignmentDate] = workDate === '' ? null : workDate;
   }
@@ -139,8 +172,9 @@ export async function createAssignment(env, oppId, {
   // (see the fsTaskId check below), but skip explicitly here on the same
   // condition as the guard above so the intent isn't implicit.
   const fsDebug = { techName: assignmentRec?.technicianName ?? null, fsUserId: null, fsTaskId: null, patch: null, error: null };
-  if (assignmentRec?.technicianName && oppId !== env.TIME_OFF_OPPORTUNITY_ID) {
-    const fsUserId = fsUserByTechName[assignmentRec.technicianName];
+  if (assignmentRec?.technicianName && !isTimeOff) {
+    const techDir = await getTechDirectory(sf);
+    const fsUserId = techDir.byName[assignmentRec.technicianName]?.fsUserId;
     fsDebug.fsUserId = fsUserId ?? `NOT IN MAP (name="${assignmentRec.technicianName}")`;
     if (fsUserId) {
       let fsTaskId = null;

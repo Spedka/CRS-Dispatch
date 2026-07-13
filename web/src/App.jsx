@@ -195,6 +195,187 @@ function deriveJobStatusFromAssignments(job) {
   return { status: 'Ready to be scheduled', scheduledDate: '' };
 }
 
+// Ticks once a second on its own — kept out of App so the "synced Xs ago"
+// display doesn't force a full-tree re-render of every job card every second.
+function SyncedAgo({ lastSync }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return <span className="ago">{lastSync ? fmtAgo(now - lastSync) : '…'}</span>;
+}
+
+// Wrapped in React.memo so typing/ticking elsewhere in App doesn't re-render
+// every job card — only the ones whose own props actually changed. That only
+// works because every handler prop below is stabilized with useCallback in
+// App, and fsLinkForJob/pendingAddForJob collapse to `null` for every row
+// except the one with a panel open (see the .map() call site in App).
+const JobCard = React.memo(function JobCard({
+  job, readOnly, techs, fsLinkForJob, pendingAddForJob,
+  onToggleDone, onAssignmentDateChange, onAssignmentTimeChange, onUnassign, onAssign,
+  onSetStatus, onOpenFsLink, onCloseFsLink, onFsLinkChange, onPendingAddChange,
+  onSearchFs, onConfirmFsLink,
+}) {
+  if (readOnly) {
+    return (
+      <div className="job ro">
+        <div className="stripe" data-status={statusClass(job.status)} />
+        <div className="body">
+          <div className="row1">
+            <span className="jname">{job.name}</span>
+            {job.lid && <span className="lidtag">LID {job.lid}</span>}
+            {job.fsTaskId
+              ? <span className="fs-badge linked" title={`FS task: ${job.fsTaskId}`}>⬡ FS</span>
+              : <span className="fs-badge unlinked" title="No Field Squared task linked">⬡ FS</span>}
+            <FsDriftBadge job={job} />
+            <span className={`badge ${statusClass(job.status)}`}>{job.status}</span>
+          </div>
+          <div className="meta">
+            <span><span className="ic">◍</span>{job.address || 'No address'}</span>
+            {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}
+            {job.scheduledDate && <span className="created">Scheduled {fmtDate(job.scheduledDate)}</span>}
+          </div>
+          {job.assignments.length > 0 && (
+            <div className="rotechs">
+              {job.assignments.map((a) => (
+                <span className="rotech" key={a.assignmentId}>
+                  {a.completed ? '✓ ' : ''}{a.technicianName}{a.workDate ? ` · ${fmtDate(a.workDate)}` : ''}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const fsOpen = !!fsLinkForJob;
+
+  return (
+    <div className="job">
+      <div className="stripe" data-status={statusClass(job.status)} />
+      <div className="body">
+        <div className="row1">
+          <span className="jname">{job.name}</span>
+          {job.lid && <span className="lidtag">LID {job.lid}</span>}
+          {job.fsTaskId
+            ? <span className="fs-badge linked" title={`FS task: ${job.fsTaskId}`}>⬡ FS</span>
+            : <button className="fs-badge unlinked fs-attach-btn" title="Attach Field Squared job" onClick={() => fsOpen ? onCloseFsLink() : onOpenFsLink(job.id)}>⬡ Attach FS</button>}
+          <FsDriftBadge job={job} />
+          <select
+            className={`statussel ${statusClass(job.status)}`}
+            value={job.status}
+            onChange={(e) => onSetStatus(job, e.target.value)}
+          >
+            {!ASSIGNABLE_STATUSES.includes(job.status) && <option value={job.status}>{job.status}</option>}
+            {ASSIGNABLE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        {fsOpen && (
+          <div className="fs-attach-panel">
+            <div className="fs-attach-header">
+              <span className="fs-attach-title">Search Field Squared</span>
+              <button className="fs-attach-close" onClick={onCloseFsLink} aria-label="Close">×</button>
+            </div>
+            <div className="fs-attach-row">
+              <input
+                className="fs-attach-input"
+                type="text"
+                placeholder="Type part of the FS job name…"
+                value={fsLinkForJob.query}
+                onChange={(e) => onFsLinkChange((s) => ({ ...s, query: e.target.value }))}
+                onKeyDown={(e) => e.key === 'Enter' && onSearchFs(fsLinkForJob.query)}
+                autoFocus
+              />
+              <button className="fs-btn-search" onClick={() => onSearchFs(fsLinkForJob.query)} disabled={fsLinkForJob.searching || fsLinkForJob.query.trim().length < 3}>
+                {fsLinkForJob.searching ? '…' : 'Search'}
+              </button>
+            </div>
+            {fsLinkForJob.error && <div className="fs-attach-error">{fsLinkForJob.error}</div>}
+            {fsLinkForJob.matches !== null && fsLinkForJob.matches.length === 0 && (
+              <div className="fs-attach-empty">No FS tasks found with that name.</div>
+            )}
+            {fsLinkForJob.matches && fsLinkForJob.matches.map((m) => (
+              <div className="fs-attach-result" key={m.externalId}>
+                <div className="fs-result-info">
+                  <div className="fs-result-name">{m.name}</div>
+                  <div className="fs-result-meta">{m.taskType} · {m.status}</div>
+                </div>
+                <button className="fs-btn-link" onClick={() => onConfirmFsLink(job.id, m.externalId, m.name)}>Link</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="meta">
+          <span><span className="ic">◍</span>{job.address || 'No address'}</span>
+          {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}
+          <span className="nextlabel">Next scheduled</span>
+          <span className="dateinput ro" title="Next scheduled assignment date">
+            {nextScheduledAssignmentDate(job) ? fmtDate(nextScheduledAssignmentDate(job)) : '—'}
+          </span>
+          {nextScheduledAssignmentDate(job)
+            ? <span className="created">Scheduled {fmtDate(nextScheduledAssignmentDate(job))}</span>
+            : <span className="unsched-tag">None</span>}
+        </div>
+        <div className="assignlist">
+          {job.assignments.length === 0 && <span className="unassigned-tag">No techs assigned</span>}
+          {job.assignments.map((a) => {
+            const cls = a.completed ? 'done' : (!a.workDate ? 'unscheduled' : '');
+            return (
+              <div className={`assignrow ${cls}`} key={a.assignmentId}>
+                <button
+                  className="check"
+                  onClick={() => onToggleDone(job, a)}
+                  title={a.completed ? 'Worked this day — click to reopen' : 'Mark as worked (freezes the date)'}
+                  aria-label="Toggle done"
+                >{a.completed ? '✓' : '○'}</button>
+                <span className="aname">{a.technicianName || 'Tech'}</span>
+                <DatePicker className="dp-adate" value={a.workDate || ''} onChange={(v) => onAssignmentDateChange(job, a, v)} placeholder="Date" />
+                <input
+                  className="atime"
+                  type="time"
+                  defaultValue={a.startTime || '07:00'}
+                  onBlur={(e) => { if (e.target.value) onAssignmentTimeChange(job, a, e.target.value); }}
+                  title="Start time"
+                  disabled={a.completed}
+                  key={a.assignmentId + (a.startTime || '07:00')}
+                />
+                {!a.workDate && !a.completed && <span className="untag">unscheduled</span>}
+                <button className="x" onClick={() => onUnassign(job, a.assignmentId)} aria-label="Remove">×</button>
+              </div>
+            );
+          })}
+          <div>
+            <select className="addtech" value="" onChange={(e) => {
+              const techId = e.target.value;
+              if (!techId) return;
+              e.target.value = '';
+              onPendingAddChange({ jobId: job.id, techId, date: job.scheduledDate || '', time: '' });
+            }}>
+              <option value="">+ Add assignment</option>
+              {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+            {pendingAddForJob && (
+              <div className="inline-add">
+                <span className="pending-tech">{techs.find((t) => t.id === pendingAddForJob.techId)?.name}</span>
+                <DatePicker className="dp-adate" value={pendingAddForJob.date || ''} onChange={(v) => onPendingAddChange((p) => ({ ...p, date: v }))} placeholder="Date" />
+                <input className="atime" type="time" value={pendingAddForJob.time || '07:00'} onChange={(e) => onPendingAddChange((p) => ({ ...p, time: e.target.value }))} title="Start time" />
+                <button className="add-btn" onClick={async () => {
+                  const { techId, date, time } = pendingAddForJob;
+                  onPendingAddChange({ jobId: null, techId: '', date: '', time: '' });
+                  await onAssign(job, techId, date || '', time || '07:00');
+                }}>Add</button>
+                <button className="cancel-btn" onClick={() => onPendingAddChange({ jobId: null, techId: '', date: '', time: '' })}>Cancel</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 export default function App() {
   const [tab, setTab] = useState('jobs');
   const [jobs, setJobs] = useState([]);
@@ -206,13 +387,16 @@ export default function App() {
   const [sortBy, setSortBy] = useState('scheduled');
   const [jobTech, setJobTech] = useState('all');
   const [jobType, setJobType] = useState('all');
+  // Infinite scroll on the jobs list — only the first `visibleCount` of `shown`
+  // are ever mounted. Everything's already loaded client-side (no server paging),
+  // so "loading more" just raises this cap; no extra fetch involved.
+  const [visibleCount, setVisibleCount] = useState(50);
   const [extraJobs, setExtraJobs] = useState([]);   // jobs fetched for a terminal-status filter
   const [extraLoading, setExtraLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
   const [lastSync, setLastSync] = useState(null);
-  const [now, setNow] = useState(Date.now());
   const [pendingAdd, setPendingAdd] = useState({ jobId: null, techId: '', date: '', time: '' });
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [fsLink, setFsLink] = useState({ jobId: null, query: '', searching: false, matches: null, error: null });
@@ -224,10 +408,20 @@ export default function App() {
   const [contactsLoaded, setContactsLoaded] = useState(false);
   const [scheduleRequests, setScheduleRequests] = useState([]);
   const [requestsLoading, setRequestsLoading] = useState(false);
+  const [addTechOpen, setAddTechOpen] = useState(false);
+  const [newTechName, setNewTechName] = useState('');
+  const [newTechFsId, setNewTechFsId] = useState('');
+  const [addTechSaving, setAddTechSaving] = useState(false);
+  const [fsUsers, setFsUsers] = useState([]);
+  const [fsUsersLoading, setFsUsersLoading] = useState(false);
 
   // Count of in-flight writes. While > 0 the poll holds off so a background
   // refresh can't overwrite a change you just made but that hasn't saved yet.
   const pending = useRef(0);
+
+  // Infinite-scroll sentinel ref — the observer effect lives further down,
+  // after `shown` is computed (it needs shown.length to know when to re-attach).
+  const scrollSentinelRef = useRef(null);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -252,6 +446,12 @@ export default function App() {
     }
   }, [closedFrom, closedTo]);
 
+  // A new search/filter is a new list — start from the top rather than keeping
+  // whatever scroll depth was reached under the previous one.
+  useEffect(() => {
+    setVisibleCount(50);
+  }, [query, filter, jobTech, jobType, closedFrom, closedTo, sortBy]);
+
   useEffect(() => {
     const id = setInterval(() => { if (pending.current === 0) load(true); }, POLL_MS);
     return () => clearInterval(id);
@@ -275,11 +475,6 @@ export default function App() {
       setModalSaving(false);
     }
   }, [selectedJobId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   useEffect(() => {
     if (tab !== 'contacts' || contactsLoaded) return;
@@ -347,6 +542,42 @@ export default function App() {
     }
   };
 
+  // FS roster loaded lazily, the moment the modal opens — the picklist replaces
+  // hand-typing an opaque FS ObjectId.
+  useEffect(() => {
+    if (!addTechOpen) return;
+    setFsUsersLoading(true);
+    api.getFsUsers()
+      .then(({ users }) => setFsUsers(users))
+      .catch((e) => flash(`Could not load Field Squared users: ${e.message}`))
+      .finally(() => setFsUsersLoading(false));
+  }, [addTechOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fsUserOptions = useMemo(() =>
+    fsUsers.map((u) => [u.externalId, u.userType ? `${u.name} — ${u.userType}` : u.name])
+  , [fsUsers]);
+
+  const closeAddTech = () => {
+    setAddTechOpen(false);
+    setNewTechName('');
+    setNewTechFsId('');
+  };
+
+  const submitAddTech = async () => {
+    if (!newTechName.trim()) return;
+    setAddTechSaving(true);
+    try {
+      const created = await track(() => api.addTechnician(newTechName.trim(), newTechFsId));
+      setTechs((prev) => [...prev, { id: created.id, name: created.name }].sort((a, b) => a.name.localeCompare(b.name)));
+      flash(`${created.name} added`);
+      closeAddTech();
+    } catch (e) {
+      flash(`Could not add tech: ${e.message}`);
+    } finally {
+      setAddTechSaving(false);
+    }
+  };
+
   // Terminal statuses aren't pulled with the board (could be huge history), so
   // fetch them on demand the moment such a filter is picked.
   useEffect(() => {
@@ -360,15 +591,18 @@ export default function App() {
     return () => { cancelled = true; };
   }, [filter]);
 
-  const flash = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2200); };
+  // Stabilized with useCallback (empty deps — they only touch state setters and
+  // the pending ref, both stable) so JobCard's React.memo below actually works:
+  // an unstable handler prop defeats memoization for every row, not just one.
+  const flash = useCallback((msg) => { setToast(msg); setTimeout(() => setToast(null), 2200); }, []);
 
-  const track = async (fn) => {
+  const track = useCallback(async (fn) => {
     pending.current += 1;
     try { return await fn(); }
     finally { pending.current -= 1; }
-  };
+  }, []);
 
-  const assign = async (job, technicianId, workDate, startTime = '07:00') => {
+  const assign = useCallback(async (job, technicianId, workDate, startTime = '07:00') => {
     const tech = techs.find((t) => t.id === technicianId);
     try {
       // Compute derived status before the call so the server can update the SF Opp
@@ -385,9 +619,9 @@ export default function App() {
       setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updated, ...derived } : j));
       flash(`${tech?.name} added to ${job.name}`);
     } catch (e) { flash(`Could not assign: ${e.message}`); }
-  };
+  }, [techs, flash, track]);
 
-  const unassign = async (job, assignmentId) => {
+  const unassign = useCallback(async (job, assignmentId) => {
     const updatedAssignments = job.assignments.filter((a) => a.assignmentId !== assignmentId);
     const updatedJob = { ...job, assignments: updatedAssignments };
     const { status, scheduledDate } = deriveJobStatusFromAssignments(updatedJob);
@@ -397,11 +631,11 @@ export default function App() {
       await track(() => api.updateJob(job.id, { status, scheduledDate, _suppressRelease: true }));
       flash('Tech removed');
     } catch (e) { flash(`Could not remove: ${e.message}`); load(true); }
-  };
+  }, [flash, track, load]);
 
   // Mark/unmark a tech's work as actually done. Completed assignments freeze on
   // their date (real history) and won't move when the job is rescheduled.
-  const toggleDone = async (job, a) => {
+  const toggleDone = useCallback(async (job, a) => {
     const next = !a.completed;
     const updatedJob = {
       ...job,
@@ -414,10 +648,10 @@ export default function App() {
       await track(() => api.updateJob(job.id, { status, scheduledDate, _suppressRelease: true }));
       flash(next ? `${a.technicianName} marked done` : `${a.technicianName} reopened`);
     } catch (e) { flash(`Could not update: ${e.message}`); load(true); }
-  };
+  }, [flash, track, load]);
 
   // Edit a single assignment's own date.
-  const setAssignmentDate = async (job, a, date) => {
+  const setAssignmentDate = useCallback(async (job, a, date) => {
     const updatedJob = {
       ...job,
       assignments: job.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, workDate: date || null } : x),
@@ -430,9 +664,9 @@ export default function App() {
       flash('Assignment date saved');
       await load(true);
     } catch (e) { flash(`Could not save date: ${e.message}`); load(true); }
-  };
+  }, [flash, track, load]);
 
-  const setAssignmentTime = async (job, a, time) => {
+  const setAssignmentTime = useCallback(async (job, a, time) => {
     const t = time || '07:00';
     const updatedJob = {
       ...job,
@@ -443,7 +677,7 @@ export default function App() {
       await track(() => api.updateAssignment(a.assignmentId, { startTime: t }));
       await load(true);
     } catch (e) { flash(`Could not save time: ${e.message}`); load(true); }
-  };
+  }, [flash, track, load]);
 
   const setDate = async (job, date) => {
     // Giving an un-advanced job a date schedules it; clearing returns it to queue.
@@ -479,7 +713,7 @@ export default function App() {
     } catch (e) { flash(`Could not unschedule: ${e.message}`); load(true); }
   };
 
-  const setStatus = async (job, status) => {
+  const setStatus = useCallback(async (job, status) => {
     const offBoard = !BOARD_STATUSES.includes(status);
     setJobs((prev) => offBoard
       ? prev.filter((j) => j.id !== job.id)
@@ -496,24 +730,28 @@ export default function App() {
         flash('Status updated');
       }
     } catch (e) { flash(`Could not update: ${e.message}`); load(true); }
-  };
+  }, [flash, track, load]);
 
-  const openFsLink = (jobId) => setFsLink({ jobId, query: '', searching: false, matches: null, error: null });
-  const closeFsLink = () => setFsLink({ jobId: null, query: '', searching: false, matches: null, error: null });
+  const openFsLink = useCallback((jobId) => setFsLink({ jobId, query: '', searching: false, matches: null, error: null }), []);
+  const closeFsLink = useCallback(() => setFsLink({ jobId: null, query: '', searching: false, matches: null, error: null }), []);
 
-  const searchFs = async () => {
-    if (fsLink.query.trim().length < 3) return;
+  // Takes the query explicitly rather than reading fsLink.query via closure —
+  // this and confirmFsLink below are passed to every JobCard, so if either
+  // read fsLink from closure their reference would change on every keystroke
+  // in the FS-search box, silently defeating React.memo for ALL job cards,
+  // not just the one with the panel open.
+  const searchFs = useCallback(async (query) => {
+    if (query.trim().length < 3) return;
     setFsLink((s) => ({ ...s, searching: true, matches: null, error: null }));
     try {
-      const { matches } = await api.searchFsTasks(fsLink.query.trim());
+      const { matches } = await api.searchFsTasks(query.trim());
       setFsLink((s) => ({ ...s, searching: false, matches }));
     } catch (e) {
       setFsLink((s) => ({ ...s, searching: false, error: e.message }));
     }
-  };
+  }, []);
 
-  const confirmFsLink = async (fsTaskId, fsTaskName) => {
-    const jobId = fsLink.jobId;
+  const confirmFsLink = useCallback(async (jobId, fsTaskId, fsTaskName) => {
     closeFsLink();
     try {
       const result = await api.linkFsTask(jobId, fsTaskId);
@@ -528,7 +766,7 @@ export default function App() {
     } catch (e) {
       flash(`Link failed: ${e.message}`);
     }
-  };
+  }, [closeFsLink, load, flash]);
 
   const saveModal = async () => {
     const originalJob = jobs.find((j) => j.id === selectedJobId);
@@ -636,6 +874,20 @@ export default function App() {
     return [...filtered].sort(sorters[sortBy] || sorters.scheduled);
   }, [jobs, extraJobs, viewingTerminal, filter, query, jobTech, jobType, closedFrom, closedTo, sortBy]);
 
+  // Re-attaches on every shown.length change (not just mount) — the sentinel
+  // <div> only exists in the DOM once shown.length > visibleCount, so a plain
+  // mount-only effect could miss it entirely if the list started out short and
+  // only grew past the cap later.
+  useEffect(() => {
+    const el = scrollSentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) setVisibleCount((c) => c + 50);
+    }, { rootMargin: '400px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [shown.length]);
+
   return (
     <>
       <div className="topline" />
@@ -645,11 +897,12 @@ export default function App() {
           <div><h1>CRS Dispatch</h1><span>Field Work Board</span></div>
         </div>
         <div className="bar-spacer" />
+        <button className="refresh" onClick={() => setAddTechOpen(true)} title="Add a technician">+ Add Tech</button>
         <button className="refresh" onClick={() => load()} title="Reload from Salesforce">↻ Refresh</button>
         <div className="synced">
           <span className="dot" />
           <span className="lbl">Live · Salesforce</span>
-          <span className="ago">{lastSync ? fmtAgo(now - lastSync) : '…'}</span>
+          <SyncedAgo lastSync={lastSync} />
         </div>
       </header>
 
@@ -771,162 +1024,29 @@ export default function App() {
             <div className="jobs">
               {viewingTerminal && extraLoading && <div className="state">Loading completed jobs…</div>}
               {!extraLoading && shown.length === 0 && <div className="empty">{query.trim() ? 'No jobs match that search.' : 'Nothing here.'}</div>}
-              {!extraLoading && shown.map((job) => {
-                if (viewingTerminal) {
-                  return (
-                    <div className="job ro" key={job.id}>
-                      <div className="stripe" data-status={statusClass(job.status)} />
-                      <div className="body">
-                        <div className="row1">
-                          <span className="jname">{job.name}</span>
-                          {job.lid && <span className="lidtag">LID {job.lid}</span>}
-                          {job.fsTaskId
-                            ? <span className="fs-badge linked" title={`FS task: ${job.fsTaskId}`}>⬡ FS</span>
-                            : <span className="fs-badge unlinked" title="No Field Squared task linked">⬡ FS</span>}
-                          <FsDriftBadge job={job} />
-                          <span className={`badge ${statusClass(job.status)}`}>{job.status}</span>
-                        </div>
-                        <div className="meta">
-                          <span><span className="ic">◍</span>{job.address || 'No address'}</span>
-                          {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}
-                          {job.scheduledDate && <span className="created">Scheduled {fmtDate(job.scheduledDate)}</span>}
-                        </div>
-                        {job.assignments.length > 0 && (
-                          <div className="rotechs">
-                            {job.assignments.map((a) => (
-                              <span className="rotech" key={a.assignmentId}>
-                                {a.completed ? '✓ ' : ''}{a.technicianName}{a.workDate ? ` · ${fmtDate(a.workDate)}` : ''}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                }
-                return (
-                  <div className="job" key={job.id}>
-                    <div className="stripe" data-status={statusClass(job.status)} />
-                    <div className="body">
-                      <div className="row1">
-                        <span className="jname">{job.name}</span>
-                        {job.lid && <span className="lidtag">LID {job.lid}</span>}
-                        {job.fsTaskId
-                          ? <span className="fs-badge linked" title={`FS task: ${job.fsTaskId}`}>⬡ FS</span>
-                          : <button className="fs-badge unlinked fs-attach-btn" title="Attach Field Squared job" onClick={() => fsLink.jobId === job.id ? closeFsLink() : openFsLink(job.id)}>⬡ Attach FS</button>}
-                        <FsDriftBadge job={job} />
-                        <select
-                          className={`statussel ${statusClass(job.status)}`}
-                          value={job.status}
-                          onChange={(e) => setStatus(job, e.target.value)}
-                        >
-                          {!ASSIGNABLE_STATUSES.includes(job.status) && <option value={job.status}>{job.status}</option>}
-                          {ASSIGNABLE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                        </select>
-                      </div>
-                      {fsLink.jobId === job.id && (
-                        <div className="fs-attach-panel">
-                          <div className="fs-attach-header">
-                            <span className="fs-attach-title">Search Field Squared</span>
-                            <button className="fs-attach-close" onClick={closeFsLink} aria-label="Close">×</button>
-                          </div>
-                          <div className="fs-attach-row">
-                            <input
-                              className="fs-attach-input"
-                              type="text"
-                              placeholder="Type part of the FS job name…"
-                              value={fsLink.query}
-                              onChange={(e) => setFsLink((s) => ({ ...s, query: e.target.value }))}
-                              onKeyDown={(e) => e.key === 'Enter' && searchFs()}
-                              autoFocus
-                            />
-                            <button className="fs-btn-search" onClick={searchFs} disabled={fsLink.searching || fsLink.query.trim().length < 3}>
-                              {fsLink.searching ? '…' : 'Search'}
-                            </button>
-                          </div>
-                          {fsLink.error && <div className="fs-attach-error">{fsLink.error}</div>}
-                          {fsLink.matches !== null && fsLink.matches.length === 0 && (
-                            <div className="fs-attach-empty">No FS tasks found with that name.</div>
-                          )}
-                          {fsLink.matches && fsLink.matches.map((m) => (
-                            <div className="fs-attach-result" key={m.externalId}>
-                              <div className="fs-result-info">
-                                <div className="fs-result-name">{m.name}</div>
-                                <div className="fs-result-meta">{m.taskType} · {m.status}</div>
-                              </div>
-                              <button className="fs-btn-link" onClick={() => confirmFsLink(m.externalId, m.name)}>Link</button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <div className="meta">
-                        <span><span className="ic">◍</span>{job.address || 'No address'}</span>
-                        {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}
-                        <span className="nextlabel">Next scheduled</span>
-                        <span className="dateinput ro" title="Next scheduled assignment date">
-                          {nextScheduledAssignmentDate(job) ? fmtDate(nextScheduledAssignmentDate(job)) : '—'}
-                        </span>
-                        {nextScheduledAssignmentDate(job)
-                          ? <span className="created">Scheduled {fmtDate(nextScheduledAssignmentDate(job))}</span>
-                          : <span className="unsched-tag">None</span>}
-                      </div>
-                      <div className="assignlist">
-                        {job.assignments.length === 0 && <span className="unassigned-tag">No techs assigned</span>}
-                        {job.assignments.map((a) => {
-                          const cls = a.completed ? 'done' : (!a.workDate ? 'unscheduled' : '');
-                          return (
-                            <div className={`assignrow ${cls}`} key={a.assignmentId}>
-                              <button
-                                className="check"
-                                onClick={() => toggleDone(job, a)}
-                                title={a.completed ? 'Worked this day — click to reopen' : 'Mark as worked (freezes the date)'}
-                                aria-label="Toggle done"
-                              >{a.completed ? '✓' : '○'}</button>
-                              <span className="aname">{a.technicianName || 'Tech'}</span>
-                              <DatePicker className="dp-adate" value={a.workDate || ''} onChange={(v) => setAssignmentDate(job, a, v)} placeholder="Date" />
-                              <input
-                                className="atime"
-                                type="time"
-                                defaultValue={a.startTime || '07:00'}
-                                onBlur={(e) => { if (e.target.value) setAssignmentTime(job, a, e.target.value); }}
-                                title="Start time"
-                                disabled={a.completed}
-                                key={a.assignmentId + (a.startTime || '07:00')}
-                              />
-                              {!a.workDate && !a.completed && <span className="untag">unscheduled</span>}
-                              <button className="x" onClick={() => unassign(job, a.assignmentId)} aria-label="Remove">×</button>
-                            </div>
-                          );
-                        })}
-                        <div>
-                          <select className="addtech" value="" onChange={(e) => {
-                            const techId = e.target.value;
-                            if (!techId) return;
-                            e.target.value = '';
-                            setPendingAdd({ jobId: job.id, techId, date: job.scheduledDate || '', time: '' });
-                          }}>
-                            <option value="">+ Add assignment</option>
-                            {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                          </select>
-                          {pendingAdd.jobId === job.id && (
-                            <div className="inline-add">
-                              <span className="pending-tech">{techs.find((t) => t.id === pendingAdd.techId)?.name}</span>
-                              <DatePicker className="dp-adate" value={pendingAdd.date || ''} onChange={(v) => setPendingAdd((p) => ({ ...p, date: v }))} placeholder="Date" />
-                              <input className="atime" type="time" value={pendingAdd.time || '07:00'} onChange={(e) => setPendingAdd((p) => ({ ...p, time: e.target.value }))} title="Start time" />
-                              <button className="add-btn" onClick={async () => {
-                                const { techId, date, time } = pendingAdd;
-                                setPendingAdd({ jobId: null, techId: '', date: '', time: '' });
-                                await assign(job, techId, date || '', time || '07:00');
-                              }}>Add</button>
-                              <button className="cancel-btn" onClick={() => setPendingAdd({ jobId: null, techId: '', date: '', time: '' })}>Cancel</button>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
+              {!extraLoading && shown.slice(0, visibleCount).map((job) => (
+                <JobCard
+                  key={job.id}
+                  job={job}
+                  readOnly={viewingTerminal}
+                  techs={techs}
+                  fsLinkForJob={fsLink.jobId === job.id ? fsLink : null}
+                  pendingAddForJob={pendingAdd.jobId === job.id ? pendingAdd : null}
+                  onToggleDone={toggleDone}
+                  onAssignmentDateChange={setAssignmentDate}
+                  onAssignmentTimeChange={setAssignmentTime}
+                  onUnassign={unassign}
+                  onAssign={assign}
+                  onSetStatus={setStatus}
+                  onOpenFsLink={openFsLink}
+                  onCloseFsLink={closeFsLink}
+                  onFsLinkChange={setFsLink}
+                  onPendingAddChange={setPendingAdd}
+                  onSearchFs={searchFs}
+                  onConfirmFsLink={confirmFsLink}
+                />
+              ))}
+              {!extraLoading && visibleCount < shown.length && <div ref={scrollSentinelRef} className="scroll-sentinel" />}
             </div>
           </section>
         )}
@@ -1067,11 +1187,54 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {addTechOpen && (
+        <div className="modal-backdrop" onClick={() => !addTechSaving && closeAddTech()}>
+          <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+            <div className="modal-header">
+              <div className="modal-title-row"><span className="jname">Add technician</span></div>
+              <button className="modal-close" onClick={closeAddTech} aria-label="Close" disabled={addTechSaving}>×</button>
+            </div>
+            <div className="modal-body">
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Name</span>
+                <input
+                  className="req-note-input"
+                  type="text"
+                  value={newTechName}
+                  onChange={(e) => setNewTechName(e.target.value)}
+                  placeholder="Full name, matching Salesforce"
+                  autoFocus
+                />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">FS account (optional)</span>
+                {fsUsersLoading
+                  ? <span className="fs-users-loading">Loading Field Squared roster…</span>
+                  : (
+                    <SearchableSelect
+                      value={newTechFsId}
+                      onChange={setNewTechFsId}
+                      options={fsUserOptions}
+                      placeholder="Search Field Squared users…"
+                    />
+                  )}
+              </label>
+            </div>
+            <div className="modal-footer">
+              <button className="modal-save-btn" onClick={submitAddTech} disabled={addTechSaving || !newTechName.trim()}>
+                {addTechSaving ? 'Adding…' : 'Add technician'}
+              </button>
+              <button className="modal-cancel-btn" onClick={closeAddTech} disabled={addTechSaving}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
 
-function SearchableSelect({ value, onChange, options, placeholder }) {
+const SearchableSelect = React.memo(function SearchableSelect({ value, onChange, options, placeholder }) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -1116,7 +1279,7 @@ function SearchableSelect({ value, onChange, options, placeholder }) {
       )}
     </div>
   );
-}
+});
 
 const WEEKDAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
@@ -1124,7 +1287,7 @@ const WEEKDAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 // app — the native picker can't be restyled to match the rest of the site, so
 // this renders its own month grid instead. `value`/`onChange` are ISO date
 // strings ('YYYY-MM-DD' or '' for empty), same contract as a date input.
-function DatePicker({ value, onChange, placeholder = 'Select date', className = '', clearable = true }) {
+const DatePicker = React.memo(function DatePicker({ value, onChange, placeholder = 'Select date', className = '', clearable = true }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState({ top: 0, left: 0 });
   const [viewMonth, setViewMonth] = useState(() => {
@@ -1228,7 +1391,7 @@ function DatePicker({ value, onChange, placeholder = 'Select date', className = 
       )}
     </div>
   );
-}
+});
 
 function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
   const [search, setSearch] = useState('');
@@ -1672,6 +1835,35 @@ function Schedule({ jobs, techs, onJobClick }) {
   const [year, setYear] = useState(() => new Date().getFullYear());
   const [expandedMonths, setExpandedMonths] = useState(() => Array(12).fill(false));
 
+  // Approved time off is invisible to the jobs API (the sentinel opp isn't in
+  // jobStatusValues), so it's fetched separately here — once, shared by both
+  // Week and Month views — for whichever range is currently in view.
+  const [timeOff, setTimeOff] = useState([]);
+  const [editingOff, setEditingOff] = useState(null);
+  const [addingOff, setAddingOff] = useState(false);
+
+  const timeOffRange = useMemo(() => {
+    if (mode === 'week') {
+      const s = startOfWeek(anchor);
+      return [isoOf(s), isoOf(addDays(s, 6))];
+    }
+    // Month grid pads to full weeks, so a few days can spill into adjacent months.
+    const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    const last = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
+    const gridStart = startOfWeek(first);
+    const gridEnd = addDays(startOfWeek(last), 6);
+    return [isoOf(gridStart), isoOf(gridEnd)];
+  }, [mode, anchor]);
+
+  const loadTimeOff = useCallback(() => {
+    const [start, end] = timeOffRange;
+    return api.getTimeOff(start, end)
+      .then((rows) => setTimeOff(rows))
+      .catch(() => setTimeOff([]));
+  }, [timeOffRange]);
+
+  useEffect(() => { loadTimeOff(); }, [loadTimeOff]);
+
   const shift = (dir) => {
     const d = new Date(anchor);
     if (mode === 'week') d.setDate(d.getDate() + dir * 7);
@@ -1709,6 +1901,7 @@ function Schedule({ jobs, techs, onJobClick }) {
         <div className="schedule-main">
       <div className="view-head">
         <div><h2>Who's on what</h2><p>Each tech's load by day. Empty cells are open.</p></div>
+        <button className="refresh" onClick={() => setAddingOff(true)}>+ Add Time Off</button>
       </div>
 
       <div className="schedbar">
@@ -1729,8 +1922,8 @@ function Schedule({ jobs, techs, onJobClick }) {
       </div>
 
       {mode === 'week'
-        ? <WeekGrid jobs={jobs} techs={techs} anchor={anchor} techFilter={techFilter} onJobClick={onJobClick} />
-        : <MonthGrid jobs={jobs} anchor={anchor} techFilter={techFilter} onJobClick={onJobClick} />}
+        ? <WeekGrid jobs={jobs} techs={techs} anchor={anchor} techFilter={techFilter} onJobClick={onJobClick} timeOff={timeOff} onEditOff={setEditingOff} />
+        : <MonthGrid jobs={jobs} anchor={anchor} techFilter={techFilter} onJobClick={onJobClick} timeOff={timeOff} onEditOff={setEditingOff} />}
         </div>
         <aside className="closed-months-panel">
           <div className="panel-head">
@@ -1768,11 +1961,151 @@ function Schedule({ jobs, techs, onJobClick }) {
           })}
         </aside>
       </div>
+      {editingOff && (
+        <TimeOffEditModal
+          entry={editingOff}
+          onClose={() => setEditingOff(null)}
+          onChanged={loadTimeOff}
+        />
+      )}
+      {addingOff && (
+        <AddTimeOffModal
+          techs={techs}
+          onClose={() => setAddingOff(false)}
+          onCreated={loadTimeOff}
+        />
+      )}
     </section>
   );
 }
 
-function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick }) {
+function AddTimeOffModal({ techs, onClose, onCreated }) {
+  const [technicianId, setTechnicianId] = useState('');
+  const [date, setDate] = useState('');
+  const [start, setStart] = useState('08:00');
+  const [end, setEnd] = useState('17:00');
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!technicianId || !date) return;
+    setSaving(true);
+    try {
+      await api.addTimeOff(technicianId, date, start, end);
+      await onCreated();
+      onClose();
+    } catch (e) {
+      alert(`Could not add time off: ${e.message}`);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={() => !saving && onClose()}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Add time off</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={saving}>×</button>
+        </div>
+        <div className="modal-body">
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Technician</span>
+            <select className="techfilter" value={technicianId} onChange={(e) => setTechnicianId(e.target.value)}>
+              <option value="">Select a technician…</option>
+              {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </label>
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Date</span>
+            <DatePicker value={date} onChange={setDate} placeholder="Date" clearable={false} />
+          </label>
+          <div className="req-panel-row">
+            <label className="req-field">
+              <span className="req-field-label">Start</span>
+              <input className="req-time" type="time" value={start} onChange={(e) => setStart(e.target.value)} />
+            </label>
+            <label className="req-field">
+              <span className="req-field-label">End</span>
+              <input className="req-time" type="time" value={end} onChange={(e) => setEnd(e.target.value)} />
+            </label>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="modal-save-btn" onClick={save} disabled={saving || !technicianId || !date}>
+            {saving ? 'Adding…' : 'Add time off'}
+          </button>
+          <button className="modal-cancel-btn" onClick={onClose} disabled={saving}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TimeOffEditModal({ entry, onClose, onChanged }) {
+  const [date, setDate] = useState(entry.workDate || '');
+  const [start, setStart] = useState(entry.startTime || '');
+  const [end, setEnd] = useState(entry.endTime || '');
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.updateAssignment(entry.id, { workDate: date, startTime: start, endTime: end });
+      await onChanged();
+      onClose();
+    } catch (e) {
+      alert(`Could not save: ${e.message}`);
+      setSaving(false);
+    }
+  };
+
+  const remove = async () => {
+    setSaving(true);
+    try {
+      await api.removeAssignment(entry.id);
+      await onChanged();
+      onClose();
+    } catch (e) {
+      alert(`Could not remove: ${e.message}`);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={() => !saving && onClose()}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Edit time off</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={saving}>×</button>
+        </div>
+        <div className="modal-body">
+          <div className="meta"><span className="jname">{entry.technicianName}</span></div>
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Date</span>
+            <DatePicker value={date} onChange={setDate} placeholder="Date" clearable={false} />
+          </label>
+          <div className="req-panel-row">
+            <label className="req-field">
+              <span className="req-field-label">Start</span>
+              <input className="req-time" type="time" value={start} onChange={(e) => setStart(e.target.value)} />
+            </label>
+            <label className="req-field">
+              <span className="req-field-label">End</span>
+              <input className="req-time" type="time" value={end} onChange={(e) => setEnd(e.target.value)} />
+            </label>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="unschedule" onClick={remove} disabled={saving}>Remove time off</button>
+          <div className="modal-footer-spacer" />
+          <button className="modal-save-btn" onClick={save} disabled={saving || !date}>{saving ? 'Saving…' : 'Save changes'}</button>
+          <button className="modal-cancel-btn" onClick={onClose} disabled={saving}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEditOff }) {
   const days = useMemo(() => {
     const s = startOfWeek(anchor);
     return Array.from({ length: 7 }, (_, i) => addDays(s, i));
@@ -1794,25 +2127,17 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick }) {
     return m;
   }, [jobs]);
 
-  // techId -> Set(iso) of approved time off, overlaid on the calendar below.
-  // Invisible to GET /jobs (the sentinel opp isn't in jobStatusValues), so it's
-  // fetched separately for whatever week is currently in view.
-  const [timeOff, setTimeOff] = useState({});
-  useEffect(() => {
-    let cancelled = false;
-    api.getTimeOff(isoOf(days[0]), isoOf(days[days.length - 1]))
-      .then((rows) => {
-        if (cancelled) return;
-        const m = {};
-        rows.forEach((r) => {
-          if (!r.technicianId || !r.workDate) return;
-          (m[r.technicianId] ||= new Set()).add(r.workDate);
-        });
-        setTimeOff(m);
-      })
-      .catch(() => { if (!cancelled) setTimeOff({}); });
-    return () => { cancelled = true; };
-  }, [days]);
+  // techId -> iso -> time-off entry, overlaid on the calendar below. Indexed
+  // from the `timeOff` prop (fetched once by the parent Schedule component
+  // for whatever range — week or month — is currently in view).
+  const timeOffByTechDate = useMemo(() => {
+    const m = {};
+    timeOff.forEach((r) => {
+      if (!r.technicianId || !r.workDate) return;
+      (m[r.technicianId] ||= {})[r.workDate] = r;
+    });
+    return m;
+  }, [timeOff]);
 
   return (
     <div className="grid-wrap">
@@ -1833,12 +2158,16 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick }) {
               {days.map((d) => {
                 const iso = isoOf(d);
                 const items = grid[t.id]?.[iso] || [];
-                const isOff = timeOff[t.id]?.has(iso);
-                const cls = `${items.length || isOff ? '' : 'open'} ${iso === todayIso ? 'todaycol' : ''} ${isOff ? 'offcol' : ''}`.trim();
+                const off = timeOffByTechDate[t.id]?.[iso];
+                const cls = `${items.length || off ? '' : 'open'} ${iso === todayIso ? 'todaycol' : ''} ${off ? 'offcol' : ''}`.trim();
                 return (
                   <td key={iso} className={cls}>
-                    {isOff && <div className="offchip" title="Approved time off">🌴 Off</div>}
-                    {items.length === 0 && !isOff && <span className="free">✓ Open</span>}
+                    {off && (
+                      <div className="offchip" title="Approved time off — click to edit" onClick={() => onEditOff(off)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onEditOff(off)}>
+                        Off
+                      </div>
+                    )}
+                    {items.length === 0 && !off && <span className="free">✓ Open</span>}
                     {items.map((item, i) => (
                       <div className={`jchip${item.completed ? ' done' : ''}`} key={i} onClick={() => onJobClick(item.jobId)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(item.jobId)}>
                         {item.completed && <span className="jdone-mark" title="Worked">✓</span>}
@@ -1857,7 +2186,7 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick }) {
   );
 }
 
-function MonthGrid({ jobs, anchor, techFilter, onJobClick }) {
+function MonthGrid({ jobs, anchor, techFilter, onJobClick, timeOff, onEditOff }) {
   const todayIso = isoOf(startOfDay(new Date()));
   const month = anchor.getMonth();
 
@@ -1882,6 +2211,17 @@ function MonthGrid({ jobs, anchor, techFilter, onJobClick }) {
     return m;
   }, [jobs, techFilter]);
 
+  // iso -> [time-off entry], same techFilter narrowing as jobs above
+  const offByDate = useMemo(() => {
+    const m = {};
+    timeOff.forEach((r) => {
+      if (!r.workDate) return;
+      if (techFilter !== 'all' && r.technicianId !== techFilter) return;
+      (m[r.workDate] ||= []).push(r);
+    });
+    return m;
+  }, [timeOff, techFilter]);
+
   const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
   return (
@@ -1891,9 +2231,15 @@ function MonthGrid({ jobs, anchor, techFilter, onJobClick }) {
         const iso = isoOf(d);
         const out = d.getMonth() !== month;
         const items = byDate[iso] || [];
+        const offItems = offByDate[iso] || [];
         return (
           <div className={`daycell ${out ? 'out' : ''} ${iso === todayIso ? 'today' : ''}`} key={iso}>
             <div className="daynum">{d.getDate()}</div>
+            {offItems.map((r) => (
+              <div className="dayoff" key={r.id} title={`${r.technicianName} — time off, click to edit`} onClick={() => onEditOff(r)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onEditOff(r)}>
+                <span className="jn">{r.technicianName}</span>
+              </div>
+            ))}
             {items.map((j) => (
               <div className="dayjob" data-status={statusClass(j.status)} key={j.id} title={j.name} onClick={() => onJobClick(j.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(j.id)}>
                 <span className="jn">{j.name.split('—')[0].trim()}</span>

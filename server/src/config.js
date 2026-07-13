@@ -46,22 +46,6 @@ export const config = {
     oppFsLastModified: 'FS_Last_Modified__c',
   },
 
-  // FS user ObjectId → SF technician name.
-  // Excludes Account Services (FL9_cUxsT0OmJLSNE9070w) and Paul Aldridge
-  // (1bxTwRMv2dt6hpNYrZMI-QAA-Q) — not field techs, not synced.
-  fsTechUsers: {
-    'Vy7n4YPQsEa-pjadx4BAGA':     'Pedro Ortiz',
-    'GemUv2xBrz3B9r8zIaKTJAAAJA': 'Mike Ellenburg',
-    'ICA8ug9SUEGTj5jtgOA-ew':     'Perry Floyd',
-    'JnO4ynVJ-EuO73og_pdGFw':     'Joseph Wyatt',
-    '7b1I9-cJ4UK0slqoKZIPGQ':     'Jay Ebeling',
-    'lGUm5YLzTEmfuY6mNZ2R2QAA2Q': 'Mason Ebeling',
-    'EhHzICfmtUG6YTGPt1Y5wQ':     'Gabor Fogorasi',
-    'F68pM1uEZ0is351UcbPrVg':     'Casey Berrier',
-    'fGIGr86tOft4m2VPMlGTZQAAZQ': 'Skip Cashion',
-    'UnYYVeGKq-9AeErKQAIl6AAA6A': 'Adrian Van Luven',
-  },
-
   // ---- Job_Assignment__c ----
   objects: {
     assignment: 'Job_Assignment__c',
@@ -71,10 +55,21 @@ export const config = {
     assignmentTechRelationship: 'Technician__r',
     assignmentDate: 'Work_Date__c',
     assignmentStartTime: 'Start_Time__c',
+    assignmentEndTime: 'End_Time__c',
     assignmentCompleted: 'Completed__c',
+    // Set true by createAssignment() only for the TIME_OFF_OPPORTUNITY_ID
+    // sentinel — this, not the sentinel Opportunity Id, is how the tech app
+    // identifies a time-off assignment.
+    assignmentTimeOff: 'Time_Off__c',
 
     technician: 'Technician__c',
     technicianActive: 'Active__c',
+    // FS user ObjectId for this tech, or blank if not synced to Field Squared.
+    // Text(50) on Technician__c — create in SF Setup before deploying. The
+    // FS↔SF tech mapping used to be a hardcoded object here (fsTechUsers); it's
+    // now read live from Salesforce via getTechDirectory() in assignments.js
+    // so "Add Tech" in the board UI works without a code deploy.
+    technicianFsUserId: 'FS_User_Id__c',
   },
 
   // ---- Schedule_Request__c (chalkboard tech <-> office negotiation) ----

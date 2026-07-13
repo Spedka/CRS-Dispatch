@@ -2155,21 +2155,6 @@ var config = {
     oppFsStatus: "FS_Status__c",
     oppFsLastModified: "FS_Last_Modified__c"
   },
-  // FS user ObjectId → SF technician name.
-  // Excludes Account Services (FL9_cUxsT0OmJLSNE9070w) and Paul Aldridge
-  // (1bxTwRMv2dt6hpNYrZMI-QAA-Q) — not field techs, not synced.
-  fsTechUsers: {
-    "Vy7n4YPQsEa-pjadx4BAGA": "Pedro Ortiz",
-    "GemUv2xBrz3B9r8zIaKTJAAAJA": "Mike Ellenburg",
-    "ICA8ug9SUEGTj5jtgOA-ew": "Perry Floyd",
-    "JnO4ynVJ-EuO73og_pdGFw": "Joseph Wyatt",
-    "7b1I9-cJ4UK0slqoKZIPGQ": "Jay Ebeling",
-    "lGUm5YLzTEmfuY6mNZ2R2QAA2Q": "Mason Ebeling",
-    "EhHzICfmtUG6YTGPt1Y5wQ": "Gabor Fogorasi",
-    "F68pM1uEZ0is351UcbPrVg": "Casey Berrier",
-    "fGIGr86tOft4m2VPMlGTZQAAZQ": "Skip Cashion",
-    "UnYYVeGKq-9AeErKQAIl6AAA6A": "Adrian Van Luven"
-  },
   // ---- Job_Assignment__c ----
   objects: {
     assignment: "Job_Assignment__c",
@@ -2179,9 +2164,20 @@ var config = {
     assignmentTechRelationship: "Technician__r",
     assignmentDate: "Work_Date__c",
     assignmentStartTime: "Start_Time__c",
+    assignmentEndTime: "End_Time__c",
     assignmentCompleted: "Completed__c",
+    // Set true by createAssignment() only for the TIME_OFF_OPPORTUNITY_ID
+    // sentinel — this, not the sentinel Opportunity Id, is how the tech app
+    // identifies a time-off assignment.
+    assignmentTimeOff: "Time_Off__c",
     technician: "Technician__c",
-    technicianActive: "Active__c"
+    technicianActive: "Active__c",
+    // FS user ObjectId for this tech, or blank if not synced to Field Squared.
+    // Text(50) on Technician__c — create in SF Setup before deploying. The
+    // FS↔SF tech mapping used to be a hardcoded object here (fsTechUsers); it's
+    // now read live from Salesforce via getTechDirectory() in assignments.js
+    // so "Add Tech" in the board UI works without a code deploy.
+    technicianFsUserId: "FS_User_Id__c"
   },
   // ---- Schedule_Request__c (chalkboard tech <-> office negotiation) ----
   scheduleRequest: {
@@ -2380,6 +2376,12 @@ function createFs(env) {
     return res.json();
   }
   __name(listModified, "listModified");
+  async function listUsers(since) {
+    const res = await fsFetch(`/api/user?modifiedsince=${since}`);
+    if (!res.ok) throw new Error(`FS listUsers failed: ${res.status} ${await res.text()}`);
+    return res.json();
+  }
+  __name(listUsers, "listUsers");
   async function updateStatus(externalId, name, taskType, status) {
     const res = await fsFetch(`/api/task/${externalId}`, {
       method: "POST",
@@ -2453,6 +2455,7 @@ function createFs(env) {
     getToken,
     getTask,
     listModified,
+    listUsers,
     updateStatus,
     updateUsers,
     patchTask,
@@ -2536,212 +2539,36 @@ function reconcile(fsStatus, sfStatus, fsLastUpdated, sfLastModifiedDate) {
 }
 __name(reconcile, "reconcile");
 
-// server/src/fsSync.js
+// server/src/assignments.js
 var f = config.fields;
 var o = config.objects;
-var ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1e3;
-var OVERLAP_MS = 5 * 60 * 1e3;
-var MIN_INTERVAL_MS = 60 * 1e3;
-var MAX_UNLINKED_PER_RUN = 30;
-var RECONCILE_WINDOW_MS = 10 * 60 * 1e3;
-var fsTechUsers = config.fsTechUsers;
-var techNameToFsId = Object.fromEntries(
-  Object.entries(fsTechUsers).map(([fsId, name]) => [name, fsId])
-);
-function parseWoNum(name) {
-  const m = name && name.match(/^WO\s+(\d+)/i);
-  return m ? m[1] : null;
-}
-__name(parseWoNum, "parseWoNum");
-function isLinkable(task) {
-  return task.Name && task.Name.trim().length > 3;
-}
-__name(isLinkable, "isLinkable");
-function findInSf(sfByName, sfByWoNum, task) {
-  const byName = sfByName.get(task.Name);
-  if (byName) return byName;
-  const wo = parseWoNum(task.Name);
-  return wo ? sfByWoNum.get(wo) ?? null : null;
-}
-__name(findInSf, "findInSf");
-async function runFsSync(env) {
-  const KV = env.SF_TOKENS;
-  const fs = createFs(env);
-  const sf = createSalesforce(env);
-  const lastRunKey = "fs_sync_last_run";
-  const stored = await KV.get(lastRunKey);
-  if (stored && Date.now() - new Date(stored).getTime() < MIN_INTERVAL_MS) return;
-  await KV.put(lastRunKey, (/* @__PURE__ */ new Date()).toISOString());
-  const since = stored ? new Date(new Date(stored).getTime() - OVERLAP_MS).toISOString() : new Date(Date.now() - ONE_YEAR_MS).toISOString();
-  let tasks;
-  try {
-    tasks = await fs.listModified(since);
-  } catch (e) {
-    console.error("[fs-sync] listModified failed:", e.message);
-    return;
-  }
-  const linkable = tasks.filter(isLinkable);
-  console.log(`[fs-sync] ${tasks.length} FS tasks, ${linkable.length} linkable`);
-  let linkedOpps;
-  try {
-    linkedOpps = await sf.query(
-      `SELECT Id, ${f.oppFsTaskId}, ${f.oppStatus}, ${f.oppFsStatus}, LastModifiedDate
-       FROM Opportunity WHERE ${f.oppFsTaskId} != null LIMIT 2000`
-    );
-  } catch (e) {
-    console.error("[fs-sync] bulk linked-opps query failed:", e.message);
-    return;
-  }
-  const linkedMap = new Map(linkedOpps.map((row) => [row[f.oppFsTaskId], row]));
-  const linkedIds = new Set(linkedMap.keys());
-  console.log(`[fs-sync] ${linkedMap.size} already linked`);
-  const NO_MATCH_KEY = "fs_no_match_ids";
-  const skipRaw = await KV.get(NO_MATCH_KEY, "json");
-  const skipIds = new Set(Array.isArray(skipRaw) ? skipRaw : []);
-  const unlinked = linkable.filter((t) => !linkedIds.has(t.ExternalId) && !skipIds.has(t.ExternalId));
-  const toMatch = unlinked.slice(0, MAX_UNLINKED_PER_RUN);
-  if (unlinked.length > MAX_UNLINKED_PER_RUN) {
-    console.log(`[fs-sync] processing ${MAX_UNLINKED_PER_RUN} of ${unlinked.length} unlinked this run (${skipIds.size} previously skipped)`);
-  }
-  let sfByName = /* @__PURE__ */ new Map();
-  let sfByWoNum = /* @__PURE__ */ new Map();
-  if (toMatch.length > 0) {
-    try {
-      const nameList = toMatch.map((t) => `'${t.Name.replace(/'/g, "\\'")}'`).join(",");
-      const woNums = [...new Set(toMatch.map((t) => parseWoNum(t.Name)).filter(Boolean))];
-      const woLikes = woNums.map((n) => `${f.oppName} LIKE 'WO ${n}%'`);
-      const nameFilter = `${f.oppName} IN (${nameList})`;
-      const nameOrWo = woLikes.length ? `(${nameFilter} OR ${woLikes.join(" OR ")})` : nameFilter;
-      const boardStatuses = config.jobStatusValues.map((s) => `'${s}'`).join(",");
-      const matchOpps = await sf.query(
-        `SELECT Id, ${f.oppName}, ${f.oppStatus}
-         FROM Opportunity
-         WHERE ${f.oppFsTaskId} = null
-           AND ${f.oppStatus} IN (${boardStatuses})
-           AND ${nameOrWo}`
-      );
-      sfByName = new Map(matchOpps.map((o4) => [o4[f.oppName], o4]));
-      for (const opp of matchOpps) {
-        const wo = parseWoNum(opp[f.oppName]);
-        if (wo && !sfByWoNum.has(wo)) sfByWoNum.set(wo, opp);
-      }
-    } catch (e) {
-      console.error("[fs-sync] batch match query failed:", e.message);
-    }
-  }
-  let linked = 0;
-  const noMatchIds = [];
-  for (const task of toMatch) {
-    try {
-      const sfOpp = findInSf(sfByName, sfByWoNum, task);
-      if (!sfOpp) {
-        noMatchIds.push(task.ExternalId);
-        continue;
-      }
-      await sf.updateRecord("Opportunity", sfOpp.Id, {
-        [f.oppFsTaskId]: task.ExternalId,
-        [f.oppFsStatus]: task.Status ?? null,
-        [f.oppFsLastModified]: task.LastUpdated ?? null
-      });
-      console.log(`[fs-sync] linked: "${task.Name}" \u2192 SF ${sfOpp.Id}`);
-      linked++;
-    } catch (e) {
-      console.error(`[fs-sync] error on "${task.Name}" (${task.ExternalId}):`, e.message);
-    }
-  }
-  console.log(`[fs-sync] done linking \u2014 ${linked} linked, ${noMatchIds.length} no SF match`);
-  if (noMatchIds.length > 0) {
-    const updated = [...skipIds, ...noMatchIds];
-    await KV.put(NO_MATCH_KEY, JSON.stringify(updated), { expirationTtl: 86400 });
-  }
-  const recentCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
-  const toReconcile = linkable.filter(
-    (t) => linkedMap.has(t.ExternalId) && (t.LastUpdated || "") >= recentCutoff
-  );
-  const queued = new Set(toReconcile.map((t) => t.ExternalId));
-  const backfillIds = linkedOpps.filter((o4) => !o4[f.oppFsStatus] && !queued.has(o4[f.oppFsTaskId])).map((o4) => o4[f.oppFsTaskId]).slice(0, MAX_UNLINKED_PER_RUN);
-  for (const externalId of backfillIds) toReconcile.push({ ExternalId: externalId });
-  if (toReconcile.length === 0) return;
-  console.log(`[fs-sync] reconciling status + assignments for ${toReconcile.length} tasks (${backfillIds.length} snapshot backfill)`);
-  let sfTechIdByName = null;
-  for (const task of toReconcile) {
-    try {
-      const sfOpp = linkedMap.get(task.ExternalId);
-      const [fullTask, sfAssignments] = await Promise.all([
-        fs.getTask(task.ExternalId),
-        sf.query(
-          `SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name
-           FROM ${o.assignment}
-           WHERE ${o.assignmentOppLookup} = '${sfOpp.Id}'`
-        )
-      ]);
-      const rec = reconcile(fullTask.Status, sfOpp[f.oppStatus], fullTask.LastUpdated, sfOpp.LastModifiedDate);
-      const fsSnapshot = { [f.oppFsStatus]: fullTask.Status ?? null, [f.oppFsLastModified]: fullTask.LastUpdated ?? null };
-      if (rec.action === "write" && rec.target === "sf") {
-        await sf.updateRecord("Opportunity", sfOpp.Id, { [f.oppStatus]: rec.value, ...fsSnapshot });
-        console.log(`[fs-sync] status SF\u2190FS: "${fullTask.Status}" \u2192 "${rec.value}" on ${sfOpp.Id}`);
-      } else {
-        await sf.updateRecord("Opportunity", sfOpp.Id, fsSnapshot);
-        if (rec.action === "write" && rec.target === "fs") {
-          const fsTarget = sfToFsStatus(sfOpp[f.oppStatus], sfAssignments.length > 0);
-          if (fsTarget) {
-            await fs.updateStatus(task.ExternalId, fullTask.Name, fullTask.TaskType, fsTarget);
-            console.log(`[fs-sync] status FS\u2190SF: "${sfOpp[f.oppStatus]}" \u2192 "${fsTarget}" on ${task.ExternalId}`);
-          }
-        }
-      }
-      const toFsId = /* @__PURE__ */ __name((u) => typeof u === "string" ? u : u?.ObjectId ?? null, "toFsId");
-      const fsUserIds = new Set(
-        (Array.isArray(fullTask.Users) ? fullTask.Users : []).map(toFsId).filter((uid) => uid && uid in fsTechUsers)
-      );
-      const sfAssignedByName = new Map(
-        sfAssignments.map((a) => [a[o.assignmentTechRelationship]?.Name, a]).filter(([name]) => !!name)
-      );
-      for (const fsUserId of fsUserIds) {
-        const techName = fsTechUsers[fsUserId];
-        if (sfAssignedByName.has(techName)) continue;
-        if (!sfTechIdByName) {
-          const rows = await sf.query(
-            `SELECT Id, Name FROM ${o.technician} WHERE ${o.technicianActive} = true`
-          );
-          sfTechIdByName = Object.fromEntries(rows.map((t) => [t.Name, t.Id]));
-        }
-        const sfTechId = sfTechIdByName[techName];
-        if (sfTechId) {
-          await sf.createRecord(o.assignment, {
-            [o.assignmentOppLookup]: sfOpp.Id,
-            [o.assignmentTechLookup]: sfTechId,
-            [o.assignmentStartTime]: "07:00:00.000Z"
-          });
-          console.log(`[fs-sync] added assignment: ${techName} \u2192 ${sfOpp.Id}`);
-        } else {
-          console.warn(`[fs-sync] no SF tech ID for "${techName}" \u2014 skipping`);
-        }
-      }
-      for (const [techName, assignmentRec] of sfAssignedByName) {
-        const fsUserId = techNameToFsId[techName];
-        if (!fsUserId) continue;
-        if (!fsUserIds.has(fsUserId)) {
-          await sf.deleteRecord(o.assignment, assignmentRec.Id);
-          console.log(`[fs-sync] removed assignment: ${techName} from ${sfOpp.Id}`);
-        }
-      }
-    } catch (e) {
-      console.error(`[fs-sync] error reconciling assignments for ${task.ExternalId}:`, e.message);
-    }
-  }
-}
-__name(runFsSync, "runFsSync");
-
-// server/src/assignments.js
-var f2 = config.fields;
-var o2 = config.objects;
 var esc = /* @__PURE__ */ __name((s) => String(s).replace(/'/g, "\\'"), "esc");
 var normTime = /* @__PURE__ */ __name((v) => v ? String(v).slice(0, 5) : null, "normTime");
 var toSfTime = /* @__PURE__ */ __name((hhmm) => hhmm ? `${hhmm}:00.000Z` : null, "toSfTime");
-var fsUserByTechName = Object.fromEntries(
-  Object.entries(config.fsTechUsers).map(([fsId, name]) => [name, fsId])
-);
+var TECH_DIR_TTL_MS = 6e4;
+var techDirCache = { data: null, expires: 0 };
+async function getTechDirectory(sf) {
+  const now = Date.now();
+  if (techDirCache.data && now < techDirCache.expires) return techDirCache.data;
+  const rows = await sf.query(
+    `SELECT Id, Name, ${o.technicianFsUserId} FROM ${o.technician} WHERE ${o.technicianActive} = true`
+  );
+  const byName = {};
+  const byFsId = {};
+  for (const r of rows) {
+    const fsUserId = r[o.technicianFsUserId] || null;
+    byName[r.Name] = { sfId: r.Id, fsUserId };
+    if (fsUserId) byFsId[fsUserId] = { sfId: r.Id, name: r.Name };
+  }
+  const data = { byName, byFsId };
+  techDirCache = { data, expires: now + TECH_DIR_TTL_MS };
+  return data;
+}
+__name(getTechDirectory, "getTechDirectory");
+function invalidateTechDirectory() {
+  techDirCache = { data: null, expires: 0 };
+}
+__name(invalidateTechDirectory, "invalidateTechDirectory");
 function nthSunday(year, month, n) {
   const first = new Date(Date.UTC(year, month - 1, 1));
   const day = first.getUTCDay();
@@ -2792,42 +2619,46 @@ async function createAssignment(env, oppId, {
   technicianId,
   workDate,
   startTime,
+  endTime,
   status,
   scheduledDate,
   deriveScheduledDate = false
 }) {
-  if (oppId === env.TIME_OFF_OPPORTUNITY_ID) {
+  const isTimeOff = oppId === env.TIME_OFF_OPPORTUNITY_ID;
+  if (isTimeOff) {
     status = null;
     scheduledDate = null;
     deriveScheduledDate = false;
   }
   const sf = createSalesforce(env);
   const fields = {
-    [o2.assignmentOppLookup]: oppId,
-    [o2.assignmentTechLookup]: technicianId,
-    [o2.assignmentStartTime]: toSfTime(startTime || "07:00")
+    [o.assignmentOppLookup]: oppId,
+    [o.assignmentTechLookup]: technicianId,
+    [o.assignmentStartTime]: toSfTime(startTime || "07:00")
   };
+  if (endTime) fields[o.assignmentEndTime] = toSfTime(endTime);
+  if (isTimeOff) fields[o.assignmentTimeOff] = true;
   if (typeof workDate !== "undefined") {
-    fields[o2.assignmentDate] = workDate === "" ? null : workDate;
+    fields[o.assignmentDate] = workDate === "" ? null : workDate;
   }
-  const result = await sf.createRecord(o2.assignment, fields);
+  const result = await sf.createRecord(o.assignment, fields);
   const createdId = result?.id;
   let assignmentRec = null;
   try {
     const recs = await sf.query(
-      `SELECT Id, ${o2.assignmentTechLookup}, ${o2.assignmentDate}, ${o2.assignmentStartTime},
-              ${o2.assignmentCompleted}, ${o2.assignmentTechRelationship}.Name
-       FROM ${o2.assignment} WHERE Id='${esc(createdId)}'`
+      `SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentDate}, ${o.assignmentStartTime},
+              ${o.assignmentCompleted}, ${o.assignmentTechRelationship}.Name
+       FROM ${o.assignment} WHERE Id='${esc(createdId)}'`
     );
     if (recs?.[0]) {
       const r = recs[0];
       assignmentRec = {
         assignmentId: r.Id,
-        technicianId: r[o2.assignmentTechLookup],
-        technicianName: r[o2.assignmentTechRelationship]?.Name ?? null,
-        workDate: r[o2.assignmentDate] ?? null,
-        startTime: normTime(r[o2.assignmentStartTime]) || "07:00",
-        completed: r[o2.assignmentCompleted] === true
+        technicianId: r[o.assignmentTechLookup],
+        technicianName: r[o.assignmentTechRelationship]?.Name ?? null,
+        workDate: r[o.assignmentDate] ?? null,
+        startTime: normTime(r[o.assignmentStartTime]) || "07:00",
+        completed: r[o.assignmentCompleted] === true
       };
     }
   } catch (e) {
@@ -2835,26 +2666,27 @@ async function createAssignment(env, oppId, {
   }
   if (deriveScheduledDate && !scheduledDate) {
     const rows = await sf.query(
-      `SELECT ${o2.assignmentDate} FROM ${o2.assignment}
-       WHERE ${o2.assignmentOppLookup} = '${esc(oppId)}'
-         AND ${o2.assignmentDate} != null`
+      `SELECT ${o.assignmentDate} FROM ${o.assignment}
+       WHERE ${o.assignmentOppLookup} = '${esc(oppId)}'
+         AND ${o.assignmentDate} != null`
     );
-    const dates = rows.map((r) => r[o2.assignmentDate]).filter(Boolean).sort();
+    const dates = rows.map((r) => r[o.assignmentDate]).filter(Boolean).sort();
     scheduledDate = dates[0] ?? workDate ?? null;
   }
   const fsDebug = { techName: assignmentRec?.technicianName ?? null, fsUserId: null, fsTaskId: null, patch: null, error: null };
-  if (assignmentRec?.technicianName && oppId !== env.TIME_OFF_OPPORTUNITY_ID) {
-    const fsUserId = fsUserByTechName[assignmentRec.technicianName];
+  if (assignmentRec?.technicianName && !isTimeOff) {
+    const techDir = await getTechDirectory(sf);
+    const fsUserId = techDir.byName[assignmentRec.technicianName]?.fsUserId;
     fsDebug.fsUserId = fsUserId ?? `NOT IN MAP (name="${assignmentRec.technicianName}")`;
     if (fsUserId) {
       let fsTaskId = null;
       try {
         const fs = createFs(env);
         const opps = await sf.query(
-          `SELECT ${f2.oppFsTaskId}, ${f2.oppScheduledDate}
+          `SELECT ${f.oppFsTaskId}, ${f.oppScheduledDate}
            FROM Opportunity WHERE Id = '${esc(oppId)}' LIMIT 1`
         );
-        fsTaskId = opps[0]?.[f2.oppFsTaskId];
+        fsTaskId = opps[0]?.[f.oppFsTaskId];
         fsDebug.fsTaskId = fsTaskId ?? "NULL (not linked)";
         if (fsTaskId) {
           const task = await fs.getTask(fsTaskId);
@@ -2868,7 +2700,7 @@ async function createAssignment(env, oppId, {
             const fsStatus = sfToFsStatus(status, true);
             if (fsStatus) fsPatch.Status = fsStatus;
           }
-          const assignDate = scheduledDate ?? workDate ?? opps[0]?.[f2.oppScheduledDate];
+          const assignDate = scheduledDate ?? workDate ?? opps[0]?.[f.oppScheduledDate];
           if (assignDate) {
             const sched = buildFsSchedules(task, assignDate, startTime || "08:00");
             if (sched) fsPatch.Schedules = sched;
@@ -2887,8 +2719,8 @@ async function createAssignment(env, oppId, {
   if (status != null || scheduledDate != null) {
     try {
       const oppPayload = {};
-      if (status != null) oppPayload[f2.oppStatus] = status || null;
-      if (scheduledDate != null) oppPayload[f2.oppScheduledDate] = scheduledDate === "" ? null : scheduledDate;
+      if (status != null) oppPayload[f.oppStatus] = status || null;
+      if (scheduledDate != null) oppPayload[f.oppScheduledDate] = scheduledDate === "" ? null : scheduledDate;
       if (Object.keys(oppPayload).length > 0) await sf.updateRecord("Opportunity", oppId, oppPayload);
     } catch (oppErr) {
       console.error("[routes] SF Opp update failed (assignment kept):", oppErr.message);
@@ -2897,6 +2729,193 @@ async function createAssignment(env, oppId, {
   return { assignmentId: createdId, assignment: assignmentRec, fsDebug };
 }
 __name(createAssignment, "createAssignment");
+
+// server/src/fsSync.js
+var f2 = config.fields;
+var o2 = config.objects;
+var ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1e3;
+var OVERLAP_MS = 5 * 60 * 1e3;
+var MIN_INTERVAL_MS = 60 * 1e3;
+var MAX_UNLINKED_PER_RUN = 30;
+var RECONCILE_WINDOW_MS = 10 * 60 * 1e3;
+function parseWoNum(name) {
+  const m = name && name.match(/^WO\s+(\d+)/i);
+  return m ? m[1] : null;
+}
+__name(parseWoNum, "parseWoNum");
+function isLinkable(task) {
+  return task.Name && task.Name.trim().length > 3;
+}
+__name(isLinkable, "isLinkable");
+function findInSf(sfByName, sfByWoNum, task) {
+  const byName = sfByName.get(task.Name);
+  if (byName) return byName;
+  const wo = parseWoNum(task.Name);
+  return wo ? sfByWoNum.get(wo) ?? null : null;
+}
+__name(findInSf, "findInSf");
+async function runFsSync(env) {
+  const KV = env.SF_TOKENS;
+  const fs = createFs(env);
+  const sf = createSalesforce(env);
+  const lastRunKey = "fs_sync_last_run";
+  const stored = await KV.get(lastRunKey);
+  if (stored && Date.now() - new Date(stored).getTime() < MIN_INTERVAL_MS) return;
+  await KV.put(lastRunKey, (/* @__PURE__ */ new Date()).toISOString());
+  const since = stored ? new Date(new Date(stored).getTime() - OVERLAP_MS).toISOString() : new Date(Date.now() - ONE_YEAR_MS).toISOString();
+  let tasks;
+  try {
+    tasks = await fs.listModified(since);
+  } catch (e) {
+    console.error("[fs-sync] listModified failed:", e.message);
+    return;
+  }
+  const linkable = tasks.filter(isLinkable);
+  console.log(`[fs-sync] ${tasks.length} FS tasks, ${linkable.length} linkable`);
+  let linkedOpps;
+  try {
+    linkedOpps = await sf.query(
+      `SELECT Id, ${f2.oppFsTaskId}, ${f2.oppStatus}, ${f2.oppFsStatus}, LastModifiedDate
+       FROM Opportunity WHERE ${f2.oppFsTaskId} != null LIMIT 2000`
+    );
+  } catch (e) {
+    console.error("[fs-sync] bulk linked-opps query failed:", e.message);
+    return;
+  }
+  const linkedMap = new Map(linkedOpps.map((row) => [row[f2.oppFsTaskId], row]));
+  const linkedIds = new Set(linkedMap.keys());
+  console.log(`[fs-sync] ${linkedMap.size} already linked`);
+  const NO_MATCH_KEY = "fs_no_match_ids";
+  const skipRaw = await KV.get(NO_MATCH_KEY, "json");
+  const skipIds = new Set(Array.isArray(skipRaw) ? skipRaw : []);
+  const unlinked = linkable.filter((t) => !linkedIds.has(t.ExternalId) && !skipIds.has(t.ExternalId));
+  const toMatch = unlinked.slice(0, MAX_UNLINKED_PER_RUN);
+  if (unlinked.length > MAX_UNLINKED_PER_RUN) {
+    console.log(`[fs-sync] processing ${MAX_UNLINKED_PER_RUN} of ${unlinked.length} unlinked this run (${skipIds.size} previously skipped)`);
+  }
+  let sfByName = /* @__PURE__ */ new Map();
+  let sfByWoNum = /* @__PURE__ */ new Map();
+  if (toMatch.length > 0) {
+    try {
+      const nameList = toMatch.map((t) => `'${t.Name.replace(/'/g, "\\'")}'`).join(",");
+      const woNums = [...new Set(toMatch.map((t) => parseWoNum(t.Name)).filter(Boolean))];
+      const woLikes = woNums.map((n) => `${f2.oppName} LIKE 'WO ${n}%'`);
+      const nameFilter = `${f2.oppName} IN (${nameList})`;
+      const nameOrWo = woLikes.length ? `(${nameFilter} OR ${woLikes.join(" OR ")})` : nameFilter;
+      const boardStatuses = config.jobStatusValues.map((s) => `'${s}'`).join(",");
+      const matchOpps = await sf.query(
+        `SELECT Id, ${f2.oppName}, ${f2.oppStatus}
+         FROM Opportunity
+         WHERE ${f2.oppFsTaskId} = null
+           AND ${f2.oppStatus} IN (${boardStatuses})
+           AND ${nameOrWo}`
+      );
+      sfByName = new Map(matchOpps.map((o4) => [o4[f2.oppName], o4]));
+      for (const opp of matchOpps) {
+        const wo = parseWoNum(opp[f2.oppName]);
+        if (wo && !sfByWoNum.has(wo)) sfByWoNum.set(wo, opp);
+      }
+    } catch (e) {
+      console.error("[fs-sync] batch match query failed:", e.message);
+    }
+  }
+  let linked = 0;
+  const noMatchIds = [];
+  for (const task of toMatch) {
+    try {
+      const sfOpp = findInSf(sfByName, sfByWoNum, task);
+      if (!sfOpp) {
+        noMatchIds.push(task.ExternalId);
+        continue;
+      }
+      await sf.updateRecord("Opportunity", sfOpp.Id, {
+        [f2.oppFsTaskId]: task.ExternalId,
+        [f2.oppFsStatus]: task.Status ?? null,
+        [f2.oppFsLastModified]: task.LastUpdated ?? null
+      });
+      console.log(`[fs-sync] linked: "${task.Name}" \u2192 SF ${sfOpp.Id}`);
+      linked++;
+    } catch (e) {
+      console.error(`[fs-sync] error on "${task.Name}" (${task.ExternalId}):`, e.message);
+    }
+  }
+  console.log(`[fs-sync] done linking \u2014 ${linked} linked, ${noMatchIds.length} no SF match`);
+  if (noMatchIds.length > 0) {
+    const updated = [...skipIds, ...noMatchIds];
+    await KV.put(NO_MATCH_KEY, JSON.stringify(updated), { expirationTtl: 86400 });
+  }
+  const recentCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
+  const toReconcile = linkable.filter(
+    (t) => linkedMap.has(t.ExternalId) && (t.LastUpdated || "") >= recentCutoff
+  );
+  const queued = new Set(toReconcile.map((t) => t.ExternalId));
+  const backfillIds = linkedOpps.filter((o4) => !o4[f2.oppFsStatus] && !queued.has(o4[f2.oppFsTaskId])).map((o4) => o4[f2.oppFsTaskId]).slice(0, MAX_UNLINKED_PER_RUN);
+  for (const externalId of backfillIds) toReconcile.push({ ExternalId: externalId });
+  if (toReconcile.length === 0) return;
+  console.log(`[fs-sync] reconciling status + assignments for ${toReconcile.length} tasks (${backfillIds.length} snapshot backfill)`);
+  const techDir = await getTechDirectory(sf);
+  for (const task of toReconcile) {
+    try {
+      const sfOpp = linkedMap.get(task.ExternalId);
+      const [fullTask, sfAssignments] = await Promise.all([
+        fs.getTask(task.ExternalId),
+        sf.query(
+          `SELECT Id, ${o2.assignmentTechLookup}, ${o2.assignmentTechRelationship}.Name
+           FROM ${o2.assignment}
+           WHERE ${o2.assignmentOppLookup} = '${sfOpp.Id}'`
+        )
+      ]);
+      const rec = reconcile(fullTask.Status, sfOpp[f2.oppStatus], fullTask.LastUpdated, sfOpp.LastModifiedDate);
+      const fsSnapshot = { [f2.oppFsStatus]: fullTask.Status ?? null, [f2.oppFsLastModified]: fullTask.LastUpdated ?? null };
+      if (rec.action === "write" && rec.target === "sf") {
+        await sf.updateRecord("Opportunity", sfOpp.Id, { [f2.oppStatus]: rec.value, ...fsSnapshot });
+        console.log(`[fs-sync] status SF\u2190FS: "${fullTask.Status}" \u2192 "${rec.value}" on ${sfOpp.Id}`);
+      } else {
+        await sf.updateRecord("Opportunity", sfOpp.Id, fsSnapshot);
+        if (rec.action === "write" && rec.target === "fs") {
+          const fsTarget = sfToFsStatus(sfOpp[f2.oppStatus], sfAssignments.length > 0);
+          if (fsTarget) {
+            await fs.updateStatus(task.ExternalId, fullTask.Name, fullTask.TaskType, fsTarget);
+            console.log(`[fs-sync] status FS\u2190SF: "${sfOpp[f2.oppStatus]}" \u2192 "${fsTarget}" on ${task.ExternalId}`);
+          }
+        }
+      }
+      const toFsId = /* @__PURE__ */ __name((u) => typeof u === "string" ? u : u?.ObjectId ?? null, "toFsId");
+      const fsUserIds = new Set(
+        (Array.isArray(fullTask.Users) ? fullTask.Users : []).map(toFsId).filter((uid) => uid && uid in techDir.byFsId)
+      );
+      const sfAssignedByName = new Map(
+        sfAssignments.map((a) => [a[o2.assignmentTechRelationship]?.Name, a]).filter(([name]) => !!name)
+      );
+      for (const fsUserId of fsUserIds) {
+        const techName = techDir.byFsId[fsUserId]?.name;
+        if (sfAssignedByName.has(techName)) continue;
+        const sfTechId = techDir.byName[techName]?.sfId;
+        if (sfTechId) {
+          await sf.createRecord(o2.assignment, {
+            [o2.assignmentOppLookup]: sfOpp.Id,
+            [o2.assignmentTechLookup]: sfTechId,
+            [o2.assignmentStartTime]: "07:00:00.000Z"
+          });
+          console.log(`[fs-sync] added assignment: ${techName} \u2192 ${sfOpp.Id}`);
+        } else {
+          console.warn(`[fs-sync] no SF tech ID for "${techName}" \u2014 skipping`);
+        }
+      }
+      for (const [techName, assignmentRec] of sfAssignedByName) {
+        const fsUserId = techDir.byName[techName]?.fsUserId;
+        if (!fsUserId) continue;
+        if (!fsUserIds.has(fsUserId)) {
+          await sf.deleteRecord(o2.assignment, assignmentRec.Id);
+          console.log(`[fs-sync] removed assignment: ${techName} from ${sfOpp.Id}`);
+        }
+      }
+    } catch (e) {
+      console.error(`[fs-sync] error reconciling assignments for ${task.ExternalId}:`, e.message);
+    }
+  }
+}
+__name(runFsSync, "runFsSync");
 
 // server/src/scheduleRequests.js
 var sr = config.scheduleRequest;
@@ -2952,7 +2971,7 @@ scheduleRequests.post("/schedule-requests/:id/approve", async (c) => {
     const id = c.req.param("id");
     const { opportunityId } = await c.req.json().catch(() => ({}));
     const rows = await sf.query(
-      `SELECT Id, ${sr.job}, ${sr.type}, ${sr.tech}, ${sr.proposedDate}, ${sr.proposedStart},
+      `SELECT Id, ${sr.job}, ${sr.type}, ${sr.tech}, ${sr.proposedDate}, ${sr.proposedStart}, ${sr.proposedEnd},
               ${sr.status}, ${sr.lastOfferBy}
        FROM ${sr.sobject} WHERE Id = '${esc(id)}' LIMIT 1`
     );
@@ -2964,18 +2983,22 @@ scheduleRequests.post("/schedule-requests/:id/approve", async (c) => {
     if (reqRec[sr.lastOfferBy] === "Office") {
       return c.json({ error: "Cannot approve \u2014 waiting on technician response" }, 409);
     }
-    let targetOppId = reqRec[sr.job];
-    if (targetOppId === c.env.NEW_WO_OPPORTUNITY_ID && !opportunityId) {
-      return c.json({ error: 'opportunityId required to approve a "New WO Required" request' }, 400);
-    }
-    if (opportunityId) {
-      await sf.updateRecord(sr.sobject, id, { [sr.job]: opportunityId });
-      targetOppId = opportunityId;
+    const isTimeOff = reqRec[sr.type] === "Time off";
+    let targetOppId = isTimeOff ? c.env.TIME_OFF_OPPORTUNITY_ID : reqRec[sr.job];
+    if (!isTimeOff) {
+      if (targetOppId === c.env.NEW_WO_OPPORTUNITY_ID && !opportunityId) {
+        return c.json({ error: 'opportunityId required to approve a "New WO Required" request' }, 400);
+      }
+      if (opportunityId) {
+        await sf.updateRecord(sr.sobject, id, { [sr.job]: opportunityId });
+        targetOppId = opportunityId;
+      }
     }
     const { assignmentId } = await createAssignment(c.env, targetOppId, {
       technicianId: reqRec[sr.tech],
       workDate: reqRec[sr.proposedDate],
       startTime: normTime(reqRec[sr.proposedStart]),
+      endTime: normTime(reqRec[sr.proposedEnd]),
       status: "Scheduled",
       deriveScheduledDate: true
     });
@@ -3119,6 +3142,20 @@ api.get("/technicians", async (c) => {
     return c.json({ error: e.message }, 500);
   }
 });
+api.post("/technicians", async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const { name, fsUserId } = await c.req.json();
+    if (!name || !name.trim()) return c.json({ error: "name required" }, 400);
+    const fields = { Name: name.trim(), [o3.technicianActive]: true };
+    if (fsUserId && fsUserId.trim()) fields[o3.technicianFsUserId] = fsUserId.trim();
+    const result = await sf.createRecord(o3.technician, fields);
+    invalidateTechDirectory();
+    return c.json({ id: result?.id, name: name.trim() });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
 api.get("/time-off", async (c) => {
   try {
     const start = c.req.query("start");
@@ -3130,7 +3167,7 @@ api.get("/time-off", async (c) => {
     const sf = createSalesforce(c.env);
     const soql = `
       SELECT Id, ${o3.assignmentTechLookup}, ${o3.assignmentTechRelationship}.Name,
-             ${o3.assignmentDate}, ${o3.assignmentStartTime}
+             ${o3.assignmentDate}, ${o3.assignmentStartTime}, ${o3.assignmentEndTime}
       FROM ${o3.assignment}
       WHERE ${o3.assignmentOppLookup} = '${esc(c.env.TIME_OFF_OPPORTUNITY_ID)}'
         AND ${o3.assignmentDate} >= ${start} AND ${o3.assignmentDate} <= ${end}`;
@@ -3140,8 +3177,25 @@ api.get("/time-off", async (c) => {
       technicianId: r[o3.assignmentTechLookup],
       technicianName: r[o3.assignmentTechRelationship]?.Name ?? null,
       workDate: r[o3.assignmentDate] ?? null,
-      startTime: normTime(r[o3.assignmentStartTime])
+      startTime: normTime(r[o3.assignmentStartTime]),
+      endTime: normTime(r[o3.assignmentEndTime])
     })));
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+api.post("/time-off", async (c) => {
+  try {
+    const { technicianId, workDate, startTime, endTime } = await c.req.json();
+    if (!technicianId) return c.json({ error: "technicianId required" }, 400);
+    if (!workDate) return c.json({ error: "workDate required" }, 400);
+    const result = await createAssignment(c.env, c.env.TIME_OFF_OPPORTUNITY_ID, {
+      technicianId,
+      workDate,
+      startTime,
+      endTime
+    });
+    return c.json(result);
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -3269,6 +3323,7 @@ api.patch("/assignments/:id", async (c) => {
     if (typeof body.completed === "boolean") fields[o3.assignmentCompleted] = body.completed;
     if ("workDate" in body) fields[o3.assignmentDate] = body.workDate === "" ? null : body.workDate;
     if ("startTime" in body) fields[o3.assignmentStartTime] = toSfTime(body.startTime || "07:00");
+    if ("endTime" in body) fields[o3.assignmentEndTime] = toSfTime(body.endTime || null);
     if (Object.keys(fields).length === 0) return c.json({ error: "Nothing to update" }, 400);
     let oppId = null;
     let workDateForFs = null;
@@ -3345,7 +3400,8 @@ api.delete("/assignments/:id", async (c) => {
       console.warn("[routes] Could not pre-fetch assignment for FS sync:", e.message);
     }
     await sf.deleteRecord(o3.assignment, id);
-    const fsUserId = techName ? fsUserByTechName[techName] : null;
+    const techDir = await getTechDirectory(sf);
+    const fsUserId = techName ? techDir.byName[techName]?.fsUserId : null;
     if (fsUserId && oppId) {
       try {
         const fs = createFs(c.env);
@@ -3419,6 +3475,24 @@ api.get("/fs-search", async (c) => {
       matches = filterTasks(recent);
     }
     return c.json({ matches });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+api.get("/fs-users", async (c) => {
+  try {
+    const fs = createFs(c.env);
+    const KV = c.env.SF_TOKENS;
+    const CACHE_KEY = "fs_user_list_v1";
+    const CACHE_TTL = 1800;
+    const since = new Date(Date.now() - 10 * 365 * 24 * 60 * 60 * 1e3).toISOString();
+    let users = KV ? await KV.get(CACHE_KEY, "json") : null;
+    if (!users) {
+      users = await fs.listUsers(since);
+      if (KV) await KV.put(CACHE_KEY, JSON.stringify(users), { expirationTtl: CACHE_TTL });
+    }
+    const active = users.filter((u) => u.Enabled).map((u) => ({ externalId: u.ExternalId, name: u.Name, userType: u.UserType })).sort((a, b) => a.name.localeCompare(b.name));
+    return c.json({ users: active });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -3540,13 +3614,14 @@ api.post("/jobs/:id/fs-link", async (c) => {
     await sf.updateRecord("Opportunity", id, { [f3.oppFsTaskId]: fsTaskId });
     const result = { sfStatus: null, assignmentsAdded: 0 };
     try {
-      const [oppRows, fullTask, existingAssignments] = await Promise.all([
+      const [oppRows, fullTask, existingAssignments, techDir] = await Promise.all([
         sf.query(
           `SELECT ${f3.oppStatus}, ${f3.oppScheduledDate}, LastModifiedDate
            FROM Opportunity WHERE Id = '${esc(id)}' LIMIT 1`
         ),
         fs.getTask(fsTaskId),
-        sf.query(`SELECT ${o3.assignmentTechRelationship}.Name, ${o3.assignmentStartTime} FROM ${o3.assignment} WHERE ${o3.assignmentOppLookup} = '${esc(id)}'`)
+        sf.query(`SELECT ${o3.assignmentTechRelationship}.Name, ${o3.assignmentStartTime} FROM ${o3.assignment} WHERE ${o3.assignmentOppLookup} = '${esc(id)}'`),
+        getTechDirectory(sf)
       ]);
       const sfOpp = oppRows[0];
       if (!sfOpp) throw new Error("Opp not found");
@@ -3554,7 +3629,7 @@ api.post("/jobs/:id/fs-link", async (c) => {
         [f3.oppFsStatus]: fullTask.Status ?? null,
         [f3.oppFsLastModified]: fullTask.LastUpdated ?? null
       });
-      const syncableUserIds = (Array.isArray(fullTask.Users) ? fullTask.Users : []).filter((uid) => uid in config.fsTechUsers);
+      const syncableUserIds = (Array.isArray(fullTask.Users) ? fullTask.Users : []).filter((uid) => uid in techDir.byFsId);
       const assignedNames = new Set(
         existingAssignments.map((a) => a[o3.assignmentTechRelationship]?.Name).filter(Boolean)
       );
@@ -3583,14 +3658,10 @@ api.post("/jobs/:id/fs-link", async (c) => {
         await fs.patchTask(fsTaskId, fullTask, fsPatch);
       }
       if (syncableUserIds.length > 0) {
-        const sfTechs = await sf.query(
-          `SELECT Id, Name FROM ${o3.technician} WHERE ${o3.technicianActive} = true`
-        );
-        const sfTechIdByName = Object.fromEntries(sfTechs.map((t) => [t.Name, t.Id]));
         for (const fsUserId of syncableUserIds) {
-          const techName = config.fsTechUsers[fsUserId];
+          const techName = techDir.byFsId[fsUserId]?.name;
           if (assignedNames.has(techName)) continue;
-          const sfTechId = sfTechIdByName[techName];
+          const sfTechId = techDir.byName[techName]?.sfId;
           if (sfTechId) {
             await sf.createRecord(o3.assignment, {
               [o3.assignmentOppLookup]: id,
@@ -3694,7 +3765,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-ftMhFp/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-koRh9i/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -3726,7 +3797,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-ftMhFp/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-koRh9i/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;

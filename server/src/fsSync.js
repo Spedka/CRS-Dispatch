@@ -2,6 +2,7 @@ import { createFs } from './fieldSquared.js';
 import { createSalesforce } from './salesforce.js';
 import { config } from './config.js';
 import { reconcile, sfToFsStatus } from './statusMap.js';
+import { getTechDirectory } from './assignments.js';
 
 const f = config.fields;
 const o = config.objects;
@@ -12,11 +13,6 @@ const MAX_UNLINKED_PER_RUN = 30;
 // Window for assignment reconciliation — slightly larger than the cron interval
 // to avoid gaps if a run starts a few seconds late.
 const RECONCILE_WINDOW_MS = 10 * 60 * 1000;
-
-const fsTechUsers = config.fsTechUsers; // FS ObjectId → tech name
-const techNameToFsId = Object.fromEntries(
-  Object.entries(fsTechUsers).map(([fsId, name]) => [name, fsId])
-);
 
 function parseWoNum(name) {
   const m = name && name.match(/^WO\s+(\d+)/i);
@@ -181,8 +177,7 @@ export async function runFsSync(env) {
 
   console.log(`[fs-sync] reconciling status + assignments for ${toReconcile.length} tasks (${backfillIds.length} snapshot backfill)`);
 
-  // SF tech IDs loaded lazily — one query on first task that needs them.
-  let sfTechIdByName = null;
+  const techDir = await getTechDirectory(sf);
 
   for (const task of toReconcile) {
     try {
@@ -230,7 +225,7 @@ export async function runFsSync(env) {
       const toFsId = (u) => (typeof u === 'string' ? u : u?.ObjectId ?? null);
       const fsUserIds = new Set(
         (Array.isArray(fullTask.Users) ? fullTask.Users : [])
-          .map(toFsId).filter(uid => uid && uid in fsTechUsers)
+          .map(toFsId).filter(uid => uid && uid in techDir.byFsId)
       );
 
       const sfAssignedByName = new Map(
@@ -241,17 +236,10 @@ export async function runFsSync(env) {
 
       // Add: FS has user, SF doesn't
       for (const fsUserId of fsUserIds) {
-        const techName = fsTechUsers[fsUserId];
+        const techName = techDir.byFsId[fsUserId]?.name;
         if (sfAssignedByName.has(techName)) continue;
 
-        if (!sfTechIdByName) {
-          const rows = await sf.query(
-            `SELECT Id, Name FROM ${o.technician} WHERE ${o.technicianActive} = true`
-          );
-          sfTechIdByName = Object.fromEntries(rows.map(t => [t.Name, t.Id]));
-        }
-
-        const sfTechId = sfTechIdByName[techName];
+        const sfTechId = techDir.byName[techName]?.sfId;
         if (sfTechId) {
           await sf.createRecord(o.assignment, {
             [o.assignmentOppLookup]: sfOpp.Id,
@@ -266,7 +254,7 @@ export async function runFsSync(env) {
 
       // Remove: SF has a syncable tech not present in FS Users
       for (const [techName, assignmentRec] of sfAssignedByName) {
-        const fsUserId = techNameToFsId[techName];
+        const fsUserId = techDir.byName[techName]?.fsUserId;
         if (!fsUserId) continue; // not a syncable tech — leave it alone
         if (!fsUserIds.has(fsUserId)) {
           await sf.deleteRecord(o.assignment, assignmentRec.Id);

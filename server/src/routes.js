@@ -4,7 +4,7 @@ import { createSalesforce } from './salesforce.js';
 import { createFs } from './fieldSquared.js';
 import { FS_TO_SF, SF_TO_FS, reconcile, sfToFsStatus } from './statusMap.js';
 import { runFsSync } from './fsSync.js';
-import { createAssignment, esc, normTime, toSfTime, fsUserByTechName, buildFsSchedules } from './assignments.js';
+import { createAssignment, esc, normTime, toSfTime, buildFsSchedules, getTechDirectory, invalidateTechDirectory } from './assignments.js';
 import { scheduleRequests } from './scheduleRequests.js';
 
 const f = config.fields;
@@ -90,6 +90,25 @@ api.get('/technicians', async (c) => {
   }
 });
 
+// Add a technician from the board UI — Name is required, FS user ID is
+// optional (a tech with no FS ID just doesn't sync to Field Squared).
+api.post('/technicians', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const { name, fsUserId } = await c.req.json();
+    if (!name || !name.trim()) return c.json({ error: 'name required' }, 400);
+
+    const fields = { Name: name.trim(), [o.technicianActive]: true };
+    if (fsUserId && fsUserId.trim()) fields[o.technicianFsUserId] = fsUserId.trim();
+
+    const result = await sf.createRecord(o.technician, fields);
+    invalidateTechDirectory();
+    return c.json({ id: result?.id, name: name.trim() });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 // Approved time off lives as Job_Assignment__c rows against the hidden
 // TIME_OFF_OPPORTUNITY_ID sentinel — invisible to GET /jobs (that query filters
 // Opportunity by Project_Status__c and pulls assignments as a child subquery, so
@@ -108,7 +127,7 @@ api.get('/time-off', async (c) => {
     const sf = createSalesforce(c.env);
     const soql = `
       SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
-             ${o.assignmentDate}, ${o.assignmentStartTime}
+             ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}
       FROM ${o.assignment}
       WHERE ${o.assignmentOppLookup} = '${esc(c.env.TIME_OFF_OPPORTUNITY_ID)}'
         AND ${o.assignmentDate} >= ${start} AND ${o.assignmentDate} <= ${end}`;
@@ -119,7 +138,27 @@ api.get('/time-off', async (c) => {
       technicianName: r[o.assignmentTechRelationship]?.Name ?? null,
       workDate: r[o.assignmentDate] ?? null,
       startTime: normTime(r[o.assignmentStartTime]),
+      endTime: normTime(r[o.assignmentEndTime]),
     })));
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// The office adding time off directly (not via a technician's schedule
+// request). A dedicated route rather than reusing POST /jobs/:oppId/assignments
+// — TIME_OFF_OPPORTUNITY_ID is a server-only env var, deliberately never sent
+// to the client, so the client can't name it as a path param either way.
+api.post('/time-off', async (c) => {
+  try {
+    const { technicianId, workDate, startTime, endTime } = await c.req.json();
+    if (!technicianId) return c.json({ error: 'technicianId required' }, 400);
+    if (!workDate) return c.json({ error: 'workDate required' }, 400);
+
+    const result = await createAssignment(c.env, c.env.TIME_OFF_OPPORTUNITY_ID, {
+      technicianId, workDate, startTime, endTime,
+    });
+    return c.json(result);
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -260,6 +299,9 @@ api.patch('/assignments/:id', async (c) => {
     if (typeof body.completed === 'boolean') fields[o.assignmentCompleted] = body.completed;
     if ('workDate' in body) fields[o.assignmentDate] = body.workDate === '' ? null : body.workDate;
     if ('startTime' in body) fields[o.assignmentStartTime] = toSfTime(body.startTime || '07:00');
+    // End_Time__c isn't part of the FS-facing job flow (FS's own Schedules always
+    // derive their end as start+1hr) — only time off actually uses it.
+    if ('endTime' in body) fields[o.assignmentEndTime] = toSfTime(body.endTime || null);
     if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
 
     // Pre-fetch assignment context before updating so we have the parent opp + current values
@@ -358,7 +400,8 @@ api.delete('/assignments/:id', async (c) => {
     await sf.deleteRecord(o.assignment, id);
 
     // Remove the user from the FS task if they're a syncable tech
-    const fsUserId = techName ? fsUserByTechName[techName] : null;
+    const techDir = await getTechDirectory(sf);
+    const fsUserId = techName ? techDir.byName[techName]?.fsUserId : null;
     if (fsUserId && oppId) {
       try {
         const fs = createFs(c.env);
@@ -453,6 +496,33 @@ api.get('/fs-search', async (c) => {
     }
 
     return c.json({ matches });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// FS's active user roster — feeds the "Add Tech" picklist so the office picks
+// the FS account instead of hand-typing an opaque ObjectId.
+api.get('/fs-users', async (c) => {
+  try {
+    const fs = createFs(c.env);
+    const KV = c.env.SF_TOKENS;
+    const CACHE_KEY = 'fs_user_list_v1';
+    const CACHE_TTL = 1800; // 30 minutes — the user roster barely changes
+    const since = new Date(Date.now() - 10 * 365 * 24 * 60 * 60 * 1000).toISOString();
+
+    let users = KV ? await KV.get(CACHE_KEY, 'json') : null;
+    if (!users) {
+      users = await fs.listUsers(since);
+      if (KV) await KV.put(CACHE_KEY, JSON.stringify(users), { expirationTtl: CACHE_TTL });
+    }
+
+    const active = users
+      .filter((u) => u.Enabled)
+      .map((u) => ({ externalId: u.ExternalId, name: u.Name, userType: u.UserType }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    return c.json({ users: active });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -606,15 +676,17 @@ api.post('/jobs/:id/fs-link', async (c) => {
     const result = { sfStatus: null, assignmentsAdded: 0 };
 
     try {
-      // Fetch opp, full FS task, and existing SF assignments all in parallel so
-      // assignment count is available before we decide the FS status to write.
-      const [oppRows, fullTask, existingAssignments] = await Promise.all([
+      // Fetch opp, full FS task, existing SF assignments, and the FS↔SF tech
+      // directory all in parallel so assignment count is available before we
+      // decide the FS status to write.
+      const [oppRows, fullTask, existingAssignments, techDir] = await Promise.all([
         sf.query(
           `SELECT ${f.oppStatus}, ${f.oppScheduledDate}, LastModifiedDate
            FROM Opportunity WHERE Id = '${esc(id)}' LIMIT 1`
         ),
         fs.getTask(fsTaskId),
         sf.query(`SELECT ${o.assignmentTechRelationship}.Name, ${o.assignmentStartTime} FROM ${o.assignment} WHERE ${o.assignmentOppLookup} = '${esc(id)}'`),
+        getTechDirectory(sf),
       ]);
       const sfOpp = oppRows[0];
       if (!sfOpp) throw new Error('Opp not found');
@@ -629,7 +701,7 @@ api.post('/jobs/:id/fs-link', async (c) => {
 
       // Sync users: FS → SF — find techs in FS not yet in SF.
       const syncableUserIds = (Array.isArray(fullTask.Users) ? fullTask.Users : [])
-        .filter(uid => uid in config.fsTechUsers);
+        .filter(uid => uid in techDir.byFsId);
 
       const assignedNames = new Set(
         existingAssignments.map(a => a[o.assignmentTechRelationship]?.Name).filter(Boolean)
@@ -669,15 +741,10 @@ api.post('/jobs/:id/fs-link', async (c) => {
 
       // Add missing SF assignments from FS.
       if (syncableUserIds.length > 0) {
-        const sfTechs = await sf.query(
-          `SELECT Id, Name FROM ${o.technician} WHERE ${o.technicianActive} = true`
-        );
-        const sfTechIdByName = Object.fromEntries(sfTechs.map(t => [t.Name, t.Id]));
-
         for (const fsUserId of syncableUserIds) {
-          const techName = config.fsTechUsers[fsUserId];
+          const techName = techDir.byFsId[fsUserId]?.name;
           if (assignedNames.has(techName)) continue;
-          const sfTechId = sfTechIdByName[techName];
+          const sfTechId = techDir.byName[techName]?.sfId;
           if (sfTechId) {
             await sf.createRecord(o.assignment, {
               [o.assignmentOppLookup]: id,

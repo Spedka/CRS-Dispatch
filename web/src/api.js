@@ -11,6 +11,15 @@ export const api = {
 
   getTechnicians: () => fetch('/api/technicians').then(j),
 
+  addTechnician: (name, fsUserId) =>
+    fetch('/api/technicians', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, fsUserId }),
+    }).then(j),
+
+  getFsUsers: () => fetch('/api/fs-users').then(j),
+
   updateJob: (oppId, fields) =>
     fetch(`/api/jobs/${oppId}`, {
       method: 'PATCH',
@@ -89,5 +98,12 @@ export const api = {
 
   getTimeOff: (start, end) =>
     fetch(`/api/time-off?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`).then(j),
+
+  addTimeOff: (technicianId, workDate, startTime, endTime) =>
+    fetch('/api/time-off', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ technicianId, workDate, startTime, endTime }),
+    }).then(j),
 
 };
