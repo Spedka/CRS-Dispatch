@@ -453,9 +453,19 @@ export default function App() {
     setVisibleCount(50);
   }, [query, filter, jobTech, jobType, closedFrom, closedTo, sortBy]);
 
+  // Paused while the tab is backgrounded -- polling every 5 minutes
+  // regardless of visibility means every idle/minimized staff tab still
+  // bills a request pair on schedule. Regaining visibility refetches
+  // immediately instead of waiting out whatever's left of the current tick.
   useEffect(() => {
-    const id = setInterval(() => { if (pending.current === 0) load(true); }, POLL_MS);
-    return () => clearInterval(id);
+    const tick = () => { if (pending.current === 0 && document.visibilityState === 'visible') load(true); };
+    const id = setInterval(tick, POLL_MS);
+    const onVisible = () => { if (document.visibilityState === 'visible') tick(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [load]);
 
   useEffect(() => {
