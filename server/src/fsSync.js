@@ -3,6 +3,7 @@ import { createSalesforce } from './salesforce.js';
 import { config } from './config.js';
 import { reconcile, sfToFsStatus } from './statusMap.js';
 import { getTechDirectory } from './assignments.js';
+import { notifyTech } from './notifyBoard.js';
 
 const f = config.fields;
 const o = config.objects;
@@ -247,6 +248,7 @@ export async function runFsSync(env) {
             [o.assignmentStartTime]: '07:00:00.000Z',
           });
           console.log(`[fs-sync] added assignment: ${techName} → ${sfOpp.Id}`);
+          await notifyTech(env, techName, 'assignment');
         } else {
           console.warn(`[fs-sync] no SF tech ID for "${techName}" — skipping`);
         }
@@ -259,6 +261,7 @@ export async function runFsSync(env) {
         if (!fsUserIds.has(fsUserId)) {
           await sf.deleteRecord(o.assignment, assignmentRec.Id);
           console.log(`[fs-sync] removed assignment: ${techName} from ${sfOpp.Id}`);
+          await notifyTech(env, techName, 'assignment-cancelled');
         }
       }
     } catch (e) {

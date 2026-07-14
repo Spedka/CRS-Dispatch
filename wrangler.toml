@@ -35,3 +35,13 @@ id = "b9df8aade82f4f5c9b6f1b5c84f23eca"
 [observability.logs]
 enabled = false
 invocation_logs = true
+
+# Pushes a live "refresh" to a tech's open chalkboard tab the moment we save
+# a change that affects them (approve/counter/deny, assignment
+# create/edit/cancel) -- see notifyBoard.js and crs-board's CLAUDE.md "Live
+# push to the tech app" section. Also requires a BOARD_NOTIFY_SECRET secret
+# (wrangler secret put BOARD_NOTIFY_SECRET) matching chalkboard's own
+# INTERNAL_NOTIFY_SECRET.
+[[services]]
+binding = "BOARD"
+service = "chalkboard"

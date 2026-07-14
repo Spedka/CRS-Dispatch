@@ -2,6 +2,7 @@ import { config } from './config.js';
 import { createSalesforce } from './salesforce.js';
 import { createFs } from './fieldSquared.js';
 import { sfToFsStatus } from './statusMap.js';
+import { notifyTech } from './notifyBoard.js';
 
 const f = config.fields;
 const o = config.objects;
@@ -229,6 +230,11 @@ export async function createAssignment(env, oppId, {
       console.error('[routes] SF Opp update failed (assignment kept):', oppErr.message);
     }
   }
+
+  // Single choke point for every assignment-creation caller (approve,
+  // /api/jobs/:oppId/assignments, /api/time-off, fs-link) -- no need to
+  // duplicate this call at each site.
+  await notifyTech(env, assignmentRec?.technicianName, 'assignment');
 
   return { assignmentId: createdId, assignment: assignmentRec, fsDebug };
 }

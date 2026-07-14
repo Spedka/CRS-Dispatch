@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { config } from './config.js';
 import { createSalesforce } from './salesforce.js';
 import { createAssignment, esc, normTime, toSfTime } from './assignments.js';
+import { notifyTech } from './notifyBoard.js';
 
 const sr = config.scheduleRequest;
 const OPEN_STATUSES = ['Requested', 'Countered'];
@@ -122,7 +123,7 @@ scheduleRequests.post('/schedule-requests/:id/counter', async (c) => {
     const { date, start, end, officeNote } = await c.req.json();
 
     const rows = await sf.query(
-      `SELECT Id, ${sr.status}, ${sr.lastOfferBy} FROM ${sr.sobject} WHERE Id = '${esc(id)}' LIMIT 1`
+      `SELECT Id, ${sr.status}, ${sr.lastOfferBy}, ${sr.techRelationship}.Name FROM ${sr.sobject} WHERE Id = '${esc(id)}' LIMIT 1`
     );
     const reqRec = rows[0];
     if (!reqRec) return c.json({ error: 'Schedule request not found' }, 404);
@@ -146,6 +147,7 @@ scheduleRequests.post('/schedule-requests/:id/counter', async (c) => {
     if (officeNote) payload[sr.officeNote] = officeNote;
 
     await sf.updateRecord(sr.sobject, id, payload);
+    await notifyTech(c.env, reqRec[sr.techRelationship]?.Name, 'counter');
     return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: e.message }, 500);
@@ -160,7 +162,7 @@ scheduleRequests.post('/schedule-requests/:id/deny', async (c) => {
     if (!officeNote) return c.json({ error: 'officeNote required' }, 400);
 
     const rows = await sf.query(
-      `SELECT Id, ${sr.status} FROM ${sr.sobject} WHERE Id = '${esc(id)}' LIMIT 1`
+      `SELECT Id, ${sr.status}, ${sr.techRelationship}.Name FROM ${sr.sobject} WHERE Id = '${esc(id)}' LIMIT 1`
     );
     const reqRec = rows[0];
     if (!reqRec) return c.json({ error: 'Schedule request not found' }, 404);
@@ -175,6 +177,7 @@ scheduleRequests.post('/schedule-requests/:id/deny', async (c) => {
       [sr.officeNote]: officeNote,
       [sr.resolvedAt]: new Date().toISOString(),
     });
+    await notifyTech(c.env, reqRec[sr.techRelationship]?.Name, 'deny');
     return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: e.message }, 500);

@@ -7,6 +7,7 @@ import { runFsSync } from './fsSync.js';
 import { createAssignment, esc, normTime, toSfTime, buildFsSchedules, getTechDirectory, invalidateTechDirectory } from './assignments.js';
 import { scheduleRequests } from './scheduleRequests.js';
 import { mintMagicLink } from './authLink.js';
+import { notifyTech } from './notifyBoard.js';
 
 const f = config.fields;
 const o = config.objects;
@@ -230,11 +231,14 @@ api.patch('/jobs/:id', async (c) => {
 
     if (shouldReleaseCrew && !suppressRelease) {
       const rows = await sf.query(
-        `SELECT Id FROM ${o.assignment}
+        `SELECT Id, ${o.assignmentTechRelationship}.Name FROM ${o.assignment}
          WHERE ${o.assignmentOppLookup} = '${esc(id)}' AND ${o.assignmentCompleted} = false`
       );
       await Promise.all(rows.map((r) =>
         sf.updateRecord(o.assignment, r.Id, { [o.assignmentDate]: null })
+      ));
+      await Promise.all(rows.map((r) =>
+        notifyTech(c.env, r[o.assignmentTechRelationship]?.Name, 'assignment-released')
       ));
     }
 
@@ -328,18 +332,20 @@ api.patch('/assignments/:id', async (c) => {
     if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
 
     // Pre-fetch assignment context before updating so we have the parent opp + current values
-    // needed to sync schedule changes to FS.
+    // needed to sync schedule changes to FS, plus the tech name for the live-push notify below.
     let oppId = null;
     let workDateForFs = null;
     let startTimeForFs = null;
+    let techName = null;
     const needsFsSync = 'workDate' in body || 'startTime' in body;
-    if (needsFsSync) {
-      try {
-        const rows = await sf.query(
-          `SELECT ${o.assignmentOppLookup}, ${o.assignmentDate}, ${o.assignmentStartTime}
-           FROM ${o.assignment} WHERE Id = '${esc(id)}' LIMIT 1`
-        );
-        if (rows[0]) {
+    try {
+      const rows = await sf.query(
+        `SELECT ${o.assignmentOppLookup}, ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentTechRelationship}.Name
+         FROM ${o.assignment} WHERE Id = '${esc(id)}' LIMIT 1`
+      );
+      if (rows[0]) {
+        techName = rows[0][o.assignmentTechRelationship]?.Name ?? null;
+        if (needsFsSync) {
           oppId = rows[0][o.assignmentOppLookup];
           workDateForFs = 'workDate' in body
             ? (body.workDate || null)
@@ -348,12 +354,13 @@ api.patch('/assignments/:id', async (c) => {
             ? (body.startTime || '07:00')
             : normTime(rows[0][o.assignmentStartTime]) || '07:00';
         }
-      } catch (e) {
-        console.warn('[routes] Could not pre-fetch assignment for FS sync:', e.message);
       }
+    } catch (e) {
+      console.warn('[routes] Could not pre-fetch assignment for FS sync:', e.message);
     }
 
     await sf.updateRecord(o.assignment, id, fields);
+    await notifyTech(c.env, techName, 'assignment-updated');
 
     if (oppId && needsFsSync) {
       try {
@@ -421,6 +428,7 @@ api.delete('/assignments/:id', async (c) => {
     }
 
     await sf.deleteRecord(o.assignment, id);
+    await notifyTech(c.env, techName, 'assignment-cancelled');
 
     // Remove the user from the FS task if they're a syncable tech
     const techDir = await getTechDirectory(sf);
