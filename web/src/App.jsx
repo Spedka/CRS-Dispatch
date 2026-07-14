@@ -17,6 +17,16 @@ const STATUS_CLASS = {
 };
 const statusClass = (s) => STATUS_CLASS[s] || 'scheduled';
 
+// Persists the top-level tab + jobs-list filters across reloads (including a
+// hard browser refresh, which a plain useState wouldn't survive) -- this app
+// has no router, so localStorage is the lower-lift fix over building one.
+// Scoped to this top-level state only; Schedule's own view state and
+// ContactsTab's own search/filters are left alone.
+const VIEW_STATE_KEY = 'dispatch_view_state';
+const loadViewState = () => {
+  try { return JSON.parse(localStorage.getItem(VIEW_STATE_KEY) || '{}'); } catch { return {}; }
+};
+
 // Terminal statuses leave the board (mirrors: not in jobStatusValues). Viewable
 // via a filter regardless of how they were set. "Billing Complete" only ever
 // comes from Field Squared; "Project Complete" can also be set from the dropdown
@@ -377,16 +387,16 @@ const JobCard = React.memo(function JobCard({
 });
 
 export default function App() {
-  const [tab, setTab] = useState('jobs');
+  const [tab, setTab] = useState(() => loadViewState().tab ?? 'jobs');
   const [jobs, setJobs] = useState([]);
   const [techs, setTechs] = useState([]);
-  const [filter, setFilter] = useState('all');
-  const [query, setQuery] = useState('');
-  const [closedFrom, setClosedFrom] = useState('');
-  const [closedTo, setClosedTo] = useState('');
-  const [sortBy, setSortBy] = useState('scheduled');
-  const [jobTech, setJobTech] = useState('all');
-  const [jobType, setJobType] = useState('all');
+  const [filter, setFilter] = useState(() => loadViewState().filter ?? 'all');
+  const [query, setQuery] = useState(() => loadViewState().query ?? '');
+  const [closedFrom, setClosedFrom] = useState(() => loadViewState().closedFrom ?? '');
+  const [closedTo, setClosedTo] = useState(() => loadViewState().closedTo ?? '');
+  const [sortBy, setSortBy] = useState(() => loadViewState().sortBy ?? 'scheduled');
+  const [jobTech, setJobTech] = useState(() => loadViewState().jobTech ?? 'all');
+  const [jobType, setJobType] = useState(() => loadViewState().jobType ?? 'all');
   // Infinite scroll on the jobs list — only the first `visibleCount` of `shown`
   // are ever mounted. Everything's already loaded client-side (no server paging),
   // so "loading more" just raises this cap; no extra fetch involved.
@@ -402,7 +412,6 @@ export default function App() {
   const [fsLink, setFsLink] = useState({ jobId: null, query: '', searching: false, matches: null, error: null });
   const [draftJob, setDraftJob] = useState(null);
   const [draftPendingAdd, setDraftPendingAdd] = useState({ techId: '', date: '', time: '' });
-  const [modalSaving, setModalSaving] = useState(false);
   const [contacts, setContacts] = useState([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsLoaded, setContactsLoaded] = useState(false);
@@ -415,6 +424,12 @@ export default function App() {
   const [techLinksOpen, setTechLinksOpen] = useState(false);
   const [fsUsers, setFsUsers] = useState([]);
   const [fsUsersLoading, setFsUsersLoading] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
+      tab, filter, query, closedFrom, closedTo, sortBy, jobTech, jobType,
+    }));
+  }, [tab, filter, query, closedFrom, closedTo, sortBy, jobTech, jobType]);
 
   // Count of in-flight writes. While > 0 the poll holds off so a background
   // refresh can't overwrite a change you just made but that hasn't saved yet.
@@ -483,7 +498,6 @@ export default function App() {
     } else {
       setDraftJob(null);
       setDraftPendingAdd({ techId: '', date: '', time: '' });
-      setModalSaving(false);
     }
   }, [selectedJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -520,35 +534,46 @@ export default function App() {
   }, [tab, loadRequests]);
 
   const approveRequest = async (req, opportunityId) => {
+    // Optimistic: an approved request is resolved, so drop it from the open
+    // list immediately rather than waiting on the round trip.
+    setScheduleRequests((prev) => prev.filter((r) => r.id !== req.id));
+    flash(`${req.technicianName || 'Request'} approved`);
     try {
       await track(() => api.approveScheduleRequest(req.id, opportunityId));
-      flash(`${req.technicianName || 'Request'} approved`);
-      await loadRequests();
       await load(true); // the new assignment shows up on the jobs/schedule tabs
     } catch (e) {
       flash(`Could not approve: ${e.message}`);
+      loadRequests();
       throw e;
     }
   };
 
   const counterRequest = async (req, offer) => {
+    // Optimistic: flip the row to "waiting on tech" with the new offer
+    // immediately, rather than waiting on a refetch to reflect it.
+    setScheduleRequests((prev) => prev.map((r) => r.id === req.id
+      ? { ...r, proposedDate: offer.date, proposedStart: offer.start, proposedEnd: offer.end, officeNote: offer.officeNote ?? r.officeNote, waitingOn: 'tech' }
+      : r));
+    flash('Countered');
     try {
       await track(() => api.counterScheduleRequest(req.id, offer));
-      flash('Countered');
-      await loadRequests();
     } catch (e) {
       flash(`Could not counter: ${e.message}`);
+      loadRequests();
       throw e;
     }
   };
 
   const denyRequest = async (req, officeNote) => {
+    // Optimistic: a denied request is resolved, so drop it from the open
+    // list immediately.
+    setScheduleRequests((prev) => prev.filter((r) => r.id !== req.id));
+    flash('Request denied');
     try {
       await track(() => api.denyScheduleRequest(req.id, officeNote));
-      flash('Request denied');
-      await loadRequests();
     } catch (e) {
       flash(`Could not deny: ${e.message}`);
+      loadRequests();
       throw e;
     }
   };
@@ -782,7 +807,18 @@ export default function App() {
   const saveModal = async () => {
     const originalJob = jobs.find((j) => j.id === selectedJobId);
     if (!originalJob || !draftJob) return;
-    setModalSaving(true);
+
+    // Optimistic: draftJob already IS the "what should happen" end state --
+    // the modal UI built it via add/remove/edit before Save was pressed --
+    // so apply it and close the modal immediately rather than waiting on
+    // the network diff loop below to finish first.
+    const derived = deriveJobStatusFromAssignments(draftJob);
+    const finalStatus = draftJob.status !== originalJob.status ? draftJob.status : derived.status;
+    setJobs((prev) => prev.map((j) => j.id === originalJob.id
+      ? { ...draftJob, status: finalStatus, scheduledDate: derived.scheduledDate }
+      : j));
+    setSelectedJobId(null);
+
     try {
       // Removed assignments
       const keptIds = new Set(draftJob.assignments.filter((a) => !a._new).map((a) => a.assignmentId));
@@ -799,20 +835,25 @@ export default function App() {
         if (da.completed !== oa.completed) ch.completed = da.completed;
         if (Object.keys(ch).length > 0) await api.updateAssignment(da.assignmentId, ch);
       }
-      // New assignments
+      // New assignments -- patch in the real assignmentId from each response
+      // (same pattern as assign()) so a temp `_new_...` id never lingers in
+      // state, where a later edit/remove on it would 404 against Salesforce.
       for (const na of draftJob.assignments.filter((a) => a._new)) {
-        await api.addAssignment(draftJob.id, na.technicianId, na.workDate || '', na.startTime || '07:00');
+        const resp = await api.addAssignment(draftJob.id, na.technicianId, na.workDate || '', na.startTime || '07:00');
+        const created = resp.assignment;
+        const realAssignment = created
+          ? { assignmentId: created.assignmentId, technicianId: created.technicianId, technicianName: created.technicianName, workDate: created.workDate, startTime: created.startTime || '07:00', completed: created.completed }
+          : { ...na, assignmentId: resp.assignmentId, _new: undefined };
+        setJobs((prev) => prev.map((j) => j.id === draftJob.id
+          ? { ...j, assignments: j.assignments.map((a) => a.assignmentId === na.assignmentId ? realAssignment : a) }
+          : j));
       }
       // Sync Opportunity status + scheduledDate
-      const derived = deriveJobStatusFromAssignments(draftJob);
-      const finalStatus = draftJob.status !== originalJob.status ? draftJob.status : derived.status;
       await api.updateJob(draftJob.id, { status: finalStatus, scheduledDate: derived.scheduledDate, _suppressRelease: true });
-      setSelectedJobId(null);
-      await load(true);
       flash('Changes saved');
     } catch (e) {
       flash(`Save failed: ${e.message}`);
-      setModalSaving(false);
+      load(true);
     }
   };
 
@@ -910,7 +951,11 @@ export default function App() {
         <div className="bar-spacer" />
         <button className="refresh" onClick={() => setAddTechOpen(true)} title="Add a technician">+ Add Tech</button>
         <button className="refresh" onClick={() => setTechLinksOpen(true)} title="Get a chalkboard sign-in link for a technician">Tech Links</button>
-        <button className="refresh" onClick={() => load()} title="Reload from Salesforce">↻ Refresh</button>
+        <button
+          className="refresh"
+          onClick={() => { load(); if (tab === 'requests') loadRequests(); }}
+          title="Reload from Salesforce"
+        >↻ Refresh</button>
         <div className="synced">
           <span className="dot" />
           <span className="lbl">Live · Salesforce</span>
@@ -926,7 +971,31 @@ export default function App() {
       </nav>
 
       <main>
-        {loading && <div className="state">Loading from Salesforce…</div>}
+        {loading && tab === 'jobs' && (
+          <div className="jobs">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div key={i} className="job">
+                <div className="stripe skel-block" />
+                <div className="body">
+                  <div className="row1">
+                    <span className="skel-block" style={{ width: 140, height: 15 }} />
+                    <span className="skel-block" style={{ width: 60, height: 15 }} />
+                  </div>
+                  <div className="meta">
+                    <span className="skel-block" style={{ width: '55%', height: 12 }} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {loading && tab === 'schedule' && (
+          <div>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div key={i} className="skel-block" style={{ height: 40, marginBottom: 8 }} />
+            ))}
+          </div>
+        )}
         {error && <div className="state err">Couldn't reach the API: {error}<br /><small>Check the Worker's Salesforce secrets and SF_LOGIN_URL.</small></div>}
 
         {!loading && !error && tab === 'jobs' && (
@@ -1069,7 +1138,6 @@ export default function App() {
             requests={scheduleRequests}
             jobs={jobs}
             loading={requestsLoading}
-            onRefresh={loadRequests}
             onApprove={approveRequest}
             onCounter={counterRequest}
             onDeny={denyRequest}
@@ -1095,11 +1163,12 @@ export default function App() {
                 <span className="jname">{draftJob.name}</span>
                 {draftJob.lid && <span className="lidtag">LID {draftJob.lid}</span>}
                 <select
-                  className={`statussel ${statusClass(draftJob.status)}`}
+                  className={`statussel ${draftJob.status ? statusClass(draftJob.status) : 'unset'}`}
                   value={draftJob.status}
                   onChange={(e) => setDraftJob((d) => ({ ...d, status: e.target.value }))}
                 >
-                  {!ASSIGNABLE_STATUSES.includes(draftJob.status) && <option value={draftJob.status}>{draftJob.status}</option>}
+                  {!draftJob.status && <option value="">Pick a status…</option>}
+                  {draftJob.status && !ASSIGNABLE_STATUSES.includes(draftJob.status) && <option value={draftJob.status}>{draftJob.status}</option>}
                   {ASSIGNABLE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                 </select>
               </div>
@@ -1125,7 +1194,18 @@ export default function App() {
                     <div className={`assignrow ${cls}`} key={a.assignmentId}>
                       <button
                         className="check"
-                        onClick={() => setDraftJob((d) => ({ ...d, assignments: d.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, completed: !x.completed } : x) }))}
+                        onClick={() => setDraftJob((d) => {
+                          const nowCompleted = !a.completed;
+                          return {
+                            ...d,
+                            // Marking a tech's work as done shouldn't let a
+                            // stale/auto-derived status silently carry
+                            // through to Save -- force a fresh, deliberate
+                            // pick instead.
+                            status: nowCompleted ? '' : d.status,
+                            assignments: d.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, completed: nowCompleted } : x),
+                          };
+                        })}
                         title={a.completed ? 'Worked this day — click to reopen' : 'Mark as worked (freezes the date)'}
                         aria-label="Toggle done"
                       >{a.completed ? '✓' : '○'}</button>
@@ -1191,10 +1271,8 @@ export default function App() {
               </div>
             </div>
             <div className="modal-footer">
-              <button className="modal-save-btn" onClick={saveModal} disabled={modalSaving}>
-                {modalSaving ? 'Saving…' : 'Save changes'}
-              </button>
-              <button className="modal-cancel-btn" onClick={cancelModal} disabled={modalSaving}>Cancel</button>
+              <button className="modal-save-btn" onClick={saveModal} disabled={!draftJob.status}>Save changes</button>
+              <button className="modal-cancel-btn" onClick={cancelModal}>Cancel</button>
             </div>
           </div>
         </div>
@@ -1462,6 +1540,12 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
   const [parentFilter, setParentFilter] = useState('');
   const [accountFilter, setAccountFilter] = useState('');
   const [lidFilter, setLidFilter] = useState('');
+  // Infinite scroll, mirroring the outstanding-jobs list's own mechanism
+  // (see the top-level `visibleCount`/`scrollSentinelRef` in App()) --
+  // contacts are already fully fetched client-side, so this only caps how
+  // many rows are mounted, no extra fetch involved.
+  const [visibleCount, setVisibleCount] = useState(50);
+  const contactsSentinelRef = useRef(null);
   const [expanded, setExpanded] = useState(new Set());
   const [changingContact, setChangingContact] = useState(null); // accountId being reassigned
   const [pickerQuery, setPickerQuery] = useState('');
@@ -1540,6 +1624,22 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
 
   const hasFilter = search || parentFilter || accountFilter || lidFilter;
 
+  // A new search/filter is a new list — start from the top, same as the
+  // jobs list does.
+  useEffect(() => {
+    setVisibleCount(50);
+  }, [search, parentFilter, accountFilter, lidFilter]);
+
+  useEffect(() => {
+    const el = contactsSentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) setVisibleCount((c) => c + 50);
+    }, { rootMargin: '400px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [filtered.length]);
+
   return (
     <section>
       <div className="view-head">
@@ -1583,7 +1683,25 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
         {!loading && <span className="contact-count">{filtered.length} shown</span>}
       </div>
 
-      {loading && <div className="state">Loading contacts from Salesforce…</div>}
+      {loading && (
+        <div className="contacts-wrap">
+          <table className="contacts-table">
+            <thead>
+              <tr><th>Name</th><th>Buildings</th><th>Phone</th><th>Email</th></tr>
+            </thead>
+            <tbody>
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <tr key={i}>
+                  <td><span className="skel-block" style={{ width: 120, height: 13, display: 'inline-block' }} /></td>
+                  <td><span className="skel-block" style={{ width: 80, height: 13, display: 'inline-block' }} /></td>
+                  <td><span className="skel-block" style={{ width: 90, height: 13, display: 'inline-block' }} /></td>
+                  <td><span className="skel-block" style={{ width: 140, height: 13, display: 'inline-block' }} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {!loading && filtered.length === 0 && (
         <div className="empty">{hasFilter ? 'No contacts match those filters.' : 'No contacts found.'}</div>
       )}
@@ -1599,7 +1717,7 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((c) => (
+              {filtered.slice(0, visibleCount).map((c) => (
                 <tr key={c.id}>
                   <td>
                     {editing?.contactId === c.id && editing?.field === 'name'
@@ -1702,6 +1820,7 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
               ))}
             </tbody>
           </table>
+          {visibleCount < filtered.length && <div ref={contactsSentinelRef} className="scroll-sentinel" />}
         </div>
       )}
     </section>
@@ -1858,7 +1977,7 @@ function RequestRow({ req, jobs, onApprove, onCounter, onDeny }) {
   );
 }
 
-function RequestsTab({ requests, jobs, loading, onRefresh, onApprove, onCounter, onDeny }) {
+function RequestsTab({ requests, jobs, loading, onApprove, onCounter, onDeny }) {
   // Oldest first — age is the pressure that keeps the approve/counter/deny loop moving.
   const sorted = useMemo(() => [...requests].sort((a, b) => (b.ageHours || 0) - (a.ageHours || 0)), [requests]);
 
@@ -1866,10 +1985,28 @@ function RequestsTab({ requests, jobs, loading, onRefresh, onApprove, onCounter,
     <section>
       <div className="view-head">
         <div><h2>Schedule requests</h2><p>Techs proposing dates/times for jobs and time off. Approve, counter, or deny.</p></div>
-        <button className="refresh" onClick={onRefresh} title="Reload from Salesforce">↻ Refresh</button>
       </div>
 
-      {loading && <div className="state">Loading requests…</div>}
+      {loading && (
+        <div className="req-list">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="req-row">
+              <div className="req-main">
+                <div className="req-top">
+                  <span className="skel-block" style={{ width: 100, height: 13 }} />
+                  <span className="skel-block" style={{ width: 70, height: 13 }} />
+                </div>
+                <div className="req-window">
+                  <span className="skel-block" style={{ width: 160, height: 12 }} />
+                </div>
+              </div>
+              <div className="req-actions">
+                <span className="skel-block" style={{ width: 200, height: 30 }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       {!loading && sorted.length === 0 && <div className="empty">No open schedule requests.</div>}
       {!loading && sorted.length > 0 && (
         <div className="req-list">

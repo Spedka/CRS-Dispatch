@@ -289,6 +289,22 @@ api.patch('/jobs/:id', async (c) => {
           await fs.patchTask(fsTaskId, task, fsPatch);
           if (fsStatus) fsUpdated = true;
         }
+
+        // Re-stamp the cached FS_Status__c/FS_Last_Modified__c snapshot
+        // immediately after a successful push -- otherwise the board's FS
+        // badge shows the OLD status until the next fs-sync cron tick (up
+        // to 5 min later), and per investigation that cron tick isn't even
+        // a reliable backstop: its own backfill only catches an EMPTY
+        // snapshot, never a stale-but-present one, so a snapshot could stay
+        // wrong indefinitely if FS's own "recently modified" list endpoint
+        // doesn't report an API-pushed change. Mirrors the same two fields
+        // the fs-link endpoint stamps elsewhere in this file.
+        if (fsUpdated && fsStatus) {
+          await sf.updateRecord('Opportunity', id, {
+            [f.oppFsStatus]: fsStatus,
+            [f.oppFsLastModified]: new Date().toISOString(),
+          });
+        }
       } catch (fsErr) {
         console.error('[routes] FS write failed (SF kept):', fsErr.message);
         fsError = fsErr.message;
