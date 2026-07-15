@@ -14,16 +14,6 @@ const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); retur
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 const startOfWeek = (d) => { const x = startOfDay(d); x.setDate(x.getDate() - x.getDay()); return x; };
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-const initials = (name) => name ? name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase() : '?';
-
-function nextScheduledAssignmentDate(job) {
-  const dates = (job.assignments || [])
-    .filter((a) => a.workDate && !a.completed)
-    .map((a) => a.workDate)
-    .sort();
-  return dates[0] || '';
-}
-
 // ---- deterministic per-tech color ----
 const TV_PALETTE = [
   { bg: '#DC2626', fg: '#fff' }, { bg: '#2563EB', fg: '#fff' }, { bg: '#059669', fg: '#fff' },
@@ -200,16 +190,19 @@ function TvWeekView({ jobs, technicians, requests, timeOff }) {
                 const iso = isoOf(d);
                 const items = grid[t.id]?.[iso] || [];
                 const off = timeOffByTechDate[t.id]?.[iso];
+                const shown = items.slice(0, 2);
+                const overflow = items.length - shown.length;
                 return (
                   <div key={iso} className={`tv-wdaycell ${iso === todayIso ? 'tv-todaycol' : ''}`}>
                     {off && <div className="tv-offchip">Off</div>}
                     {items.length === 0 && !off && <span className="tv-free">Open</span>}
-                    {items.map((item, i) => (
+                    {shown.map((item, i) => (
                       <TvChip key={i} color={color} pending={item.pending}>
                         <span className="tv-chip-time">{item.startTime} </span>
                         {item.name.split('—')[0].trim()}
                       </TvChip>
                     ))}
+                    {overflow > 0 && <div className="tv-more">+{overflow} more</div>}
                   </div>
                 );
               })}
@@ -297,13 +290,15 @@ function TvMonthView({ jobs, requests, timeOff }) {
     return Array.from({ length: total }, (_, i) => addDays(gridStart, i));
   }, [month]);
 
-  const byDate = useMemo(() => {
+  // One dot per scheduled assignment (not per job), so a tech double-booked
+  // on a date shows two dots -- the dot grid is a workload picture, not a
+  // job list, since a job's full name never fits a month cell legibly.
+  const scheduledByDate = useMemo(() => {
     const m = {};
-    jobs.forEach((j) => {
-      const date = nextScheduledAssignmentDate(j);
-      if (!date) return;
-      (m[date] ||= []).push(j);
-    });
+    jobs.forEach((j) => (j.assignments || []).forEach((a) => {
+      if (!a.workDate) return;
+      (m[a.workDate] ||= []).push({ technicianId: a.technicianId, technicianName: a.technicianName });
+    }));
     return m;
   }, [jobs]);
 
@@ -326,42 +321,34 @@ function TvMonthView({ jobs, requests, timeOff }) {
   }, [timeOff]);
 
   const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const rows = cells.length / 7;
 
   return (
-    <div className="tv-month">
-      {WD.map((w) => <div className="tv-daynum" key={w}>{w}</div>)}
+    <div className="tv-month" style={{ gridTemplateRows: `auto repeat(${rows}, 1fr)` }}>
+      {WD.map((w) => <div className="tv-monthwd" key={w}>{w}</div>)}
       {cells.map((d) => {
         const iso = isoOf(d);
         const out = d.getMonth() !== month;
-        const items = byDate[iso] || [];
-        const pending = pendingByDate[iso] || [];
-        const offItems = offByDate[iso] || [];
+        const scheduled = scheduledByDate[iso] || [];
+        const pendingCount = (pendingByDate[iso] || []).length;
+        const offCount = (offByDate[iso] || []).length;
         return (
           <div className={`tv-daycell ${out ? 'tv-pad' : ''} ${iso === todayIso ? 'tv-today' : ''}`} key={iso}>
-            <div className="tv-daynum">{d.getDate()}</div>
-            {offItems.map((r) => (
-              <div className="tv-dayoff" key={r.id}>{r.technicianName}</div>
-            ))}
-            {items.map((j) => {
-              const primary = [...(j.assignments || [])]
-                .filter((a) => a.workDate === iso)
-                .sort((a, b) => (a.startTime || '').localeCompare(b.startTime || ''))[0] || j.assignments?.[0];
-              const color = colorFor(primary?.technicianId, primary?.technicianName);
-              return (
-                <div className="tv-dayjob" key={j.id} style={{ background: color.bg, color: color.fg }} title={j.name}>
-                  {j.name.split('—')[0].trim()}
-                  {j.assignments?.length > 0 && <span className="tv-inits"> {j.assignments.map((a) => initials(a.technicianName)).join(' ')}</span>}
-                </div>
-              );
-            })}
-            {pending.map((r) => {
-              const color = colorFor(r.technicianId, r.technicianName);
-              return (
-                <div className="tv-dayjob tv-pending" key={r.id} style={{ borderColor: color.bg, color: color.bg }} title={`${r.jobName || 'Pending'} (pending)`}>
-                  {(r.jobName || 'Pending').split('—')[0].trim()} <span className="tv-inits">{initials(r.technicianName)}</span>
-                </div>
-              );
-            })}
+            <div className="tv-daycell-head">
+              <span className="tv-daynum">{d.getDate()}</span>
+              {scheduled.length > 0 && <span className="tv-daycount">{scheduled.length}</span>}
+            </div>
+            <div className="tv-dotgrid">
+              {scheduled.map((s, i) => (
+                <span key={i} className="tv-dot" style={{ background: colorFor(s.technicianId, s.technicianName).bg }} />
+              ))}
+            </div>
+            {(pendingCount > 0 || offCount > 0) && (
+              <div className="tv-daysummary">
+                {pendingCount > 0 && <span>{pendingCount} req</span>}
+                {offCount > 0 && <span>{offCount} off</span>}
+              </div>
+            )}
           </div>
         );
       })}

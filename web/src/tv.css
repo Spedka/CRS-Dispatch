@@ -203,46 +203,84 @@
 
 .tv-free { color: #3a4552; font-size: calc(14px * var(--tv-scale, 1)); }
 
-/* ---- Month view ---- */
+.tv-more {
+  font-size: calc(13px * var(--tv-scale, 1));
+  font-weight: 600;
+  color: #8b96a3;
+}
+
+/* ---- Month view ----
+   grid-template-rows is set inline (auto + N * 1fr) rather than via
+   grid-auto-rows so the weekday header (Sun/Mon/...) gets only the height
+   its own text needs -- previously grid-auto-rows:1fr gave that label row
+   the same height as a full day cell, wasting an entire row of vertical
+   space that day cells badly need. */
 .tv-month {
   flex: 1;
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  grid-auto-rows: 1fr;
   gap: 1px;
   background: #1a222c;
 }
+.tv-monthwd {
+  background: #0b0f14;
+  padding: 2px 10px 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #5b6673;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .tv-daycell {
   background: #0b0f14;
-  padding: 10px;
+  padding: 8px 10px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
 }
 .tv-daycell.tv-today { background: rgba(96, 165, 250, 0.08); }
 .tv-daycell.tv-pad { background: #05070a; }
-.tv-daynum { font-size: 17px; font-weight: 700; color: #8b96a3; margin-bottom: 5px; }
-.tv-dayjob {
-  border-radius: 6px;
-  padding: 4px 8px;
-  margin-bottom: 4px;
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.3;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border: 1.5px solid transparent;
+.tv-daycell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  flex-shrink: 0;
 }
-.tv-dayjob.tv-pending { border-style: dashed; background: transparent !important; }
-.tv-dayjob .tv-inits { font-weight: 500; opacity: 0.85; }
-.tv-dayoff {
-  border-radius: 6px;
-  padding: 4px 8px;
-  margin-bottom: 4px;
-  font-size: 15px;
+.tv-daynum { font-size: 17px; font-weight: 700; color: #8b96a3; }
+.tv-daycount {
+  font-size: 13px;
+  font-weight: 700;
+  color: #8b96a3;
+  background: #1a222c;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+/* Each dot is one scheduled assignment, colored by technician (same
+   palette as week/day view) -- a workload picture instead of job names
+   that can't fit legibly at this cell size. */
+.tv-dotgrid {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 5px;
+  overflow: hidden;
+}
+.tv-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.tv-daysummary {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
   font-weight: 600;
-  background: #2a2a35;
-  color: #b3b3c0;
+  color: #8b96a3;
+  flex-shrink: 0;
+  margin-top: 4px;
 }
