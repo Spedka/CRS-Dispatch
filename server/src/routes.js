@@ -75,14 +75,26 @@ export async function getAllJobs(env) {
   return records.map(shapeJob);
 }
 
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
 // Same query as GET /technicians -- extracted for the same reason as
-// getAllJobs above.
-export async function getAllTechnicians(env) {
+// getAllJobs above. includeInactive=true is used by the Manage Techs panel
+// (which needs to show/reactivate deactivated techs); every other caller
+// (assignment pickers, the /tv calendar) wants the default active-only list.
+export async function getAllTechnicians(env, includeInactive = false) {
   const sf = createSalesforce(env);
-  const soql = `SELECT Id, Name FROM ${o.technician}
-                WHERE ${o.technicianActive} = true ORDER BY Name`;
+  const soql = `SELECT Id, Name, ${o.technicianActive}, ${o.technicianFsUserId}, ${o.technicianColor}
+                FROM ${o.technician}
+                ${includeInactive ? '' : `WHERE ${o.technicianActive} = true`}
+                ORDER BY Name`;
   const recs = await sf.query(soql);
-  return recs.map((t) => ({ id: t.Id, name: t.Name }));
+  return recs.map((t) => ({
+    id: t.Id,
+    name: t.Name,
+    active: t[o.technicianActive] === true,
+    fsUserId: t[o.technicianFsUserId] ?? null,
+    color: t[o.technicianColor] ?? null,
+  }));
 }
 
 // Same query as GET /time-off -- extracted for the same reason as
@@ -139,26 +151,62 @@ api.get('/jobs', async (c) => {
 
 api.get('/technicians', async (c) => {
   try {
-    return c.json(await getAllTechnicians(c.env));
+    const includeInactive = c.req.query('all') === '1';
+    return c.json(await getAllTechnicians(c.env, includeInactive));
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
 });
 
-// Add a technician from the board UI — Name is required, FS user ID is
-// optional (a tech with no FS ID just doesn't sync to Field Squared).
+// Add a technician from the board UI — Name is required, FS user ID and
+// color are optional (a tech with no FS ID just doesn't sync to Field
+// Squared; a tech with no color falls back to /tv's hash-based color).
 api.post('/technicians', async (c) => {
   try {
     const sf = createSalesforce(c.env);
-    const { name, fsUserId } = await c.req.json();
+    const { name, fsUserId, color } = await c.req.json();
     if (!name || !name.trim()) return c.json({ error: 'name required' }, 400);
+    if (color && !HEX_COLOR_RE.test(color)) return c.json({ error: 'color must be a hex value like #2563EB' }, 400);
 
     const fields = { Name: name.trim(), [o.technicianActive]: true };
     if (fsUserId && fsUserId.trim()) fields[o.technicianFsUserId] = fsUserId.trim();
+    if (color) fields[o.technicianColor] = color;
 
     const result = await sf.createRecord(o.technician, fields);
     invalidateTechDirectory();
-    return c.json({ id: result?.id, name: name.trim() });
+    return c.json({ id: result?.id, name: name.trim(), fsUserId: fsUserId || null, color: color || null, active: true });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Manage Techs panel: edit name/FS account/color, or soft-delete (Active__c
+// = false) -- never a hard SF delete, since Job_Assignment__c and
+// Schedule_Request__c both hold lookups to Technician__c, and GET
+// /technicians already filters on Active__c = true everywhere else.
+api.patch('/technicians/:id', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const id = c.req.param('id');
+    const body = await c.req.json();
+
+    if ('color' in body && body.color && !HEX_COLOR_RE.test(body.color)) {
+      return c.json({ error: 'color must be a hex value like #2563EB' }, 400);
+    }
+
+    const fields = {};
+    if ('name' in body) {
+      if (!body.name || !body.name.trim()) return c.json({ error: 'name cannot be blank' }, 400);
+      fields.Name = body.name.trim();
+    }
+    if ('fsUserId' in body) fields[o.technicianFsUserId] = body.fsUserId ? body.fsUserId.trim() : null;
+    if ('color' in body) fields[o.technicianColor] = body.color || null;
+    if ('active' in body) fields[o.technicianActive] = !!body.active;
+    if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
+
+    await sf.updateRecord(o.technician, id, fields);
+    invalidateTechDirectory();
+    return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }

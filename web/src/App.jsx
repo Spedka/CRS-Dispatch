@@ -424,13 +424,8 @@ export default function App() {
   const [previousRequests, setPreviousRequests] = useState([]);
   const [previousRequestsLoading, setPreviousRequestsLoading] = useState(false);
   const [previousRequestsLoaded, setPreviousRequestsLoaded] = useState(false);
-  const [addTechOpen, setAddTechOpen] = useState(false);
-  const [newTechName, setNewTechName] = useState('');
-  const [newTechFsId, setNewTechFsId] = useState('');
-  const [addTechSaving, setAddTechSaving] = useState(false);
+  const [manageTechsOpen, setManageTechsOpen] = useState(false);
   const [techLinksOpen, setTechLinksOpen] = useState(false);
-  const [fsUsers, setFsUsers] = useState([]);
-  const [fsUsersLoading, setFsUsersLoading] = useState(false);
 
   useEffect(() => {
     localStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
@@ -602,41 +597,17 @@ export default function App() {
     }
   };
 
-  // FS roster loaded lazily, the moment the modal opens — the picklist replaces
-  // hand-typing an opaque FS ObjectId.
-  useEffect(() => {
-    if (!addTechOpen) return;
-    setFsUsersLoading(true);
-    api.getFsUsers()
-      .then(({ users }) => setFsUsers(users))
-      .catch((e) => flash(`Could not load Field Squared users: ${e.message}`))
-      .finally(() => setFsUsersLoading(false));
-  }, [addTechOpen]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const fsUserOptions = useMemo(() =>
-    fsUsers.map((u) => [u.externalId, u.userType ? `${u.name} — ${u.userType}` : u.name])
-  , [fsUsers]);
-
-  const closeAddTech = () => {
-    setAddTechOpen(false);
-    setNewTechName('');
-    setNewTechFsId('');
-  };
-
-  const submitAddTech = async () => {
-    if (!newTechName.trim()) return;
-    setAddTechSaving(true);
+  // Lets ManageTechsModal refresh the app-wide active-tech list (used by
+  // every assignment picker) after an add/edit/remove, without pulling in
+  // the full load() (which would also re-fetch jobs and flip on the
+  // page-wide loading skeleton just for a tech-roster change).
+  const refreshTechs = useCallback(async () => {
     try {
-      const created = await track(() => api.addTechnician(newTechName.trim(), newTechFsId));
-      setTechs((prev) => [...prev, { id: created.id, name: created.name }].sort((a, b) => a.name.localeCompare(b.name)));
-      flash(`${created.name} added`);
-      closeAddTech();
+      setTechs(await api.getTechnicians());
     } catch (e) {
-      flash(`Could not add tech: ${e.message}`);
-    } finally {
-      setAddTechSaving(false);
+      flash(`Could not refresh technicians: ${e.message}`);
     }
-  };
+  }, []);
 
   // Terminal statuses aren't pulled with the board (could be huge history), so
   // fetch them on demand the moment such a filter is picked.
@@ -973,7 +944,7 @@ export default function App() {
           <div><h1>CRS Dispatch</h1><span>Field Work Board</span></div>
         </div>
         <div className="bar-spacer" />
-        <button className="refresh" onClick={() => setAddTechOpen(true)} title="Add a technician">+ Add Tech</button>
+        <button className="refresh" onClick={() => setManageTechsOpen(true)} title="Add, edit, or remove technicians">Manage Techs</button>
         <button className="refresh" onClick={() => setTechLinksOpen(true)} title="Get a chalkboard sign-in link for a technician">Tech Links</button>
         <button
           className="refresh"
@@ -1313,47 +1284,8 @@ export default function App() {
         </div>
       )}
 
-      {addTechOpen && (
-        <div className="modal-backdrop" onClick={() => !addTechSaving && closeAddTech()}>
-          <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
-            <div className="modal-header">
-              <div className="modal-title-row"><span className="jname">Add technician</span></div>
-              <button className="modal-close" onClick={closeAddTech} aria-label="Close" disabled={addTechSaving}>×</button>
-            </div>
-            <div className="modal-body">
-              <label className="req-field req-field-wide">
-                <span className="req-field-label">Name</span>
-                <input
-                  className="req-note-input"
-                  type="text"
-                  value={newTechName}
-                  onChange={(e) => setNewTechName(e.target.value)}
-                  placeholder="Full name, matching Salesforce"
-                  autoFocus
-                />
-              </label>
-              <label className="req-field req-field-wide">
-                <span className="req-field-label">FS account (optional)</span>
-                {fsUsersLoading
-                  ? <span className="fs-users-loading">Loading Field Squared roster…</span>
-                  : (
-                    <SearchableSelect
-                      value={newTechFsId}
-                      onChange={setNewTechFsId}
-                      options={fsUserOptions}
-                      placeholder="Search Field Squared users…"
-                    />
-                  )}
-              </label>
-            </div>
-            <div className="modal-footer">
-              <button className="modal-save-btn" onClick={submitAddTech} disabled={addTechSaving || !newTechName.trim()}>
-                {addTechSaving ? 'Adding…' : 'Add technician'}
-              </button>
-              <button className="modal-cancel-btn" onClick={closeAddTech} disabled={addTechSaving}>Cancel</button>
-            </div>
-          </div>
-        </div>
+      {manageTechsOpen && (
+        <ManageTechsModal onClose={() => setManageTechsOpen(false)} onChanged={refreshTechs} />
       )}
 
       {techLinksOpen && (
@@ -1401,6 +1333,204 @@ function TechLinksModal({ techs, onClose }) {
                 </button>
               </div>
             ))}
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="modal-cancel-btn" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Add/edit/remove technicians, including a hand-picked hex color per tech
+// (shown on the /tv warehouse calendar — a tech with no color set there
+// falls back to a deterministic auto-generated one). "Remove" is a soft
+// delete (Active__c = false via PATCH /technicians/:id) rather than an SF
+// record delete, since Job_Assignment__c/Schedule_Request__c both hold
+// lookups to Technician__c — removed techs stay listed here (with a
+// "Removed" badge) so they can be reactivated.
+function ManageTechsModal({ onClose, onChanged }) {
+  const [techs, setTechs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [fsUsers, setFsUsers] = useState([]);
+  const [fsUsersLoading, setFsUsersLoading] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [draft, setDraft] = useState({ name: '', fsUserId: '', color: '' });
+  const [newName, setNewName] = useState('');
+  const [newFsId, setNewFsId] = useState('');
+  const [newColor, setNewColor] = useState('#2563eb');
+  const [adding, setAdding] = useState(false);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const t = await api.getTechnicians({ all: true });
+      setTechs([...t].sort((a, b) => a.name.localeCompare(b.name)));
+    } catch (e) {
+      alert(`Could not load technicians: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  useEffect(() => {
+    setFsUsersLoading(true);
+    api.getFsUsers()
+      .then(({ users }) => setFsUsers(users))
+      .catch(() => {})
+      .finally(() => setFsUsersLoading(false));
+  }, []);
+
+  const fsUserOptions = useMemo(() =>
+    fsUsers.map((u) => [u.externalId, u.userType ? `${u.name} — ${u.userType}` : u.name])
+  , [fsUsers]);
+
+  const startEdit = (t) => {
+    setEditingId(t.id);
+    setDraft({ name: t.name, fsUserId: t.fsUserId || '', color: t.color || '' });
+  };
+
+  const saveEdit = async (id) => {
+    if (!draft.name.trim()) return;
+    setBusyId(id);
+    try {
+      await api.updateTechnician(id, { name: draft.name.trim(), fsUserId: draft.fsUserId || null, color: draft.color || null });
+      setEditingId(null);
+      await reload();
+      onChanged?.();
+    } catch (e) {
+      alert(`Could not save: ${e.message}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const toggleActive = async (t) => {
+    setBusyId(t.id);
+    try {
+      await api.updateTechnician(t.id, { active: !t.active });
+      await reload();
+      onChanged?.();
+    } catch (e) {
+      alert(`Could not update: ${e.message}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const submitAdd = async () => {
+    if (!newName.trim()) return;
+    setAdding(true);
+    try {
+      await api.addTechnician(newName.trim(), newFsId || null, newColor || null);
+      setNewName('');
+      setNewFsId('');
+      setNewColor('#2563eb');
+      await reload();
+      onChanged?.();
+    } catch (e) {
+      alert(`Could not add tech: ${e.message}`);
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal modal-manage-techs" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Manage technicians</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          {loading ? (
+            <span className="fs-users-loading">Loading technicians…</span>
+          ) : (
+            <div className="manage-techs-list">
+              {techs.map((t) => (
+                <div className={`manage-tech-row ${t.active ? '' : 'mt-inactive'}`} key={t.id}>
+                  {editingId === t.id ? (
+                    <>
+                      <input
+                        className="mt-color-input"
+                        type="color"
+                        value={draft.color || '#64748b'}
+                        onChange={(e) => setDraft((d) => ({ ...d, color: e.target.value }))}
+                        title="Pick a color"
+                      />
+                      <input
+                        className="req-note-input mt-name-input"
+                        type="text"
+                        value={draft.name}
+                        onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                        autoFocus
+                      />
+                      {fsUsersLoading ? (
+                        <span className="fs-users-loading">Loading FS roster…</span>
+                      ) : (
+                        <SearchableSelect
+                          value={draft.fsUserId}
+                          onChange={(v) => setDraft((d) => ({ ...d, fsUserId: v }))}
+                          options={fsUserOptions}
+                          placeholder="FS account…"
+                        />
+                      )}
+                      <button className="req-btn approve" onClick={() => saveEdit(t.id)} disabled={busyId === t.id || !draft.name.trim()}>
+                        {busyId === t.id ? 'Saving…' : 'Save'}
+                      </button>
+                      <button className="req-btn" onClick={() => setEditingId(null)} disabled={busyId === t.id}>Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="mt-swatch" style={{ background: t.color || '#3a4552' }} />
+                      <span className="mt-name">{t.name}</span>
+                      {!t.active && <span className="mt-inactive-badge">Removed</span>}
+                      <button className="req-btn" onClick={() => startEdit(t)} disabled={busyId === t.id}>Edit</button>
+                      <button className="req-btn deny" onClick={() => toggleActive(t)} disabled={busyId === t.id}>
+                        {busyId === t.id ? '…' : t.active ? 'Remove' : 'Reactivate'}
+                      </button>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="manage-tech-add">
+            <span className="req-field-label">Add technician</span>
+            <div className="manage-tech-row">
+              <input
+                className="mt-color-input"
+                type="color"
+                value={newColor}
+                onChange={(e) => setNewColor(e.target.value)}
+                title="Pick a color"
+              />
+              <input
+                className="req-note-input mt-name-input"
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="Full name, matching Salesforce"
+              />
+              {fsUsersLoading ? (
+                <span className="fs-users-loading">Loading FS roster…</span>
+              ) : (
+                <SearchableSelect
+                  value={newFsId}
+                  onChange={setNewFsId}
+                  options={fsUserOptions}
+                  placeholder="FS account (optional)…"
+                />
+              )}
+              <button className="req-btn approve" onClick={submitAdd} disabled={adding || !newName.trim()}>
+                {adding ? 'Adding…' : 'Add'}
+              </button>
+            </div>
           </div>
         </div>
         <div className="modal-footer">

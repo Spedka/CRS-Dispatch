@@ -9,13 +9,21 @@ export const api = {
   getJobs: (status) =>
     fetch('/api/jobs' + (status ? `?status=${encodeURIComponent(status)}` : '')).then(j),
 
-  getTechnicians: () => fetch('/api/technicians').then(j),
+  getTechnicians: (opts) =>
+    fetch(`/api/technicians${opts?.all ? '?all=1' : ''}`).then(j),
 
-  addTechnician: (name, fsUserId) =>
+  addTechnician: (name, fsUserId, color) =>
     fetch('/api/technicians', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, fsUserId }),
+      body: JSON.stringify({ name, fsUserId, color }),
+    }).then(j),
+
+  updateTechnician: (id, fields) =>
+    fetch(`/api/technicians/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
     }).then(j),
 
   getTechLink: (technicianId) =>

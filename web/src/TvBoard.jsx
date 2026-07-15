@@ -14,6 +14,7 @@ const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); retur
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 const startOfWeek = (d) => { const x = startOfDay(d); x.setDate(x.getDate() - x.getDay()); return x; };
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const initials = (name) => name ? name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase() : '?';
 // ---- deterministic per-tech color ----
 const TV_PALETTE = [
   { bg: '#DC2626', fg: '#fff' }, { bg: '#2563EB', fg: '#fff' }, { bg: '#059669', fg: '#fff' },
@@ -28,7 +29,27 @@ function hashTech(key) {
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
   return h;
 }
-const colorFor = (techId, techName) => TV_PALETTE[hashTech(techId ?? techName) % TV_PALETTE.length];
+
+const HEX_RE = /^#[0-9a-f]{6}$/i;
+// Luminance-based contrast pick -- hand-picked colors (set in Manage Techs,
+// server/src/config.js's technicianColor -> Technician__c.Color__c) don't
+// come with a pre-verified paired text color the way the fixed palette
+// above does, so this decides light/dark text on the fly.
+function hexToColor(hex) {
+  const h = hex.slice(1);
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return { bg: hex, fg: luminance > 0.6 ? '#111827' : '#fff' };
+}
+
+// colorMap is techId -> hex (or falsy), built once from data.technicians --
+// a tech with a hand-picked color uses it; everyone else keeps the old
+// deterministic hash so they're still visually distinct from each other.
+function colorFor(techId, techName, colorMap) {
+  const custom = colorMap && colorMap[techId];
+  if (custom && HEX_RE.test(custom)) return hexToColor(custom);
+  return TV_PALETTE[hashTech(techId ?? techName) % TV_PALETTE.length];
+}
 
 // Grid rows are sized 1fr each so every technician row is always visible
 // (never clipped off the bottom the way a fixed-height table row could be)
@@ -47,6 +68,38 @@ const VIEWS = ['day', 'week', 'month'];
 const ROTATE_MS = 45 * 1000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
+const DEPLOY_CHECK_MS = 10 * 60 * 1000;
+
+// Kiosk tabs never get manually refreshed, so a deploy wouldn't otherwise
+// show up until the 6h hygiene reload (or someone remembers to refresh by
+// hand). Every build gets a new hashed JS bundle, so index.html's own
+// contents change on every deploy -- polling it and reloading the moment it
+// differs from what was loaded at page-open picks up a fresh deploy within
+// a minute, automatically. cache: 'no-store' plus a cache-busting query
+// param both target the same goal (bypass any caching layer, browser or
+// edge) since it's cheap insurance either way.
+function useDeployWatcher() {
+  useEffect(() => {
+    let baseline = null;
+    let stopped = false;
+
+    const check = async () => {
+      try {
+        const res = await fetch(`${window.location.pathname}?_=${Date.now()}`, { cache: 'no-store' });
+        const html = await res.text();
+        if (stopped) return;
+        if (baseline === null) { baseline = html; return; }
+        if (html !== baseline) window.location.reload();
+      } catch {
+        // network hiccup -- just try again next interval
+      }
+    };
+
+    check();
+    const id = setInterval(check, DEPLOY_CHECK_MS);
+    return () => { stopped = true; clearInterval(id); };
+  }, []);
+}
 
 function useTvData() {
   const [data, setData] = useState(null);
@@ -124,7 +177,7 @@ function TvChip({ color, pending, children }) {
   return <div className="tv-chip" style={style}>{children}{pending && <span className="tv-pending-badge">PENDING</span>}</div>;
 }
 
-function TvWeekView({ jobs, technicians, requests, timeOff }) {
+function TvWeekView({ jobs, technicians, requests, timeOff, colorMap }) {
   const days = useMemo(() => {
     const s = startOfWeek(new Date());
     return Array.from({ length: 7 }, (_, i) => addDays(s, i));
@@ -182,7 +235,7 @@ function TvWeekView({ jobs, technicians, requests, timeOff }) {
           );
         })}
         {technicians.map((t) => {
-          const color = colorFor(t.id, t.name);
+          const color = colorFor(t.id, t.name, colorMap);
           return (
             <React.Fragment key={t.id}>
               <div className="tv-techname" style={{ color: color.bg }}>{t.name}</div>
@@ -214,7 +267,7 @@ function TvWeekView({ jobs, technicians, requests, timeOff }) {
   );
 }
 
-function TvDayView({ jobs, technicians, requests, timeOff }) {
+function TvDayView({ jobs, technicians, requests, timeOff, colorMap }) {
   const todayIso = isoOf(startOfDay(new Date()));
 
   const byTech = useMemo(() => {
@@ -252,21 +305,24 @@ function TvDayView({ jobs, technicians, requests, timeOff }) {
         style={{ '--tv-scale': scale, gridTemplateRows: `repeat(${technicians.length}, 1fr)` }}
       >
         {technicians.map((t) => {
-          const color = colorFor(t.id, t.name);
+          const color = colorFor(t.id, t.name, colorMap);
           const items = byTech[t.id] || [];
           const off = offByTech[t.id];
+          const shown = items.slice(0, 2);
+          const overflow = items.length - shown.length;
           return (
             <div className="tv-dayrow" key={t.id}>
-              <div className="tv-techname" style={{ color: color.bg }}>{t.name}</div>
+              <div className={`tv-techname ${off ? 'tv-techname-off' : ''}`} style={off ? undefined : { color: color.bg }}>{t.name}</div>
               <div className="tv-dayrow-items">
                 {off && <div className="tv-offchip">Off all day</div>}
                 {items.length === 0 && !off && <span className="tv-free">Open</span>}
-                {items.map((item, i) => (
+                {shown.map((item, i) => (
                   <TvChip key={i} color={color} pending={item.pending}>
                     <span className="tv-chip-time">{item.startTime} </span>
                     {item.name.split('—')[0].trim()}
                   </TvChip>
                 ))}
+                {overflow > 0 && <div className="tv-more">+{overflow} more</div>}
               </div>
             </div>
           );
@@ -276,7 +332,7 @@ function TvDayView({ jobs, technicians, requests, timeOff }) {
   );
 }
 
-function TvMonthView({ jobs, requests, timeOff }) {
+function TvMonthView({ jobs, requests, timeOff, colorMap }) {
   const now = new Date();
   const month = now.getMonth();
   const todayIso = isoOf(startOfDay(now));
@@ -290,14 +346,15 @@ function TvMonthView({ jobs, requests, timeOff }) {
     return Array.from({ length: total }, (_, i) => addDays(gridStart, i));
   }, [month]);
 
-  // One dot per scheduled assignment (not per job), so a tech double-booked
-  // on a date shows two dots -- the dot grid is a workload picture, not a
-  // job list, since a job's full name never fits a month cell legibly.
+  // Keeps every assignment (jobId + tech) per date -- jobCount below dedupes
+  // by jobId for the summary line, while the bubble row dedupes by
+  // technicianId (one bubble per tech working that day, not one per job --
+  // a tech double-booked that day still only gets a single bubble).
   const scheduledByDate = useMemo(() => {
     const m = {};
     jobs.forEach((j) => (j.assignments || []).forEach((a) => {
       if (!a.workDate) return;
-      (m[a.workDate] ||= []).push({ technicianId: a.technicianId, technicianName: a.technicianName });
+      (m[a.workDate] ||= []).push({ jobId: j.id, technicianId: a.technicianId, technicianName: a.technicianName });
     }));
     return m;
   }, [jobs]);
@@ -329,26 +386,38 @@ function TvMonthView({ jobs, requests, timeOff }) {
       {cells.map((d) => {
         const iso = isoOf(d);
         const out = d.getMonth() !== month;
-        const scheduled = scheduledByDate[iso] || [];
+        const entries = scheduledByDate[iso] || [];
+        const jobCount = new Set(entries.map((e) => e.jobId)).size;
         const pendingCount = (pendingByDate[iso] || []).length;
         const offCount = (offByDate[iso] || []).length;
+
+        // One bubble per tech working that day, not one per assignment.
+        const techMap = new Map();
+        entries.forEach((e) => {
+          if (e.technicianId && !techMap.has(e.technicianId)) techMap.set(e.technicianId, e.technicianName);
+        });
+
+        const summary = [];
+        if (jobCount > 0) summary.push(`${jobCount} job${jobCount === 1 ? '' : 's'}`);
+        if (offCount > 0) summary.push(`${offCount} time off`);
+        if (pendingCount > 0) summary.push(`${pendingCount} request${pendingCount === 1 ? '' : 's'}`);
+
         return (
           <div className={`tv-daycell ${out ? 'tv-pad' : ''} ${iso === todayIso ? 'tv-today' : ''}`} key={iso}>
             <div className="tv-daycell-head">
               <span className="tv-daynum">{d.getDate()}</span>
-              {scheduled.length > 0 && <span className="tv-daycount">{scheduled.length}</span>}
+              {summary.length > 0 && <span className="tv-daysummary" title={summary.join(' · ')}>{summary.join(' · ')}</span>}
             </div>
             <div className="tv-dotgrid">
-              {scheduled.map((s, i) => (
-                <span key={i} className="tv-dot" style={{ background: colorFor(s.technicianId, s.technicianName).bg }} />
-              ))}
+              {[...techMap.entries()].map(([techId, techName]) => {
+                const c = colorFor(techId, techName, colorMap);
+                return (
+                  <span key={techId} className="tv-bubble" style={{ background: c.bg, color: c.fg }} title={techName}>
+                    {initials(techName)}
+                  </span>
+                );
+              })}
             </div>
-            {(pendingCount > 0 || offCount > 0) && (
-              <div className="tv-daysummary">
-                {pendingCount > 0 && <span>{pendingCount} req</span>}
-                {offCount > 0 && <span>{offCount} off</span>}
-              </div>
-            )}
           </div>
         );
       })}
@@ -365,7 +434,14 @@ class TvErrorBoundary extends React.Component {
     return { hasError: true };
   }
   componentDidCatch(err) {
-    console.error('[TvBoard] render error, showing fallback', err);
+    console.error('[TvBoard] render error, reloading shortly', err);
+    // The fallback below says "will retry shortly" -- this is what actually
+    // makes that true. Catching the error unmounts everything under this
+    // boundary, including TvBoardInner's own 6h periodic-reload timer (its
+    // cleanup fires on unmount, cancelling it), so without this the page
+    // would otherwise sit on the fallback text forever with nobody around
+    // to notice and refresh it.
+    setTimeout(() => window.location.reload(), 15000);
   }
   render() {
     if (this.state.hasError) {
@@ -439,6 +515,16 @@ function TvBoardInner() {
     return () => clearTimeout(id);
   }, []);
 
+  // Computed unconditionally (with a data?.technicians ?? [] guard) rather
+  // than after the !data early return below -- calling useMemo only on some
+  // renders would violate the rules of hooks (React expects the same hooks
+  // in the same order every render) and throw, which is exactly what was
+  // tripping the error boundary here.
+  const colorMap = useMemo(
+    () => Object.fromEntries((data?.technicians ?? []).map((t) => [t.id, t.color])),
+    [data]
+  );
+
   if (!data) {
     return (
       <div className="tv-page">
@@ -457,14 +543,18 @@ function TvBoardInner() {
         <h1>{titleFor(view)}</h1>
         <div className="tv-meta">{data.technicians.length} techs · as of {syncedLabel}</div>
       </div>
-      {view === 'day' && <TvDayView jobs={data.jobs} technicians={data.technicians} requests={data.requests} timeOff={data.timeOff} />}
-      {view === 'week' && <TvWeekView jobs={data.jobs} technicians={data.technicians} requests={data.requests} timeOff={data.timeOff} />}
-      {view === 'month' && <TvMonthView jobs={data.jobs} requests={data.requests} timeOff={data.timeOff} />}
+      {view === 'day' && <TvDayView jobs={data.jobs} technicians={data.technicians} requests={data.requests} timeOff={data.timeOff} colorMap={colorMap} />}
+      {view === 'week' && <TvWeekView jobs={data.jobs} technicians={data.technicians} requests={data.requests} timeOff={data.timeOff} colorMap={colorMap} />}
+      {view === 'month' && <TvMonthView jobs={data.jobs} requests={data.requests} timeOff={data.timeOff} colorMap={colorMap} />}
     </div>
   );
 }
 
 export default function TvBoard() {
+  // Outside the error boundary on purpose -- a render crash unmounts
+  // everything inside TvErrorBoundary (see its own comment), and a stuck
+  // kiosk tab is exactly the case a deploy needs to reach regardless.
+  useDeployWatcher();
   return (
     <TvErrorBoundary>
       <FullscreenPrompt />

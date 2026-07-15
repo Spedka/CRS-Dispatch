@@ -70,6 +70,11 @@ export const config = {
     // now read live from Salesforce via getTechDirectory() in assignments.js
     // so "Add Tech" in the board UI works without a code deploy.
     technicianFsUserId: 'FS_User_Id__c',
+    // Hand-picked hex color (e.g. "#2563EB") shown on the /tv warehouse
+    // calendar. Text(7) on Technician__c — create in SF Setup before
+    // deploying. Optional: a tech with no color set falls back to the /tv
+    // page's own deterministic hash-based color (see TvBoard.jsx).
+    technicianColor: 'Color__c',
   },
 
   // ---- Schedule_Request__c (chalkboard tech <-> office negotiation) ----
