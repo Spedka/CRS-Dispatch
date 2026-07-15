@@ -15,7 +15,9 @@ export default {
   fetch: app.fetch.bind(app),
 
   // Cron trigger — fires every 5 minutes (configure in wrangler.toml).
-  // Runs the FS ↔ SF status reconcile.
+  // Links unlinked FS tasks, syncs assignments, and refreshes the FS status
+  // snapshot the board's drift badge reads. No longer writes a status to
+  // either side — see statusMap.js header.
   async scheduled(event, env, ctx) {
     ctx.waitUntil(runFsSync(env));
   },

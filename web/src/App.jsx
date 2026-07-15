@@ -786,13 +786,12 @@ export default function App() {
     closeFsLink();
     try {
       const result = await api.linkFsTask(jobId, fsTaskId);
-      // Reload to pick up the reconciled status and any synced assignments
+      // Reload to pick up the FS status snapshot and any synced assignments
       await load(true);
       const parts = [`Linked to "${fsTaskName}"`];
       if (result.assignmentsAdded > 0) {
         parts.push(`${result.assignmentsAdded} tech${result.assignmentsAdded > 1 ? 's' : ''} added`);
       }
-      if (result.sfStatus) parts.push(`status → ${result.sfStatus}`);
       flash(parts.join(' · '));
     } catch (e) {
       flash(`Link failed: ${e.message}`);
@@ -948,7 +947,13 @@ export default function App() {
         <button className="refresh" onClick={() => setTechLinksOpen(true)} title="Get a chalkboard sign-in link for a technician">Tech Links</button>
         <button
           className="refresh"
-          onClick={() => { load(); if (tab === 'requests') loadRequests(); }}
+          onClick={() => {
+            load();
+            if (tab === 'requests') {
+              loadRequests();
+              if (previousRequestsLoaded) loadPreviousRequests();
+            }
+          }}
           title="Reload from Salesforce"
         >↻ Refresh</button>
         <div className="synced">

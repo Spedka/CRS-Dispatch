@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { config } from './config.js';
 import { createSalesforce } from './salesforce.js';
 import { createFs } from './fieldSquared.js';
-import { FS_TO_SF, SF_TO_FS, reconcile, sfToFsStatus } from './statusMap.js';
+import { sfToFsStatus } from './statusMap.js';
 import { runFsSync } from './fsSync.js';
 import { createAssignment, esc, normTime, toSfTime, buildFsSchedules, getTechDirectory, invalidateTechDirectory } from './assignments.js';
 import { scheduleRequests } from './scheduleRequests.js';
@@ -800,8 +800,9 @@ api.get('/contacts', async (c) => {
   }
 });
 
-// Manually stamp an FS task ID onto a SF opportunity, then immediately reconcile
-// status and user assignments from the FS task so the board reflects reality.
+// Manually stamp an FS task ID onto a SF opportunity, then sync user
+// assignments and a status snapshot from the FS task so the board reflects
+// reality (status is display-only — see comment below, no write to either side).
 api.post('/jobs/:id/fs-link', async (c) => {
   try {
     const sf = createSalesforce(c.env);
@@ -813,7 +814,7 @@ api.post('/jobs/:id/fs-link', async (c) => {
     // Stamp the link first — if anything below fails, the link is still saved.
     await sf.updateRecord('Opportunity', id, { [f.oppFsTaskId]: fsTaskId });
 
-    const result = { sfStatus: null, assignmentsAdded: 0 };
+    const result = { assignmentsAdded: 0 };
 
     try {
       // Fetch opp, full FS task, existing SF assignments, and the FS↔SF tech
@@ -821,8 +822,7 @@ api.post('/jobs/:id/fs-link', async (c) => {
       // decide the FS status to write.
       const [oppRows, fullTask, existingAssignments, techDir] = await Promise.all([
         sf.query(
-          `SELECT ${f.oppStatus}, ${f.oppScheduledDate}, LastModifiedDate
-           FROM Opportunity WHERE Id = '${esc(id)}' LIMIT 1`
+          `SELECT ${f.oppScheduledDate} FROM Opportunity WHERE Id = '${esc(id)}' LIMIT 1`
         ),
         fs.getTask(fsTaskId),
         sf.query(`SELECT ${o.assignmentTechRelationship}.Name, ${o.assignmentStartTime} FROM ${o.assignment} WHERE ${o.assignmentOppLookup} = '${esc(id)}'`),
@@ -832,8 +832,8 @@ api.post('/jobs/:id/fs-link', async (c) => {
       if (!sfOpp) throw new Error('Opp not found');
 
       // Stamp the raw FS status snapshot now that we have the full task —
-      // same fields fsSync.js's cron writes, kept isolated from the reconcile
-      // write below so the badge reflects FS's actual state either way.
+      // same fields fsSync.js's cron writes. Display-only; nothing reads this
+      // to drive a status write anymore.
       await sf.updateRecord('Opportunity', id, {
         [f.oppFsStatus]: fullTask.Status ?? null,
         [f.oppFsLastModified]: fullTask.LastUpdated ?? null,
@@ -849,20 +849,14 @@ api.post('/jobs/:id/fs-link', async (c) => {
       // "has assignments" = existing SF assignments + any we're about to add from FS
       const willHaveAssignments = existingAssignments.length > 0 || syncableUserIds.length > 0;
 
-      // Reconcile status — "Scheduled" on SF side writes "Assigned" to FS if
-      // the job has (or will have) techs assigned.
-      const rec = reconcile(fullTask.Status, sfOpp[f.oppStatus], fullTask.LastUpdated, sfOpp.LastModifiedDate);
+      // Status is display-only now — linking no longer writes Project_Status__c
+      // or pushes a recency-based status to FS. The snapshot stamped above is
+      // what the board's drift badge compares against; a person decides what,
+      // if anything, to do about a mismatch.
       let targetFsStatus = null;
-      if (rec.action === 'write') {
-        if (rec.target === 'sf') {
-          await sf.updateRecord('Opportunity', id, { [f.oppStatus]: rec.value });
-          result.sfStatus = rec.value;
-        } else {
-          targetFsStatus = sfToFsStatus(sfOpp[f.oppStatus], willHaveAssignments);
-        }
-      }
 
-      // Scheduled + users → bump FS to "Assigned" regardless of reconcile outcome.
+      // Scheduled + users → bump FS to "Assigned" so a newly-linked job that
+      // already has techs on it doesn't sit as bare "Scheduled" in FS.
       if (fullTask.Status === 'Scheduled' && willHaveAssignments) {
         targetFsStatus = 'Assigned';
       }

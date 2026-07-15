@@ -1,7 +1,6 @@
 import { createFs } from './fieldSquared.js';
 import { createSalesforce } from './salesforce.js';
 import { config } from './config.js';
-import { reconcile, sfToFsStatus } from './statusMap.js';
 import { getTechDirectory } from './assignments.js';
 import { notifyTech } from './notifyBoard.js';
 
@@ -64,7 +63,7 @@ export async function runFsSync(env) {
   let linkedOpps;
   try {
     linkedOpps = await sf.query(
-      `SELECT Id, ${f.oppFsTaskId}, ${f.oppStatus}, ${f.oppFsStatus}, LastModifiedDate
+      `SELECT Id, ${f.oppFsTaskId}, ${f.oppFsStatus}
        FROM Opportunity WHERE ${f.oppFsTaskId} != null LIMIT 2000`
     );
   } catch (e) {
@@ -153,7 +152,7 @@ export async function runFsSync(env) {
     await KV.put(NO_MATCH_KEY, JSON.stringify(updated), { expirationTtl: 86400 });
   }
 
-  // ---- Assignment reconciliation (recently-modified linked tasks) ----
+  // ---- Status snapshot + assignment sync (recently-modified linked tasks) ----
   // Only tasks modified in the last RECONCILE_WINDOW_MS are processed here.
   // The cron runs every 5 min, so this typically covers 0–5 tasks per run.
   const recentCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
@@ -176,7 +175,7 @@ export async function runFsSync(env) {
 
   if (toReconcile.length === 0) return;
 
-  console.log(`[fs-sync] reconciling status + assignments for ${toReconcile.length} tasks (${backfillIds.length} snapshot backfill)`);
+  console.log(`[fs-sync] refreshing status snapshot + assignments for ${toReconcile.length} tasks (${backfillIds.length} snapshot backfill)`);
 
   const techDir = await getTechDirectory(sf);
 
@@ -184,8 +183,7 @@ export async function runFsSync(env) {
     try {
       const sfOpp = linkedMap.get(task.ExternalId);
 
-      // Fetch FS task + SF assignments in parallel — we need assignment count
-      // before deciding the FS status to write (Scheduled vs Assigned).
+      // Fetch FS task + SF assignments in parallel.
       const [fullTask, sfAssignments] = await Promise.all([
         fs.getTask(task.ExternalId),
         sf.query(
@@ -195,30 +193,17 @@ export async function runFsSync(env) {
         ),
       ]);
 
-      // ---- Status reconciliation ----
-      const rec = reconcile(fullTask.Status, sfOpp[f.oppStatus], fullTask.LastUpdated, sfOpp.LastModifiedDate);
-
-      // Raw FS status snapshot — written unconditionally on every reconcile pass,
-      // independent of reconcile()'s write decision. The board's drift badge
-      // reads this directly, so it must reflect FS's actual state even on a
-      // 'noop'/'skip' reconcile outcome (e.g. FS drifted somewhere reconcile
-      // intentionally won't touch).
-      const fsSnapshot = { [f.oppFsStatus]: fullTask.Status ?? null, [f.oppFsLastModified]: fullTask.LastUpdated ?? null };
-
-      if (rec.action === 'write' && rec.target === 'sf') {
-        await sf.updateRecord('Opportunity', sfOpp.Id, { [f.oppStatus]: rec.value, ...fsSnapshot });
-        console.log(`[fs-sync] status SF←FS: "${fullTask.Status}" → "${rec.value}" on ${sfOpp.Id}`);
-      } else {
-        await sf.updateRecord('Opportunity', sfOpp.Id, fsSnapshot);
-        if (rec.action === 'write' && rec.target === 'fs') {
-          // "Scheduled" on SF side → "Assigned" in FS when the job has techs.
-          const fsTarget = sfToFsStatus(sfOpp[f.oppStatus], sfAssignments.length > 0);
-          if (fsTarget) {
-            await fs.updateStatus(task.ExternalId, fullTask.Name, fullTask.TaskType, fsTarget);
-            console.log(`[fs-sync] status FS←SF: "${sfOpp[f.oppStatus]}" → "${fsTarget}" on ${task.ExternalId}`);
-          }
-        }
-      }
+      // ---- Status snapshot only — deliberately NOT reconciled/written either
+      // direction anymore. This used to compare timestamps and auto-push a
+      // status to whichever side looked stale, but that could silently
+      // overwrite a status a human had just set. Now it's display-only: the
+      // board's drift badge compares job.status vs job.fsStatus client-side
+      // (see FS_STATUS_COMPATIBLE in App.jsx) and a person decides what, if
+      // anything, to do about a mismatch.
+      await sf.updateRecord('Opportunity', sfOpp.Id, {
+        [f.oppFsStatus]: fullTask.Status ?? null,
+        [f.oppFsLastModified]: fullTask.LastUpdated ?? null,
+      });
 
       // FS users filtered to syncable techs only.
       // getTask() may return Users as objects {ObjectId, Name, ...} or plain strings —
@@ -265,7 +250,7 @@ export async function runFsSync(env) {
         }
       }
     } catch (e) {
-      console.error(`[fs-sync] error reconciling assignments for ${task.ExternalId}:`, e.message);
+      console.error(`[fs-sync] error syncing status/assignments for ${task.ExternalId}:`, e.message);
     }
   }
 }
