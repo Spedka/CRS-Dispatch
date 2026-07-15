@@ -1227,7 +1227,14 @@ export default function App() {
                       {!a.workDate && !a.completed && <span className="untag">unscheduled</span>}
                       <button
                         className="x"
-                        onClick={() => setDraftJob((d) => ({ ...d, assignments: d.assignments.filter((x) => x.assignmentId !== a.assignmentId) }))}
+                        onClick={() => setDraftJob((d) => ({
+                          ...d,
+                          // Same reasoning as the completed toggle -- removing
+                          // a tech can just as easily invalidate the current
+                          // status, so force a fresh pick here too.
+                          status: '',
+                          assignments: d.assignments.filter((x) => x.assignmentId !== a.assignmentId),
+                        }))}
                         aria-label="Remove"
                       >×</button>
                     </div>
