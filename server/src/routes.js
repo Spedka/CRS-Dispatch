@@ -174,6 +174,7 @@ api.post('/technicians', async (c) => {
 
     const result = await sf.createRecord(o.technician, fields);
     invalidateTechDirectory();
+    await notifyTv(c.env, 'tech-added');
     return c.json({ id: result?.id, name: name.trim(), fsUserId: fsUserId || null, color: color || null, active: true });
   } catch (e) {
     return c.json({ error: e.message }, 500);
@@ -206,6 +207,7 @@ api.patch('/technicians/:id', async (c) => {
 
     await sf.updateRecord(o.technician, id, fields);
     invalidateTechDirectory();
+    await notifyTv(c.env, 'tech-updated');
     return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: e.message }, 500);
