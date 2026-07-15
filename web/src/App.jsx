@@ -417,6 +417,13 @@ export default function App() {
   const [contactsLoaded, setContactsLoaded] = useState(false);
   const [scheduleRequests, setScheduleRequests] = useState([]);
   const [requestsLoading, setRequestsLoading] = useState(false);
+  // Resolved (Approved/Denied/Withdrawn) history -- deliberately not part of
+  // the default Requests view, and fetched only once the "Previous
+  // requests" section is actually opened (same lazy-on-first-open pattern
+  // as contactsLoaded), so nobody pays for this query until they ask for it.
+  const [previousRequests, setPreviousRequests] = useState([]);
+  const [previousRequestsLoading, setPreviousRequestsLoading] = useState(false);
+  const [previousRequestsLoaded, setPreviousRequestsLoaded] = useState(false);
   const [addTechOpen, setAddTechOpen] = useState(false);
   const [newTechName, setNewTechName] = useState('');
   const [newTechFsId, setNewTechFsId] = useState('');
@@ -526,6 +533,23 @@ export default function App() {
       flash(`Requests error: ${e.message}`);
     } finally {
       setRequestsLoading(false);
+    }
+  }, []);
+
+  // Fetched once on first expand, not re-fetched on every visit like
+  // loadRequests -- history that's already resolved has no turn-taking
+  // pressure keeping it fresh, so there's no reason to re-query it every
+  // time the section is opened.
+  const loadPreviousRequests = useCallback(async () => {
+    setPreviousRequestsLoading(true);
+    try {
+      const r = await api.getScheduleRequests({ resolved: true });
+      setPreviousRequests(r);
+      setPreviousRequestsLoaded(true);
+    } catch (e) {
+      flash(`Previous requests error: ${e.message}`);
+    } finally {
+      setPreviousRequestsLoading(false);
     }
   }, []);
 
@@ -1141,6 +1165,10 @@ export default function App() {
             onApprove={approveRequest}
             onCounter={counterRequest}
             onDeny={denyRequest}
+            previousRequests={previousRequests}
+            previousLoading={previousRequestsLoading}
+            previousLoaded={previousRequestsLoaded}
+            onLoadPrevious={loadPreviousRequests}
           />
         )}
         {tab === 'contacts' && (
@@ -1984,9 +2012,49 @@ function RequestRow({ req, jobs, onApprove, onCounter, onDeny }) {
   );
 }
 
-function RequestsTab({ requests, jobs, loading, onApprove, onCounter, onDeny }) {
+function requestJobLabel(req) {
+  return {
+    label: req.isTimeOff ? 'Time off' : req.isNewWo ? 'New WO Required' : (req.jobName || '—'),
+    cls: req.isTimeOff ? 'timeoff' : req.isNewWo ? 'newwo' : '',
+  };
+}
+
+function PreviousRequestRow({ req }) {
+  const { label, cls } = requestJobLabel(req);
+  const statusCls = req.status === 'Approved' ? 'approved' : req.status === 'Denied' ? 'denied' : 'withdrawn';
+  return (
+    <div className="req-row prev">
+      <div className="req-main">
+        <div className="req-top">
+          <span className="req-tech">{req.technicianName || 'Unknown tech'}</span>
+          <span className={`req-job ${cls}`}>{label}</span>
+          <span className={`req-resolved-status ${statusCls}`}>{req.status}</span>
+          {req.resolvedAt && <span className="req-age">{fmtDateTime(req.resolvedAt)}</span>}
+        </div>
+        <div className="req-window">
+          <span className="ic">◷</span>
+          {req.proposedDate ? fmtDate(req.proposedDate) : 'No date proposed'} · {req.proposedStart || '?'}–{req.proposedEnd || '?'}
+        </div>
+        {req.note && <div className="req-note">“{req.note}”</div>}
+        {req.status === 'Denied' && req.officeNote && <div className="req-officenote">Office: “{req.officeNote}”</div>}
+      </div>
+    </div>
+  );
+}
+
+function RequestsTab({ requests, jobs, loading, onApprove, onCounter, onDeny, previousRequests, previousLoading, previousLoaded, onLoadPrevious }) {
   // Oldest first — age is the pressure that keeps the approve/counter/deny loop moving.
   const sorted = useMemo(() => [...requests].sort((a, b) => (b.ageHours || 0) - (a.ageHours || 0)), [requests]);
+  const [activeOpen, setActiveOpen] = useState(true);
+  // Previous requests are deliberately not part of the default view -- start
+  // collapsed, and only fetch the (separately-queried) resolved history the
+  // first time it's actually expanded.
+  const [previousOpen, setPreviousOpen] = useState(false);
+
+  const openPrevious = () => {
+    setPreviousOpen((o) => !o);
+    if (!previousLoaded) onLoadPrevious();
+  };
 
   return (
     <section>
@@ -1994,34 +2062,66 @@ function RequestsTab({ requests, jobs, loading, onApprove, onCounter, onDeny }) 
         <div><h2>Schedule requests</h2><p>Techs proposing dates/times for jobs and time off. Approve, counter, or deny.</p></div>
       </div>
 
-      {loading && (
-        <div className="req-list">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="req-row">
-              <div className="req-main">
-                <div className="req-top">
-                  <span className="skel-block" style={{ width: 100, height: 13 }} />
-                  <span className="skel-block" style={{ width: 70, height: 13 }} />
-                </div>
-                <div className="req-window">
-                  <span className="skel-block" style={{ width: 160, height: 12 }} />
-                </div>
+      <div className="req-section">
+        <button className="req-section-toggle" onClick={() => setActiveOpen((o) => !o)}>
+          <span className={`req-section-chevron ${activeOpen ? 'open' : ''}`}>▸</span>
+          <span>Active requests</span>
+          {!loading && <span className="req-section-count">{sorted.length}</span>}
+        </button>
+        {activeOpen && (
+          <>
+            {loading && (
+              <div className="req-list">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="req-row">
+                    <div className="req-main">
+                      <div className="req-top">
+                        <span className="skel-block" style={{ width: 100, height: 13 }} />
+                        <span className="skel-block" style={{ width: 70, height: 13 }} />
+                      </div>
+                      <div className="req-window">
+                        <span className="skel-block" style={{ width: 160, height: 12 }} />
+                      </div>
+                    </div>
+                    <div className="req-actions">
+                      <span className="skel-block" style={{ width: 200, height: 30 }} />
+                    </div>
+                  </div>
+                ))}
               </div>
-              <div className="req-actions">
-                <span className="skel-block" style={{ width: 200, height: 30 }} />
+            )}
+            {!loading && sorted.length === 0 && <div className="empty">No open schedule requests.</div>}
+            {!loading && sorted.length > 0 && (
+              <div className="req-list">
+                {sorted.map((req) => (
+                  <RequestRow key={req.id} req={req} jobs={jobs} onApprove={onApprove} onCounter={onCounter} onDeny={onDeny} />
+                ))}
               </div>
-            </div>
-          ))}
-        </div>
-      )}
-      {!loading && sorted.length === 0 && <div className="empty">No open schedule requests.</div>}
-      {!loading && sorted.length > 0 && (
-        <div className="req-list">
-          {sorted.map((req) => (
-            <RequestRow key={req.id} req={req} jobs={jobs} onApprove={onApprove} onCounter={onCounter} onDeny={onDeny} />
-          ))}
-        </div>
-      )}
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="req-section">
+        <button className="req-section-toggle" onClick={openPrevious}>
+          <span className={`req-section-chevron ${previousOpen ? 'open' : ''}`}>▸</span>
+          <span>Previous requests</span>
+          {previousLoaded && <span className="req-section-count">{previousRequests.length}</span>}
+        </button>
+        {previousOpen && (
+          <>
+            {previousLoading && <div className="state">Loading previous requests…</div>}
+            {!previousLoading && previousLoaded && previousRequests.length === 0 && (
+              <div className="empty">No resolved requests yet.</div>
+            )}
+            {!previousLoading && previousRequests.length > 0 && (
+              <div className="req-list">
+                {previousRequests.map((req) => <PreviousRequestRow key={req.id} req={req} />)}
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </section>
   );
 }

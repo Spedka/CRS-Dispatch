@@ -79,7 +79,8 @@ export const api = {
       body: JSON.stringify(fields),
     }).then(j),
 
-  getScheduleRequests: () => fetch('/api/schedule-requests').then(j),
+  getScheduleRequests: (opts) =>
+    fetch(`/api/schedule-requests${opts?.resolved ? '?resolved=1' : ''}`).then(j),
 
   // opportunityId only required for isNewWo rows — the server 400s otherwise.
   approveScheduleRequest: (id, opportunityId) =>

@@ -6,6 +6,17 @@ import { notifyTech } from './notifyBoard.js';
 
 const sr = config.scheduleRequest;
 const OPEN_STATUSES = ['Requested', 'Countered'];
+// Capped so a shop with years of history doesn't pull an unbounded resolved
+// list into the "Previous requests" panel -- it's lazy-loaded on demand
+// (see web/src/App.jsx's RequestsTab), not part of the default view, but
+// still worth bounding.
+const RESOLVED_LIMIT = 100;
+
+const SELECT_FIELDS = `Id, ${sr.job}, ${sr.jobRelationship}.Name, ${sr.type},
+  ${sr.tech}, ${sr.techRelationship}.Name,
+  ${sr.requestedBy}, ${sr.requestedByRelationship}.Name,
+  ${sr.proposedDate}, ${sr.proposedStart}, ${sr.proposedEnd},
+  ${sr.status}, ${sr.lastOfferBy}, ${sr.note}, ${sr.officeNote}, ${sr.resolvedAt}, CreatedDate`;
 
 function shapeRequest(r, env) {
   return {
@@ -24,6 +35,7 @@ function shapeRequest(r, env) {
     lastOfferBy: r[sr.lastOfferBy] ?? null,
     note: r[sr.note] ?? null,
     officeNote: r[sr.officeNote] ?? null,
+    resolvedAt: r[sr.resolvedAt] ?? null,
     createdDate: r.CreatedDate ?? null,
     // Derived fields the requests panel needs.
     waitingOn: r[sr.lastOfferBy] === 'Office' ? 'tech' : 'office',
@@ -35,18 +47,22 @@ function shapeRequest(r, env) {
 
 export const scheduleRequests = new Hono();
 
+// ?resolved=1 returns the resolved (Approved/Denied/Withdrawn) history
+// instead of the default open (Requested/Countered) queue -- a separate
+// mode rather than a separate route so the frontend's existing
+// getScheduleRequests() call shape barely changes.
 scheduleRequests.get('/schedule-requests', async (c) => {
   try {
     const sf = createSalesforce(c.env);
-    const soql = `
-      SELECT Id, ${sr.job}, ${sr.jobRelationship}.Name, ${sr.type},
-             ${sr.tech}, ${sr.techRelationship}.Name,
-             ${sr.requestedBy}, ${sr.requestedByRelationship}.Name,
-             ${sr.proposedDate}, ${sr.proposedStart}, ${sr.proposedEnd},
-             ${sr.status}, ${sr.lastOfferBy}, ${sr.note}, ${sr.officeNote}, CreatedDate
-      FROM ${sr.sobject}
-      WHERE ${sr.status} IN ('${OPEN_STATUSES.join("','")}')
-      ORDER BY CreatedDate ASC`;
+    const resolved = c.req.query('resolved') === '1';
+    const soql = resolved
+      ? `SELECT ${SELECT_FIELDS} FROM ${sr.sobject}
+         WHERE ${sr.status} NOT IN ('${OPEN_STATUSES.join("','")}') AND ${sr.resolvedAt} != null
+         ORDER BY ${sr.resolvedAt} DESC
+         LIMIT ${RESOLVED_LIMIT}`
+      : `SELECT ${SELECT_FIELDS} FROM ${sr.sobject}
+         WHERE ${sr.status} IN ('${OPEN_STATUSES.join("','")}')
+         ORDER BY CreatedDate ASC`;
     const records = await sf.query(soql);
     return c.json(records.map((r) => shapeRequest(r, c.env)));
   } catch (e) {
