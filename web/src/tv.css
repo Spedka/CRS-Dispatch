@@ -1,0 +1,248 @@
+/* Warehouse TV calendar — full-viewport kiosk display, never touched, never
+   scrolled by a person. Sized well beyond the in-app Tech Schedule tab's
+   density for distance viewing. All classnames prefixed tv- so nothing here
+   ever collides with styles.css (see CLAUDE.md's "CSS is not
+   component-scoped" note). */
+
+* { cursor: default !important; }
+
+.tv-page {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: #0b0f14;
+  color: #f4f6f8;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  padding: 28px 36px;
+  box-sizing: border-box;
+}
+
+.tv-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 22px;
+  flex-shrink: 0;
+}
+.tv-header h1 {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.tv-header .tv-meta {
+  font-size: 17px;
+  color: #8b96a3;
+  font-variant-numeric: tabular-nums;
+}
+
+.tv-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  color: #8b96a3;
+}
+
+.tv-fs-prompt {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.tv-fs-prompt-box {
+  background: #1a222c;
+  color: #f4f6f8;
+  padding: 28px 42px;
+  border-radius: 14px;
+  font-size: 24px;
+  font-weight: 700;
+  text-align: center;
+  max-width: 80vw;
+  border: 2px solid #2563eb;
+}
+
+.tv-fallback {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0b0f14;
+  color: #8b96a3;
+  font-size: 24px;
+}
+
+/* ---- Week view ----
+   A CSS grid, not a table: grid-template-rows: auto repeat(N, 1fr) makes
+   every technician row share the available height equally, so all N rows
+   are always visible (never silently clipped by .tv-grid-wrap's
+   overflow:hidden the way an auto-height table row could grow past the
+   viewport and push rows below the fold). --tv-scale (set inline per view,
+   see scaleForCount() in TvBoard.jsx) shrinks text/chips as tech count
+   grows so a busy row doesn't overflow its own thin slice of height. */
+.tv-grid-wrap { flex: 1; min-height: 0; overflow: hidden; }
+
+.tv-weekgrid {
+  display: grid;
+  grid-template-columns: 170px repeat(7, 1fr);
+  height: 100%;
+  gap: 1px;
+  background: #1a222c;
+}
+.tv-corner, .tv-daytitle {
+  background: #0b0f14;
+  padding: 6px 10px;
+  font-size: calc(16px * var(--tv-scale, 1));
+  font-weight: 600;
+  color: #8b96a3;
+  display: flex;
+  align-items: center;
+}
+.tv-daytitle.tv-todaycol { color: #60a5fa; }
+.tv-techname {
+  background: #0b0f14;
+  padding: calc(6px * var(--tv-scale, 1)) 10px;
+  font-size: calc(20px * var(--tv-scale, 1));
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.tv-wdaycell {
+  background: #0b0f14;
+  padding: calc(4px * var(--tv-scale, 1)) calc(6px * var(--tv-scale, 1));
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: calc(2px * var(--tv-scale, 1));
+  min-height: 0;
+}
+.tv-wdaycell.tv-todaycol { background: rgba(96, 165, 250, 0.06); }
+
+/* ---- Day view ----
+   One row per tech (same 1fr-rows-always-visible technique as the week
+   grid), a single wide column so the day's jobs lay out horizontally with
+   more room per chip than week/month view get. */
+.tv-daygrid {
+  display: grid;
+  height: 100%;
+  gap: 1px;
+  background: #1a222c;
+}
+.tv-dayrow {
+  background: #0b0f14;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: calc(8px * var(--tv-scale, 1)) 16px;
+  overflow: hidden;
+}
+.tv-dayrow .tv-techname {
+  background: none;
+  padding: 0;
+  width: 230px;
+  flex-shrink: 0;
+  font-size: calc(26px * var(--tv-scale, 1));
+}
+.tv-dayrow-items {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(8px * var(--tv-scale, 1));
+  overflow: hidden;
+}
+.tv-dayrow-items .tv-chip { display: inline-flex; align-items: center; width: auto; }
+
+.tv-chip {
+  display: block;
+  border-radius: calc(8px * var(--tv-scale, 1));
+  padding: calc(5px * var(--tv-scale, 1)) calc(9px * var(--tv-scale, 1));
+  margin-bottom: calc(4px * var(--tv-scale, 1));
+  font-size: calc(15px * var(--tv-scale, 1));
+  font-weight: 600;
+  line-height: 1.3;
+  border: 2px solid transparent;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tv-chip .tv-chip-time { font-weight: 500; opacity: 0.85; font-size: calc(13px * var(--tv-scale, 1)); }
+.tv-chip.tv-pending {
+  border-style: dashed;
+  background: transparent !important;
+  color: inherit;
+}
+.tv-chip.tv-pending .tv-pending-badge {
+  display: inline-block;
+  font-size: calc(10px * var(--tv-scale, 1));
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  margin-left: 6px;
+  opacity: 0.85;
+}
+
+.tv-offchip {
+  display: block;
+  border-radius: calc(8px * var(--tv-scale, 1));
+  padding: calc(5px * var(--tv-scale, 1)) calc(9px * var(--tv-scale, 1));
+  margin-bottom: calc(4px * var(--tv-scale, 1));
+  font-size: calc(15px * var(--tv-scale, 1));
+  font-weight: 600;
+  background: #2a2a35;
+  color: #b3b3c0;
+}
+
+.tv-free { color: #3a4552; font-size: calc(14px * var(--tv-scale, 1)); }
+
+/* ---- Month view ---- */
+.tv-month {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: 1fr;
+  gap: 1px;
+  background: #1a222c;
+}
+.tv-daycell {
+  background: #0b0f14;
+  padding: 10px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.tv-daycell.tv-today { background: rgba(96, 165, 250, 0.08); }
+.tv-daycell.tv-pad { background: #05070a; }
+.tv-daynum { font-size: 17px; font-weight: 700; color: #8b96a3; margin-bottom: 5px; }
+.tv-dayjob {
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 1.5px solid transparent;
+}
+.tv-dayjob.tv-pending { border-style: dashed; background: transparent !important; }
+.tv-dayjob .tv-inits { font-weight: 500; opacity: 0.85; }
+.tv-dayoff {
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  font-size: 15px;
+  font-weight: 600;
+  background: #2a2a35;
+  color: #b3b3c0;
+}

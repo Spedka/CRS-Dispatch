@@ -1,9 +1,14 @@
 import { Hono } from 'hono';
 import { api } from './routes.js';
+import { tv, internal } from './tv.js';
 import { runFsSync } from './fsSync.js';
 
 const app = new Hono();
 app.route('/api', api);
+app.route('/api', tv);
+app.route('/internal', internal);
+
+export { TvChannel } from './tvChannel.js';
 
 export default {
   // HTTP requests — handled by Hono as before.

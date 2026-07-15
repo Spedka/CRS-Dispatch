@@ -7,10 +7,25 @@ compatibility_date = "2026-06-12"
 directory = "./web/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*"]
+# /internal/* added alongside /api/* for the new /internal/tv-notify route
+# (server/src/tv.js) -- without it here, that path would fall through to the
+# SPA asset fallback (a 200 serving index.html) instead of ever reaching the
+# Worker's Hono app.
+run_worker_first = ["/api/*", "/internal/*"]
 
 [triggers]
 crons = ["*/5 * * * *"]
+
+# Holds a live WebSocket per connected /tv screen so job/assignment/request
+# changes push an instant "refresh" instead of relying on the TV's own poll
+# lag -- see server/src/tvChannel.js and notifyTv.js.
+[[durable_objects.bindings]]
+name = "TV_CHANNEL"
+class_name = "TvChannel"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TvChannel"]
 
 [vars]
 # Client-credentials token endpoint = your My Domain (prod), NOT test.salesforce.com.

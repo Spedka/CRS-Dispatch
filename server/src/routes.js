@@ -8,12 +8,13 @@ import { createAssignment, esc, normTime, toSfTime, buildFsSchedules, getTechDir
 import { scheduleRequests } from './scheduleRequests.js';
 import { mintMagicLink } from './authLink.js';
 import { notifyTech } from './notifyBoard.js';
+import { notifyTv } from './notifyTv.js';
 
 const f = config.fields;
 const o = config.objects;
 const FS_TASK_TYPE = 'CCTV Job/Work Order'; // only task type currently synced;
 
-function shapeJob(r) {
+export function shapeJob(r) {
   const child = r[o.assignmentChildRelationship];
   const assignments = child
     ? child.records.map((a) => ({
@@ -47,17 +48,74 @@ function shapeJob(r) {
   };
 }
 
+// Runs the default (no status filter) jobs query -- the same one GET /jobs
+// runs with no ?status= param. Extracted so server/src/tv.js's aggregating
+// /api/tv/data handler shares this exact query/shape instead of duplicating
+// the SOQL.
+export async function getAllJobs(env) {
+  const sf = createSalesforce(env);
+  const statuses = config.jobStatusValues;
+  const inList = statuses.map((s) => `'${esc(s)}'`).join(',');
+  const excludeClause = `AND (${f.oppType} != 'Monitoring' OR ${f.oppType} = null)`;
+
+  const soql = `
+    SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}, ${f.oppScheduledDate},
+           ${f.oppFsTaskId}, ${f.oppFsStatus}, ${f.oppFsLastModified}, ${f.oppType}, CreatedDate, CloseDate,
+           ${f.addrStreet}, ${f.addrCity}, ${f.addrState}, ${f.addrZip},
+           (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
+                   ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}
+            FROM ${o.assignmentChildRelationship})
+    FROM Opportunity
+    WHERE ${f.oppStatus} IN (${inList})
+    AND (CloseDate >= LAST_N_DAYS:365 OR CloseDate > TODAY)
+    ${excludeClause}
+    ORDER BY ${f.oppScheduledDate} ASC NULLS LAST`;
+
+  const records = await sf.query(soql);
+  return records.map(shapeJob);
+}
+
+// Same query as GET /technicians -- extracted for the same reason as
+// getAllJobs above.
+export async function getAllTechnicians(env) {
+  const sf = createSalesforce(env);
+  const soql = `SELECT Id, Name FROM ${o.technician}
+                WHERE ${o.technicianActive} = true ORDER BY Name`;
+  const recs = await sf.query(soql);
+  return recs.map((t) => ({ id: t.Id, name: t.Name }));
+}
+
+// Same query as GET /time-off -- extracted for the same reason as
+// getAllJobs above. start/end must already be validated YYYY-MM-DD strings.
+export async function getTimeOffRange(env, start, end) {
+  const sf = createSalesforce(env);
+  const soql = `
+    SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
+           ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}
+    FROM ${o.assignment}
+    WHERE ${o.assignmentOppLookup} = '${esc(env.TIME_OFF_OPPORTUNITY_ID)}'
+      AND ${o.assignmentDate} >= ${start} AND ${o.assignmentDate} <= ${end}`;
+  const records = await sf.query(soql);
+  return records.map((r) => ({
+    id: r.Id,
+    technicianId: r[o.assignmentTechLookup],
+    technicianName: r[o.assignmentTechRelationship]?.Name ?? null,
+    workDate: r[o.assignmentDate] ?? null,
+    startTime: normTime(r[o.assignmentStartTime]),
+    endTime: normTime(r[o.assignmentEndTime]),
+  }));
+}
+
 export const api = new Hono();
 api.route('/', scheduleRequests);
 
 api.get('/jobs', async (c) => {
   try {
-    const sf = createSalesforce(c.env);
     const statusParam = c.req.query('status');
-    const statuses = statusParam ? [statusParam] : config.jobStatusValues;
-    const inList = statuses.map((s) => `'${esc(s)}'`).join(',');
-    const sinceClause = statusParam  ? '' : `AND (CloseDate >= LAST_N_DAYS:365 OR CloseDate > TODAY)`;
+    if (!statusParam) return c.json(await getAllJobs(c.env));
 
+    const sf = createSalesforce(c.env);
+    const inList = `'${esc(statusParam)}'`;
     const excludeClause = `AND (${f.oppType} != 'Monitoring' OR ${f.oppType} = null)`;
 
     const soql = `
@@ -69,7 +127,6 @@ api.get('/jobs', async (c) => {
               FROM ${o.assignmentChildRelationship})
       FROM Opportunity
       WHERE ${f.oppStatus} IN (${inList})
-      ${sinceClause}
       ${excludeClause}
       ORDER BY ${f.oppScheduledDate} ASC NULLS LAST`;
 
@@ -82,11 +139,7 @@ api.get('/jobs', async (c) => {
 
 api.get('/technicians', async (c) => {
   try {
-    const sf = createSalesforce(c.env);
-    const soql = `SELECT Id, Name FROM ${o.technician}
-                  WHERE ${o.technicianActive} = true ORDER BY Name`;
-    const recs = await sf.query(soql);
-    return c.json(recs.map((t) => ({ id: t.Id, name: t.Name })));
+    return c.json(await getAllTechnicians(c.env));
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -148,22 +201,7 @@ api.get('/time-off', async (c) => {
       return c.json({ error: 'start and end are required, as YYYY-MM-DD' }, 400);
     }
 
-    const sf = createSalesforce(c.env);
-    const soql = `
-      SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
-             ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}
-      FROM ${o.assignment}
-      WHERE ${o.assignmentOppLookup} = '${esc(c.env.TIME_OFF_OPPORTUNITY_ID)}'
-        AND ${o.assignmentDate} >= ${start} AND ${o.assignmentDate} <= ${end}`;
-    const records = await sf.query(soql);
-    return c.json(records.map((r) => ({
-      id: r.Id,
-      technicianId: r[o.assignmentTechLookup],
-      technicianName: r[o.assignmentTechRelationship]?.Name ?? null,
-      workDate: r[o.assignmentDate] ?? null,
-      startTime: normTime(r[o.assignmentStartTime]),
-      endTime: normTime(r[o.assignmentEndTime]),
-    })));
+    return c.json(await getTimeOffRange(c.env, start, end));
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -182,6 +220,7 @@ api.post('/time-off', async (c) => {
     const result = await createAssignment(c.env, c.env.TIME_OFF_OPPORTUNITY_ID, {
       technicianId, workDate, startTime, endTime,
     });
+    await notifyTv(c.env, 'time-off-added');
     return c.json(result);
   } catch (e) {
     return c.json({ error: e.message }, 500);
@@ -311,6 +350,7 @@ api.patch('/jobs/:id', async (c) => {
       }
     }
 
+    await notifyTv(c.env, 'job-updated');
     return c.json({ ok: true, fsUpdated, fsError });
   } catch (e) {
     return c.json({ error: e.message }, 500);
@@ -326,6 +366,7 @@ api.post('/jobs/:oppId/assignments', async (c) => {
     const result = await createAssignment(c.env, oppId, {
       technicianId, workDate, startTime, status, scheduledDate, deriveScheduledDate,
     });
+    await notifyTv(c.env, 'assignment-added');
     return c.json(result);
   } catch (e) {
     return c.json({ error: e.message }, 500);
@@ -377,6 +418,7 @@ api.patch('/assignments/:id', async (c) => {
 
     await sf.updateRecord(o.assignment, id, fields);
     await notifyTech(c.env, techName, 'assignment-updated');
+    await notifyTv(c.env, 'assignment-updated');
 
     if (oppId && needsFsSync) {
       try {
@@ -445,6 +487,7 @@ api.delete('/assignments/:id', async (c) => {
 
     await sf.deleteRecord(o.assignment, id);
     await notifyTech(c.env, techName, 'assignment-cancelled');
+    await notifyTv(c.env, 'assignment-removed');
 
     // Remove the user from the FS task if they're a syncable tech
     const techDir = await getTechDirectory(sf);

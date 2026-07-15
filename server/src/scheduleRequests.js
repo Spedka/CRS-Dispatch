@@ -3,6 +3,7 @@ import { config } from './config.js';
 import { createSalesforce } from './salesforce.js';
 import { createAssignment, esc, normTime, toSfTime } from './assignments.js';
 import { notifyTech } from './notifyBoard.js';
+import { notifyTv } from './notifyTv.js';
 
 const sr = config.scheduleRequest;
 const OPEN_STATUSES = ['Requested', 'Countered'];
@@ -45,6 +46,18 @@ function shapeRequest(r, env) {
   };
 }
 
+// Shared with server/src/tv.js so the TV calendar's open-requests query
+// (and shaping) never drifts from this route's own -- one query, one shape
+// function, two consumers.
+export async function getOpenRequests(env) {
+  const sf = createSalesforce(env);
+  const soql = `SELECT ${SELECT_FIELDS} FROM ${sr.sobject}
+                WHERE ${sr.status} IN ('${OPEN_STATUSES.join("','")}')
+                ORDER BY CreatedDate ASC`;
+  const records = await sf.query(soql);
+  return records.map((r) => shapeRequest(r, env));
+}
+
 export const scheduleRequests = new Hono();
 
 // ?resolved=1 returns the resolved (Approved/Denied/Withdrawn) history
@@ -53,16 +66,14 @@ export const scheduleRequests = new Hono();
 // getScheduleRequests() call shape barely changes.
 scheduleRequests.get('/schedule-requests', async (c) => {
   try {
-    const sf = createSalesforce(c.env);
     const resolved = c.req.query('resolved') === '1';
-    const soql = resolved
-      ? `SELECT ${SELECT_FIELDS} FROM ${sr.sobject}
+    if (!resolved) return c.json(await getOpenRequests(c.env));
+
+    const sf = createSalesforce(c.env);
+    const soql = `SELECT ${SELECT_FIELDS} FROM ${sr.sobject}
          WHERE ${sr.status} NOT IN ('${OPEN_STATUSES.join("','")}') AND ${sr.resolvedAt} != null
          ORDER BY ${sr.resolvedAt} DESC
-         LIMIT ${RESOLVED_LIMIT}`
-      : `SELECT ${SELECT_FIELDS} FROM ${sr.sobject}
-         WHERE ${sr.status} IN ('${OPEN_STATUSES.join("','")}')
-         ORDER BY CreatedDate ASC`;
+         LIMIT ${RESOLVED_LIMIT}`;
     const records = await sf.query(soql);
     return c.json(records.map((r) => shapeRequest(r, c.env)));
   } catch (e) {
@@ -125,6 +136,7 @@ scheduleRequests.post('/schedule-requests/:id/approve', async (c) => {
       [sr.resultingAssignment]: assignmentId,
       [sr.resolvedAt]: new Date().toISOString(),
     });
+    await notifyTv(c.env, 'request-approved');
 
     return c.json({ ok: true, assignmentId, opportunityId: targetOppId });
   } catch (e) {
@@ -164,6 +176,7 @@ scheduleRequests.post('/schedule-requests/:id/counter', async (c) => {
 
     await sf.updateRecord(sr.sobject, id, payload);
     await notifyTech(c.env, reqRec[sr.techRelationship]?.Name, 'counter');
+    await notifyTv(c.env, 'request-countered');
     return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: e.message }, 500);
@@ -194,6 +207,7 @@ scheduleRequests.post('/schedule-requests/:id/deny', async (c) => {
       [sr.resolvedAt]: new Date().toISOString(),
     });
     await notifyTech(c.env, reqRec[sr.techRelationship]?.Name, 'deny');
+    await notifyTv(c.env, 'request-denied');
     return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: e.message }, 500);
