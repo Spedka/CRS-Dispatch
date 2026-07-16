@@ -397,6 +397,7 @@ export default function App() {
   const [sortBy, setSortBy] = useState(() => loadViewState().sortBy ?? 'scheduled');
   const [jobTech, setJobTech] = useState(() => loadViewState().jobTech ?? 'all');
   const [jobType, setJobType] = useState(() => loadViewState().jobType ?? 'all');
+  const [jobFsStatus, setJobFsStatus] = useState(() => loadViewState().jobFsStatus ?? 'all');
   // Infinite scroll on the jobs list — only the first `visibleCount` of `shown`
   // are ever mounted. Everything's already loaded client-side (no server paging),
   // so "loading more" just raises this cap; no extra fetch involved.
@@ -429,9 +430,9 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
-      tab, filter, query, closedFrom, closedTo, sortBy, jobTech, jobType,
+      tab, filter, query, closedFrom, closedTo, sortBy, jobTech, jobType, jobFsStatus,
     }));
-  }, [tab, filter, query, closedFrom, closedTo, sortBy, jobTech, jobType]);
+  }, [tab, filter, query, closedFrom, closedTo, sortBy, jobTech, jobType, jobFsStatus]);
 
   // Count of in-flight writes. While > 0 the poll holds off so a background
   // refresh can't overwrite a change you just made but that hasn't saved yet.
@@ -468,7 +469,7 @@ export default function App() {
   // whatever scroll depth was reached under the previous one.
   useEffect(() => {
     setVisibleCount(50);
-  }, [query, filter, jobTech, jobType, closedFrom, closedTo, sortBy]);
+  }, [query, filter, jobTech, jobType, jobFsStatus, closedFrom, closedTo, sortBy]);
 
   // Paused while the tab is backgrounded -- polling every 5 minutes
   // regardless of visibility means every idle/minimized staff tab still
@@ -857,6 +858,16 @@ export default function App() {
     [...new Set(jobs.map((j) => j.opportunityType).filter(Boolean))].sort()
   , [jobs]);
 
+  const fsStatuses = useMemo(() =>
+    [...new Set(jobs.map((j) => j.fsStatus).filter(Boolean))].sort()
+  , [jobs]);
+
+  const matchesFsStatus = (j, wanted) => {
+    if (wanted === 'all') return true;
+    if (wanted === 'unlinked') return !j.fsTaskId;
+    return j.fsStatus === wanted;
+  };
+
   const filteredJobs = useMemo(() => {
     const q = query.trim().toLowerCase();
     return jobs.filter((j) => {
@@ -865,6 +876,7 @@ export default function App() {
       if (jobTech !== 'all' && jobTech !== 'unassigned'
           && !j.assignments.some((a) => a.technicianId === jobTech)) return false;
       if (jobType !== 'all' && j.opportunityType !== jobType) return false;
+      if (!matchesFsStatus(j, jobFsStatus)) return false;
       if (closedFrom || closedTo) {
         const cd = dateOnlyISO(j.closeDate);
         if (!cd) return false;
@@ -873,7 +885,7 @@ export default function App() {
       }
       return true;
     });
-  }, [jobs, query, jobTech, jobType, closedFrom, closedTo]);
+  }, [jobs, query, jobTech, jobType, jobFsStatus, closedFrom, closedTo]);
 
   const statuses = useMemo(() => {
     const set = new Map();
@@ -893,6 +905,7 @@ export default function App() {
       if (jobTech !== 'all' && jobTech !== 'unassigned'
           && !j.assignments.some((a) => a.technicianId === jobTech)) return false;
       if (jobType !== 'all' && j.opportunityType !== jobType) return false;
+      if (!matchesFsStatus(j, jobFsStatus)) return false;
       if (closedFrom || closedTo) {
         const cd = dateOnlyISO(j.closeDate);
         if (!cd) return false;
@@ -918,7 +931,7 @@ export default function App() {
       },
     };
     return [...filtered].sort(sorters[sortBy] || sorters.scheduled);
-  }, [jobs, extraJobs, viewingTerminal, filter, query, jobTech, jobType, closedFrom, closedTo, sortBy]);
+  }, [jobs, extraJobs, viewingTerminal, filter, query, jobTech, jobType, jobFsStatus, closedFrom, closedTo, sortBy]);
 
   // Re-attaches on every shown.length change (not just mount) — the sentinel
   // <div> only exists in the DOM once shown.length > visibleCount, so a plain
@@ -1086,6 +1099,14 @@ export default function App() {
                   </select>
                 </label>
               )}
+              <label className="sortgrp">
+                <span className="rl">FS status</span>
+                <select className="ctlselect" value={jobFsStatus} onChange={(e) => setJobFsStatus(e.target.value)}>
+                  <option value="all">All</option>
+                  <option value="unlinked">Unlinked</option>
+                  {fsStatuses.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </label>
             </div>
 
             <div className="filters">
