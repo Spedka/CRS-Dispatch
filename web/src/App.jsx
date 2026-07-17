@@ -2264,6 +2264,139 @@ const DatePicker = React.memo(function DatePicker({ value, onChange, placeholder
   );
 });
 
+// Multi-select variant of DatePicker, used for "Add time off" where a
+// dispatcher picks several days off at once (mirrors chalkboard's own
+// multi-date time-off picker) -- same portal/positioning/scroll-lock
+// treatment as DatePicker, but `value` is an array of ISO date strings and
+// clicking a day toggles it in/out of that array instead of picking-and-
+// closing. The picker stays open across taps so several days can be picked
+// in one sitting; the footer "Done" button just closes it, it doesn't submit.
+const MultiDatePicker = React.memo(function MultiDatePicker({ value, onChange, placeholder = 'Select date(s)', className = '' }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, maxHeight: undefined });
+  const [viewMonth, setViewMonth] = useState(() => {
+    const d = value[0] ? new Date(value[0] + 'T00:00:00') : new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  });
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const POP_WIDTH = 250;
+    let left = rect.left;
+    if (left + POP_WIDTH > window.innerWidth - 8) left = window.innerWidth - POP_WIDTH - 8;
+    if (left < 8) left = 8;
+
+    const GAP = 6;
+    const EDGE = 8;
+    const CEILING = 420;
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      if (popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open]);
+
+  // Only jump the visible month on open if nothing's selected yet -- once
+  // days are picked, re-opening shouldn't yank the view away from whatever
+  // month the dispatcher was browsing.
+  useEffect(() => {
+    if (!open || value.length > 0) return;
+    setViewMonth(new Date());
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const todayIso = isoOf(startOfDay(new Date()));
+
+  const cells = useMemo(() => {
+    const last = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 0);
+    const gridStart = startOfWeek(viewMonth);
+    const gridEnd = addDays(startOfWeek(last), 6);
+    const total = Math.round((gridEnd - gridStart) / 86400000) + 1;
+    return Array.from({ length: total }, (_, i) => addDays(gridStart, i));
+  }, [viewMonth]);
+
+  const toggle = (d) => {
+    const iso = isoOf(d);
+    onChange(value.includes(iso) ? value.filter((v) => v !== iso) : [...value, iso].sort());
+  };
+  const shiftMonth = (dir) => setViewMonth((m) => new Date(m.getFullYear(), m.getMonth() + dir, 1));
+
+  const label = value.length === 0 ? placeholder : value.length === 1 ? fmtDate(value[0]) : `${value.length} days selected`;
+
+  return (
+    <div className={`dp-wrap ${className}`} ref={wrapRef}>
+      <button type="button" className={`dp-trigger ${value.length === 0 ? 'empty' : ''}`} onClick={() => setOpen((o) => !o)}>
+        <span className="dp-ic">📅</span>
+        <span className="dp-val">{label}</span>
+      </button>
+      {open && createPortal(
+        <div
+          className="dp-pop"
+          ref={popRef}
+          style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+        >
+          <div className="dp-head">
+            <button type="button" className="dp-nav" onClick={() => shiftMonth(-1)} aria-label="Previous month">‹</button>
+            <span className="dp-month">{viewMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>
+            <button type="button" className="dp-nav" onClick={() => shiftMonth(1)} aria-label="Next month">›</button>
+          </div>
+          <div className="dp-grid">
+            {WEEKDAY_LETTERS.map((w, i) => <div className="dp-wd" key={i}>{w}</div>)}
+            {cells.map((d) => {
+              const iso = isoOf(d);
+              const cls = [
+                d.getMonth() !== viewMonth.getMonth() ? 'out' : '',
+                iso === todayIso ? 'today' : '',
+                value.includes(iso) ? 'sel' : '',
+              ].filter(Boolean).join(' ');
+              return (
+                <button type="button" key={iso} className={`dp-day ${cls}`} onClick={() => toggle(d)}>
+                  {d.getDate()}
+                </button>
+              );
+            })}
+          </div>
+          <div className="dp-foot">
+            <span className="dp-count">{value.length} day{value.length === 1 ? '' : 's'} selected</span>
+            <button type="button" className="dp-today-btn" onClick={() => setOpen(false)}>Done</button>
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+});
+
 // Every 30 minutes across the full 24-hour day for TimePicker's scrollable
 // preset list -- the directly-typeable text field above it already covers
 // any exact HH:MM, so this is just quick-scan convenience, not the only way
@@ -3158,22 +3291,36 @@ function Schedule({ jobs, techs, onJobClick }) {
 
 function AddTimeOffModal({ techs, onClose, onCreated }) {
   const [technicianId, setTechnicianId] = useState('');
-  const [date, setDate] = useState('');
+  const [dates, setDates] = useState([]);
   const [start, setStart] = useState('08:00');
   const [end, setEnd] = useState('17:00');
   const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
 
+  // One Job_Assignment__c per selected day -- same reasoning as chalkboard's
+  // own multi-date time-off picker: there's no date-range field on the
+  // object, so each day is its own independent create call, fired
+  // concurrently. A day that fails doesn't block the others from saving.
   const save = async () => {
-    if (!technicianId || !date) return;
+    if (!technicianId || dates.length === 0) return;
     setSaving(true);
-    try {
-      await api.addTimeOff(technicianId, date, start, end);
-      await onCreated();
-      onClose();
-    } catch (e) {
-      alert(`Could not add time off: ${e.message}`);
+    setErr(null);
+    const results = await Promise.allSettled(dates.map((d) => api.addTimeOff(technicianId, d, start, end)));
+    const failed = results.map((r, i) => (r.status === 'rejected' ? dates[i] : null)).filter(Boolean);
+
+    if (failed.length === dates.length) {
+      setErr('Could not add time off. Nothing was saved.');
       setSaving(false);
+      return;
     }
+    if (failed.length > 0) {
+      setErr(`Saved ${dates.length - failed.length} of ${dates.length} day(s) — failed: ${failed.join(', ')}.`);
+      setSaving(false);
+      await onCreated();
+      return;
+    }
+    await onCreated();
+    onClose();
   };
 
   return (
@@ -3192,8 +3339,8 @@ function AddTimeOffModal({ techs, onClose, onCreated }) {
             </select>
           </label>
           <label className="req-field req-field-wide">
-            <span className="req-field-label">Date</span>
-            <DatePicker value={date} onChange={setDate} placeholder="Date" clearable={false} />
+            <span className="req-field-label">Date(s)</span>
+            <MultiDatePicker value={dates} onChange={setDates} placeholder="Select date(s)" />
           </label>
           <div className="req-panel-row">
             <label className="req-field">
@@ -3205,10 +3352,11 @@ function AddTimeOffModal({ techs, onClose, onCreated }) {
               <TimePicker className="req-time" value={end} onChange={setEnd} />
             </label>
           </div>
+          {err && <div className="modal-form-error">{err}</div>}
         </div>
         <div className="modal-footer">
-          <button className="modal-save-btn" onClick={save} disabled={saving || !technicianId || !date}>
-            {saving ? 'Adding…' : 'Add time off'}
+          <button className="modal-save-btn" onClick={save} disabled={saving || !technicianId || dates.length === 0}>
+            {saving ? 'Adding…' : dates.length > 1 ? `Add time off (${dates.length} days)` : 'Add time off'}
           </button>
           <button className="modal-cancel-btn" onClick={onClose} disabled={saving}>Cancel</button>
         </div>
