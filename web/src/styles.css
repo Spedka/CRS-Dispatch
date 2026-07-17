@@ -263,6 +263,45 @@ td.open{background:var(--open-bg);}
 .tech-link-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;}
 .tech-link-name{font-size:13px;font-weight:600;color:var(--ink);}
 
+/* Notes menu (header button + dropdown, portaled like DatePicker) */
+.notes-menu-wrap{position:relative;}
+.notes-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);width:320px;display:flex;flex-direction:column;overflow:hidden;}
+/* Narrower variant for JobNotesBadge's per-job popup -- a single job's notes
+   list doesn't need the header menu's full 320px. */
+.job-notes-pop{width:280px;}
+.notes-pop-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line);font-size:12px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.4px;}
+.notes-new-btn{font:inherit;font-size:12px;font-weight:600;color:var(--brand);background:none;border:none;cursor:pointer;padding:2px 4px;text-transform:none;letter-spacing:normal;}
+.notes-new-btn:hover{color:var(--brand-bright);}
+.notes-pop-search-wrap{padding:8px 10px;border-bottom:1px solid var(--line);}
+.notes-pop-search{font:inherit;font-size:12.5px;border:1px solid var(--line-strong);border-radius:7px;padding:6px 9px;color:var(--ink);background:var(--surface);width:100%;box-sizing:border-box;}
+.notes-pop-search:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
+.notes-pop-list{overflow-y:auto;padding:6px;display:flex;flex-direction:column;gap:2px;}
+.notes-pop-empty{font-size:12.5px;color:var(--ink-faint);padding:14px 10px;text-align:center;}
+.notes-pop-err{color:var(--emergency);font-size:12.5px;}
+.notes-pop-item{display:flex;flex-direction:column;align-items:stretch;gap:2px;text-align:left;background:none;border:none;border-radius:8px;padding:8px 10px;cursor:pointer;}
+.notes-pop-item:hover{background:var(--surface-2);}
+/* JobNotesBadge only -- wraps .notes-pop-item with a hover-revealed delete
+   button; NotesMenu's own list uses .notes-pop-item directly, unwrapped. */
+.notes-pop-row{display:flex;align-items:stretch;gap:2px;border-radius:8px;}
+.notes-pop-row:hover{background:var(--surface-2);}
+.notes-pop-row .notes-pop-item{flex:1;min-width:0;}
+.notes-pop-row .notes-pop-item:hover{background:none;}
+.notes-pop-delete{flex-shrink:0;align-self:center;opacity:0;background:none;border:none;color:var(--ink-faint);font-size:15px;line-height:1;padding:4px 8px;margin-right:2px;border-radius:6px;cursor:pointer;}
+.notes-pop-row:hover .notes-pop-delete{opacity:1;}
+.notes-pop-delete:hover{color:var(--emergency);background:var(--emergency-bg);}
+.notes-pop-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
+.notes-pop-title{font-size:13px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;}
+.notes-pop-job-tag{font-size:10.5px;font-weight:600;color:var(--scheduled);background:var(--scheduled-bg);border-radius:999px;padding:2px 8px;flex-shrink:0;white-space:nowrap;}
+.notes-pop-preview{font-size:12px;color:var(--ink-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+.modal.modal-notes{max-width:640px;}
+.modal.modal-notes .modal-body{gap:14px;}
+.notes-textarea{font:inherit;font-size:13.5px;color:var(--ink);background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:12px 14px;resize:vertical;min-height:320px;}
+.notes-textarea:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
+.notes-job-link{display:flex;flex-direction:column;gap:8px;}
+.notes-job-check{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-soft);}
+.notes-job-check input{accent-color:var(--brand);}
+
 /* Manage Techs modal */
 .modal.modal-manage-techs{max-width:740px;}
 .manage-techs-list{display:flex;flex-direction:column;gap:8px;max-height:360px;overflow-y:auto;margin-bottom:16px;}
@@ -296,6 +335,11 @@ td.open{background:var(--open-bg);}
 .fs-badge.linked{color:var(--brand);background:#E6F4EC;border:1px solid #A9D9BF;}
 .fs-badge.unlinked{color:var(--ink-faint);background:var(--surface-2);border:1px dashed var(--line-strong);}
 .fs-attach-btn{cursor:pointer;font:inherit;transition:color .15s,border-color .15s,background .15s;}
+
+/* Per-job notes badge -- only rendered when a job has at least one linked note. */
+.job-notes-wrap{position:relative;display:inline-flex;margin-left:auto;}
+.job-notes-badge{font:inherit;font-size:12.5px;font-weight:700;padding:5px 12px;border-radius:7px;letter-spacing:.3px;flex-shrink:0;cursor:pointer;color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line-strong);}
+.job-notes-badge:hover{color:var(--ink);border-color:var(--ink-faint);}
 
 /* FS drift badge — dispatch status vs FS's own reported status.
    Reuses the same green/grey as .fs-badge.linked/.unlinked above so the
@@ -358,13 +402,17 @@ td.open{background:var(--open-bg);}
 .ss-wrap{position:relative;}
 .ss-input{font:inherit;font-size:12.5px;border:1px solid var(--line-strong);border-radius:8px;padding:6px 10px;color:var(--ink);background:var(--surface);width:180px;}
 .ss-input:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
-.ss-dropdown{position:absolute;top:calc(100% + 4px);left:0;min-width:100%;max-height:220px;overflow-y:auto;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:var(--shadow);z-index:100;display:flex;flex-direction:column;padding:4px;}
-.ss-option{font:inherit;font-size:13px;text-align:left;background:none;border:none;padding:7px 10px;border-radius:6px;cursor:pointer;color:var(--ink);white-space:nowrap;}
+.ss-dropdown{position:fixed;overflow-y:auto;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);z-index:300;display:flex;flex-direction:column;gap:10px;padding:10px;}
+.ss-option{font:inherit;font-size:13.5px;line-height:1.4;text-align:left;background:none;border:none;padding:14px 16px;border-radius:7px;cursor:pointer;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
 .ss-option:hover{background:var(--surface-2);}
 .ss-empty{font-size:12px;color:var(--ink-faint);padding:8px 10px;}
 .ss-selected{display:inline-flex;align-items:center;gap:7px;font:inherit;font-size:12.5px;font-weight:600;color:var(--ink);background:var(--scheduled-bg);border:1px solid var(--scheduled);border-radius:8px;padding:6px 10px;cursor:pointer;white-space:nowrap;}
 .ss-selected:hover{background:#d5e5fc;}
 .ss-clear{font-size:14px;font-weight:400;color:var(--ink-soft);line-height:1;}
+/* .ss-dropdown's flex `gap` would otherwise add a visible blank strip before
+   this 1px sentinel -- cancel it so the sentinel sits inside the existing gap
+   slot instead of adding a new one. */
+.ss-dropdown .scroll-sentinel{margin-top:-10px;}
 
 .contact-buildings{display:flex;flex-direction:column;gap:5px;}
 .buildings-toggle{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12.5px;font-weight:600;color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line-strong);border-radius:7px;padding:4px 10px;cursor:pointer;}
@@ -481,7 +529,7 @@ td.open{background:var(--open-bg);}
 /* position:fixed + portaled to <body> in DatePicker — top/left set inline from
    the trigger's getBoundingClientRect() so overflow:hidden ancestors (e.g. .job's
    rounded status stripe) can't clip it. z-index clears the job modal (200). */
-.dp-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:12px;width:250px;}
+.dp-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:12px;width:250px;overflow-y:auto;}
 .dp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
 .dp-month{font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:600;color:var(--ink);}
 .dp-nav{font:inherit;font-size:13px;font-weight:700;width:26px;height:26px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface-2);color:var(--ink-soft);cursor:pointer;}
@@ -499,3 +547,20 @@ td.open{background:var(--open-bg);}
 .dp-today-btn:hover,.dp-clear-btn:hover{background:var(--surface-2);}
 .dp-clear-btn{color:var(--ink-faint);}
 .dp-clear-btn:hover{color:var(--emergency);}
+
+/* TimePicker -- trigger reuses the caller's own .atime/.req-time class for
+   sizing, so no new CSS is needed for the button itself, only its popup. */
+.tp-wrap{position:relative;display:inline-flex;}
+.tp-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:10px;width:240px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;}
+.tp-text{font:inherit;font-family:'IBM Plex Mono',monospace;font-size:13px;border:1px solid var(--line-strong);border-radius:7px;padding:6px 9px;color:var(--ink);background:var(--surface);width:100%;text-align:center;box-sizing:border-box;}
+.tp-text:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
+.tp-quick{display:flex;flex-direction:column;gap:4px;padding-bottom:8px;border-bottom:1px solid var(--line);}
+.tp-chip{font:inherit;font-size:11.5px;text-align:left;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:5px 8px;cursor:pointer;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tp-chip:hover{border-color:var(--ink-faint);color:var(--ink);}
+.tp-list{display:flex;flex-direction:column;gap:1px;}
+.tp-option{font:inherit;font-family:'IBM Plex Mono',monospace;font-size:12.5px;text-align:center;background:none;border:none;border-radius:6px;padding:6px 0;cursor:pointer;color:var(--ink);}
+.tp-option:hover{background:var(--surface-2);}
+.tp-option.sel{background:var(--brand);color:#fff;font-weight:700;}
+.tp-option.sel:hover{background:var(--brand-bright);}
+.tp-clear{margin-left:6px;color:var(--ink-faint);font-size:13px;line-height:1;border-radius:50%;padding:1px 3px;}
+.tp-clear:hover{color:var(--emergency);background:var(--emergency-bg);}

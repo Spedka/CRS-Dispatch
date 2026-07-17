@@ -122,4 +122,23 @@ export const api = {
       body: JSON.stringify({ technicianId, workDate, startTime, endTime }),
     }).then(j),
 
+  getNotes: () => fetch('/api/notes').then(j),
+
+  addNote: (text, opportunityId) =>
+    fetch('/api/notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, opportunityId: opportunityId || null }),
+    }).then(j),
+
+  updateNote: (id, fields) =>
+    fetch(`/api/notes/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+    }).then(j),
+
+  removeNote: (id) =>
+    fetch(`/api/notes/${id}`, { method: 'DELETE' }).then(j),
+
 };

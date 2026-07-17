@@ -97,4 +97,15 @@ export const config = {
     resolvedAt: 'Resolved_At__c',
     resultingAssignment: 'Resulting_Assignment__c',
   },
+
+  // ---- Dispatch_Note__c (shared team notes, optionally linked to a job) ----
+  dispatchNote: {
+    sobject: 'Dispatch_Note__c',
+    body: 'Body__c',
+    opportunity: 'Opportunity__c',             // lookup -> Opportunity
+    opportunityRelationship: 'Opportunity__r',
+    // Mirrors whether `opportunity` is set — driven entirely by the picker in
+    // the UI (see NoteEditModal in App.jsx), never toggled independently.
+    opportunitySpecific: 'Opportunity_Specific__c',
+  },
 };

@@ -222,7 +222,7 @@ function SyncedAgo({ lastSync }) {
 // App, and fsLinkForJob/pendingAddForJob collapse to `null` for every row
 // except the one with a panel open (see the .map() call site in App).
 const JobCard = React.memo(function JobCard({
-  job, readOnly, techs, fsLinkForJob, pendingAddForJob,
+  job, readOnly, techs, fsLinkForJob, pendingAddForJob, jobNotes, onOpenNote, onDeleteNote,
   onToggleDone, onAssignmentDateChange, onAssignmentTimeChange, onUnassign, onAssign,
   onSetStatus, onOpenFsLink, onCloseFsLink, onFsLinkChange, onPendingAddChange,
   onSearchFs, onConfirmFsLink,
@@ -240,6 +240,7 @@ const JobCard = React.memo(function JobCard({
               : <span className="fs-badge unlinked" title="No Field Squared task linked">⬡ FS</span>}
             <FsDriftBadge job={job} />
             <span className={`badge ${statusClass(job.status)}`}>{job.status}</span>
+            {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
           </div>
           <div className="meta">
             <span><span className="ic">◍</span>{job.address || 'No address'}</span>
@@ -281,6 +282,7 @@ const JobCard = React.memo(function JobCard({
             {!ASSIGNABLE_STATUSES.includes(job.status) && <option value={job.status}>{job.status}</option>}
             {ASSIGNABLE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
+          {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
         </div>
         {fsOpen && (
           <div className="fs-attach-panel">
@@ -342,14 +344,12 @@ const JobCard = React.memo(function JobCard({
                 >{a.completed ? '✓' : '○'}</button>
                 <span className="aname">{a.technicianName || 'Tech'}</span>
                 <DatePicker className="dp-adate" value={a.workDate || ''} onChange={(v) => onAssignmentDateChange(job, a, v)} placeholder="Date" />
-                <input
+                <TimePicker
                   className="atime"
-                  type="time"
-                  defaultValue={a.startTime || '07:00'}
-                  onBlur={(e) => { if (e.target.value) onAssignmentTimeChange(job, a, e.target.value); }}
+                  value={a.startTime || '07:00'}
+                  onChange={(v) => onAssignmentTimeChange(job, a, v)}
                   title="Start time"
                   disabled={a.completed}
-                  key={a.assignmentId + (a.startTime || '07:00')}
                 />
                 {!a.workDate && !a.completed && <span className="untag">unscheduled</span>}
                 <button className="x" onClick={() => onUnassign(job, a.assignmentId)} aria-label="Remove">×</button>
@@ -370,7 +370,13 @@ const JobCard = React.memo(function JobCard({
               <div className="inline-add">
                 <span className="pending-tech">{techs.find((t) => t.id === pendingAddForJob.techId)?.name}</span>
                 <DatePicker className="dp-adate" value={pendingAddForJob.date || ''} onChange={(v) => onPendingAddChange((p) => ({ ...p, date: v }))} placeholder="Date" />
-                <input className="atime" type="time" value={pendingAddForJob.time || '07:00'} onChange={(e) => onPendingAddChange((p) => ({ ...p, time: e.target.value }))} title="Start time" />
+                <TimePicker
+                  className="atime"
+                  value={pendingAddForJob.time || '07:00'}
+                  onChange={(v) => onPendingAddChange((p) => ({ ...p, time: v }))}
+                  title="Start time"
+                  quickPicks={deriveTimeQuickPicks(job.assignments)}
+                />
                 <button className="add-btn" onClick={async () => {
                   const { techId, date, time } = pendingAddForJob;
                   onPendingAddChange({ jobId: null, techId: '', date: '', time: '' });
@@ -390,6 +396,8 @@ export default function App() {
   const [tab, setTab] = useState(() => loadViewState().tab ?? 'jobs');
   const [jobs, setJobs] = useState([]);
   const [techs, setTechs] = useState([]);
+  const [notes, setNotes] = useState([]);
+  const [editingNote, setEditingNote] = useState(null);
   const [filter, setFilter] = useState(() => loadViewState().filter ?? 'all');
   const [query, setQuery] = useState(() => loadViewState().query ?? '');
   const [closedFrom, setClosedFrom] = useState(() => loadViewState().closedFrom ?? '');
@@ -442,6 +450,20 @@ export default function App() {
   // after `shown` is computed (it needs shown.length to know when to re-attach).
   const scrollSentinelRef = useRef(null);
 
+  // Kept separate from `load` (below) so a notes-only refresh -- e.g. the
+  // Notes menu re-pulling on open, or after saving/deleting a note -- doesn't
+  // need to also re-fetch jobs/techs. Errors are swallowed (console-only,
+  // same fire-and-forget convention as notifyTech) rather than surfaced via
+  // the board's main `error` state -- notes are ancillary, and a failure here
+  // shouldn't take down the primary jobs list UI.
+  const loadNotes = useCallback(async () => {
+    try {
+      setNotes(await api.getNotes());
+    } catch (e) {
+      console.error('[notes] load failed', e);
+    }
+  }, []);
+
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     setError(null);
@@ -455,9 +477,43 @@ export default function App() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, []);
+    loadNotes();
+  }, [loadNotes]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Job-specific notes (Opportunity_Specific__c) grouped by opportunity, for
+  // the per-job notes badge on each job card. General (non-job) notes are
+  // left out -- those only ever show in the header Notes menu.
+  const notesByJobId = useMemo(() => {
+    const m = new Map();
+    for (const n of notes) {
+      if (!n.opportunitySpecific || !n.opportunityId) continue;
+      if (!m.has(n.opportunityId)) m.set(n.opportunityId, []);
+      m.get(n.opportunityId).push(n);
+    }
+    return m;
+  }, [notes]);
+
+  // Single shared NoteEditModal instance -- both the header Notes menu and
+  // each job card's notes badge open the same note-editing flow through this
+  // one piece of state, rather than each owning its own modal.
+  const openNewNote = useCallback((opportunityId, opportunityName) => {
+    setEditingNote({ id: null, text: '', opportunityId: opportunityId || null, opportunityName: opportunityName || null, isNew: true });
+  }, []);
+  const openNote = useCallback((note) => { setEditingNote({ ...note, isNew: false }); }, []);
+  const afterNoteChange = useCallback(() => { setEditingNote(null); loadNotes(); }, [loadNotes]);
+  // Quick-delete straight from a notes popup (no confirm dialog, matching
+  // NoteEditModal's own Delete button) -- doesn't touch editingNote since
+  // this never goes through the modal.
+  const deleteNote = useCallback(async (id) => {
+    try {
+      await api.removeNote(id);
+      loadNotes();
+    } catch (e) {
+      alert(`Could not delete note: ${e.message}`);
+    }
+  }, [loadNotes]);
 
   useEffect(() => {
     if (closedFrom && !closedTo) {
@@ -956,6 +1012,7 @@ export default function App() {
           <div><h1>CRS Dispatch</h1><span>Field Work Board</span></div>
         </div>
         <div className="bar-spacer" />
+        <NotesMenu notes={notes} onRefresh={loadNotes} onNewNote={() => openNewNote()} onOpenNote={openNote} />
         <button className="refresh" onClick={() => setManageTechsOpen(true)} title="Add, edit, or remove technicians">Manage Techs</button>
         <button className="refresh" onClick={() => setTechLinksOpen(true)} title="Get a chalkboard sign-in link for a technician">Tech Links</button>
         <button
@@ -1134,6 +1191,9 @@ export default function App() {
                   techs={techs}
                   fsLinkForJob={fsLink.jobId === job.id ? fsLink : null}
                   pendingAddForJob={pendingAdd.jobId === job.id ? pendingAdd : null}
+                  jobNotes={notesByJobId.get(job.id) || []}
+                  onOpenNote={openNote}
+                  onDeleteNote={deleteNote}
                   onToggleDone={toggleDone}
                   onAssignmentDateChange={setAssignmentDate}
                   onAssignmentTimeChange={setAssignmentTime}
@@ -1241,11 +1301,10 @@ export default function App() {
                         onChange={(v) => setDraftJob((d) => ({ ...d, assignments: d.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, workDate: v || null } : x) }))}
                         placeholder="Date"
                       />
-                      <input
+                      <TimePicker
                         className="atime"
-                        type="time"
                         value={a.startTime || '07:00'}
-                        onChange={(e) => setDraftJob((d) => ({ ...d, assignments: d.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, startTime: e.target.value || '07:00' } : x) }))}
+                        onChange={(v) => setDraftJob((d) => ({ ...d, assignments: d.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, startTime: v || '07:00' } : x) }))}
                         title="Start time"
                         disabled={a.completed}
                       />
@@ -1278,7 +1337,13 @@ export default function App() {
                   {draftPendingAdd.techId && (
                     <div className="inline-add">
                       <DatePicker className="dp-adate" value={draftPendingAdd.date || ''} onChange={(v) => setDraftPendingAdd((p) => ({ ...p, date: v }))} placeholder="Date" />
-                      <input className="atime" type="time" value={draftPendingAdd.time || '07:00'} onChange={(e) => setDraftPendingAdd((p) => ({ ...p, time: e.target.value }))} title="Start time" />
+                      <TimePicker
+                        className="atime"
+                        value={draftPendingAdd.time || '07:00'}
+                        onChange={(v) => setDraftPendingAdd((p) => ({ ...p, time: v }))}
+                        title="Start time"
+                        quickPicks={deriveTimeQuickPicks(draftJob.assignments)}
+                      />
                       <button className="add-btn" onClick={() => {
                         const { techId, date, time } = draftPendingAdd;
                         const tech = techs.find((t) => t.id === techId);
@@ -1316,6 +1381,10 @@ export default function App() {
 
       {techLinksOpen && (
         <TechLinksModal techs={techs} onClose={() => setTechLinksOpen(false)} />
+      )}
+
+      {editingNote && (
+        <NoteEditModal note={editingNote} jobs={jobs} onSaved={afterNoteChange} onDeleted={afterNoteChange} onClose={() => setEditingNote(null)} />
       )}
     </>
   );
@@ -1363,6 +1432,343 @@ function TechLinksModal({ techs, onClose }) {
         </div>
         <div className="modal-footer">
           <button className="modal-cancel-btn" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// First non-blank line is the title shown in the notes list; the rest (if any)
+// is a short preview snippet. Mirrors how Claude Code titles a chat from its
+// first message — no separate title field to keep in sync.
+function noteTitleAndPreview(text) {
+  const lines = (text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const title = lines[0] || 'Untitled note';
+  const preview = lines.slice(1).join(' ');
+  return { title, preview };
+}
+
+// Small "N notes" badge shown on a job card only when that job has at least
+// one linked note (Opportunity_Specific__c). Clicking it opens a small
+// preview popup (title + snippet per note, reusing NotesMenu's own
+// .notes-pop* styling); clicking a note in that popup hands off to the same
+// shared NoteEditModal the header Notes menu uses (via onOpenNote, passed
+// down from App) -- there's a single modal instance, not one per badge.
+function JobNotesBadge({ notes, onOpenNote, onDeleteNote }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, maxHeight: 320 });
+
+  useEffect(() => {
+    if (!open) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const POP_WIDTH = 280;
+    const GAP = 6;
+    const EDGE = 8;
+    const CEILING = 320;
+    let left = rect.left;
+    if (left + POP_WIDTH > window.innerWidth - EDGE) left = window.innerWidth - POP_WIDTH - EDGE;
+    if (left < EDGE) left = EDGE;
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      if (popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open]);
+
+  return (
+    <div className="job-notes-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        className="job-notes-badge"
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+        title={`${notes.length} note${notes.length === 1 ? '' : 's'} on this job`}
+      >
+        Notes
+      </button>
+      {open && createPortal(
+        <div
+          className="notes-pop job-notes-pop"
+          ref={popRef}
+          style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+        >
+          <div className="notes-pop-list">
+            {notes.map((note) => {
+              const { title, preview } = noteTitleAndPreview(note.text);
+              return (
+                <div className="notes-pop-row" key={note.id}>
+                  <button
+                    className="notes-pop-item"
+                    onClick={(e) => { e.stopPropagation(); setOpen(false); onOpenNote(note); }}
+                  >
+                    <span className="notes-pop-title">{title}</span>
+                    {preview && <span className="notes-pop-preview">{preview}</span>}
+                  </button>
+                  <button
+                    type="button"
+                    className="notes-pop-delete"
+                    title="Delete note"
+                    aria-label="Delete note"
+                    onClick={(e) => { e.stopPropagation(); onDeleteNote(note.id); }}
+                  >×</button>
+                </div>
+              );
+            })}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+// Header "Notes" button + dropdown: a shared (all-users) team scratchpad,
+// stored in Salesforce (Dispatch_Note__c) rather than localStorage since
+// everyone on the board should see the same list. `notes`/`onRefresh` are
+// owned by App (shared with the per-job notes badges below), and clicking a
+// note here hands off to App's single shared NoteEditModal via `onOpenNote`/
+// `onNewNote` rather than owning its own editing state.
+function NotesMenu({ notes, onRefresh, onNewNote, onOpenNote }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, maxHeight: 420 });
+  const [query, setQuery] = useState('');
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return notes;
+    return notes.filter((n) => noteTitleAndPreview(n.text).title.toLowerCase().includes(q));
+  }, [notes, query]);
+
+  // Re-pull on every open, not just on mount, since other dispatchers may
+  // have added/edited notes since this tab last loaded. Flips above the
+  // trigger and clamps maxHeight the same way DatePicker/SearchableSelect/
+  // TimePicker do, so this popup can't run off the bottom of the viewport.
+  useEffect(() => {
+    if (!open) return;
+    setQuery('');
+    onRefresh();
+    const rect = wrapRef.current.getBoundingClientRect();
+    const POP_WIDTH = 320;
+    const GAP = 6;
+    const EDGE = 8;
+    const CEILING = 420;
+    let left = rect.left;
+    if (left + POP_WIDTH > window.innerWidth - EDGE) left = window.innerWidth - POP_WIDTH - EDGE;
+    if (left < EDGE) left = EDGE;
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
+  }, [open, onRefresh]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      if (popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open]);
+
+  const openNew = () => { setOpen(false); onNewNote(); };
+  const openExisting = (note) => { setOpen(false); onOpenNote(note); };
+
+  return (
+    <div className="notes-menu-wrap" ref={wrapRef}>
+      <button className="refresh" onClick={() => setOpen((o) => !o)} title="Shared team notes — visible to everyone on the board">
+        Notes{notes.length > 0 ? ` (${notes.length})` : ''}
+      </button>
+      {open && createPortal(
+        <div
+          className="notes-pop"
+          ref={popRef}
+          style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+        >
+          <div className="notes-pop-head">
+            <span>Team notes</span>
+            <button className="notes-new-btn" onClick={openNew}>+ New note</button>
+          </div>
+          {notes.length > 0 && (
+            <div className="notes-pop-search-wrap">
+              <input
+                className="notes-pop-search"
+                type="text"
+                placeholder="Filter by name…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                autoFocus
+              />
+            </div>
+          )}
+          <div className="notes-pop-list">
+            {notes.length === 0 && (
+              <div className="notes-pop-empty">No notes yet — click "+ New note" to add one.</div>
+            )}
+            {notes.length > 0 && filtered.length === 0 && (
+              <div className="notes-pop-empty">No notes match "{query}".</div>
+            )}
+            {filtered.map((note) => {
+              const { title, preview } = noteTitleAndPreview(note.text);
+              return (
+                <button className="notes-pop-item" key={note.id} onClick={() => openExisting(note)}>
+                  <span className="notes-pop-title-row">
+                    <span className="notes-pop-title">{title}</span>
+                    {note.opportunitySpecific && note.opportunityName && (
+                      <span className="notes-pop-job-tag">{note.opportunityName}</span>
+                    )}
+                  </span>
+                  {preview && <span className="notes-pop-preview">{preview}</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+function NoteEditModal({ note, jobs, onSaved, onDeleted, onClose }) {
+  const [text, setText] = useState(note.text);
+  const [opportunityId, setOpportunityId] = useState(note.opportunityId || '');
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [err, setErr] = useState(null);
+
+  // Search set is the currently-loaded outstanding jobs. If this note is
+  // linked to a job that's fallen off that list (closed, etc.), append it
+  // synthetically from the note's own record so the picker still shows it.
+  const jobOptions = useMemo(() => {
+    const base = jobs.map((j) => [j.id, j.lid ? `${j.name} — LID ${j.lid}` : j.name]);
+    if (note.opportunityId && !base.some(([id]) => id === note.opportunityId)) {
+      base.push([note.opportunityId, note.opportunityName || 'Linked opportunity']);
+    }
+    return base;
+  }, [jobs, note.opportunityId, note.opportunityName]);
+
+  const save = async () => {
+    const trimmed = text.trim();
+    if (!trimmed) { setErr('Note text is required'); return; }
+    setSaving(true);
+    setErr(null);
+    try {
+      if (note.isNew) {
+        await api.addNote(trimmed, opportunityId || null);
+      } else {
+        await api.updateNote(note.id, { text: trimmed, opportunityId: opportunityId || null });
+      }
+      onSaved();
+    } catch (e) {
+      setErr(e.message);
+      setSaving(false);
+    }
+  };
+
+  const remove = async () => {
+    setDeleting(true);
+    setErr(null);
+    try {
+      await api.removeNote(note.id);
+      onDeleted();
+    } catch (e) {
+      setErr(e.message);
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal modal-notes" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">{note.isNew ? 'New note' : 'Edit note'}</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          <p className="tech-links-hint">Shared with everyone on the board. The first line becomes the title.</p>
+          <textarea
+            className="notes-textarea"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="Type a note or to-do…"
+            rows={16}
+            autoFocus
+          />
+          <div className="notes-job-link">
+            {/* Checkbox is purely derived from whether an opportunity is picked below — it's never toggled directly. */}
+            <label className="notes-job-check">
+              <input type="checkbox" checked={!!opportunityId} disabled readOnly />
+              <span>Belongs to a specific opportunity</span>
+            </label>
+            <SearchableSelect
+              value={opportunityId}
+              onChange={setOpportunityId}
+              options={jobOptions}
+              placeholder="Search for an opportunity…"
+            />
+          </div>
+          {err && <div className="notes-pop-err">{err}</div>}
+        </div>
+        <div className="modal-footer">
+          {!note.isNew && (
+            <button className="modal-cancel-btn" onClick={remove} disabled={deleting || saving}>
+              {deleting ? 'Deleting…' : 'Delete'}
+            </button>
+          )}
+          <div className="modal-footer-spacer" />
+          <button className="modal-cancel-btn" onClick={onClose} disabled={saving || deleting}>Cancel</button>
+          <button className="modal-save-btn" onClick={save} disabled={saving || deleting || !text.trim()}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
         </div>
       </div>
     </div>
@@ -1570,16 +1976,114 @@ function ManageTechsModal({ onClose, onChanged }) {
 const SearchableSelect = React.memo(function SearchableSelect({ value, onChange, options, placeholder }) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
-  const ref = useRef(null);
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, width: 260, maxHeight: 280 });
+  const [visibleCount, setVisibleCount] = useState(30);
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+  const sentinelRef = useRef(null);
+
+  // Portaled to <body> and fixed-positioned from the trigger's own coordinates,
+  // same fix as DatePicker uses -- otherwise an ancestor with overflow:auto
+  // (e.g. a scrollable modal body) clips the dropdown instead of letting it
+  // float above everything. Flips above the trigger (anchored with `bottom`
+  // instead of `top`) when there's more room there than below, and always
+  // caps `maxHeight` to whichever side it lands on so it never runs off the
+  // viewport regardless of how many options match.
+  useEffect(() => {
+    if (!open) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const POP_WIDTH = Math.max(rect.width, 340);
+    let left = rect.left;
+    if (left + POP_WIDTH > window.innerWidth - 8) left = window.innerWidth - POP_WIDTH - 8;
+    if (left < 8) left = 8;
+
+    const GAP = 4;
+    const EDGE = 8;
+    const CEILING = 280;
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, width: POP_WIDTH, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, width: POP_WIDTH, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
+  }, [open]);
 
   useEffect(() => {
-    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const handler = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      if (popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
+  useEffect(() => {
+    if (!open) return;
+    // Scrolling the dropdown's own option list also fires a window-level
+    // capture 'scroll' event -- ignore that one so scrolling through matches
+    // doesn't immediately close the dropdown. Only an ancestor (e.g. a
+    // scrollable list sitting next to this component, like ManageTechs' or
+    // Contacts') scrolling underneath it should close it -- the body-scroll
+    // lock below already rules out plain page scroll as a cause.
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  // Lock background scroll while open so the page/modal behind the dropdown
+  // can't scroll out from under it -- without this, a wheel scroll over a
+  // modal shorter than its own scroll area bubbles straight through to
+  // <body>, which both looks broken and trips the listener above.
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open]);
+
+  // Caps how many matches are mounted at once, reusing the Contacts-tab /
+  // outstanding-jobs-list infinite-scroll idiom (visibleCount + an
+  // IntersectionObserver on a .scroll-sentinel div), but at a smaller 30/30
+  // batch since this dropdown only ever shows ~4-5 rows before its own
+  // scrollbar kicks in. Resets to 30 both on a new search (fresh first batch,
+  // same as Contacts resetting on filter change) and whenever the dropdown
+  // re-opens, so scroll position from a previous open/close cycle doesn't
+  // linger -- one effect keyed on both covers both triggers.
+  useEffect(() => { setVisibleCount(30); }, [open, query]);
+
   const selectedLabel = options.find(([id]) => id === value)?.[1] ?? null;
-  const matches = options.filter(([, label]) => label.toLowerCase().includes(query.toLowerCase()));
+
+  // Memoized since scroll-driven visibleCount bumps now re-render this
+  // component independent of options/query -- without this, each of those
+  // re-renders would redo a full filter() pass for no reason (matters most
+  // for the opportunity-picker call sites, which can have dozens-to-hundreds
+  // of options).
+  const matches = useMemo(
+    () => options.filter(([, label]) => label.toLowerCase().includes(query.toLowerCase())),
+    [options, query]
+  );
+
+  // .ss-dropdown is its own small position:fixed scrollable box, not the
+  // viewport -- unlike the Jobs/Contacts lists' sentinels, which rely on the
+  // *default* IntersectionObserver root (the viewport) with a generous
+  // rootMargin. Defaulting `root` here would mean "within 200px of the
+  // browser window edge," unrelated to the sentinel's position inside this
+  // popup, so `root` must be the dropdown element itself.
+  useEffect(() => {
+    if (!open) return;
+    const el = sentinelRef.current;
+    const root = popRef.current;
+    if (!el || !root) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) setVisibleCount((c) => c + 30);
+    }, { root, rootMargin: '200px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [open, matches.length]);
 
   if (value) {
     return (
@@ -1590,7 +2094,7 @@ const SearchableSelect = React.memo(function SearchableSelect({ value, onChange,
   }
 
   return (
-    <div className="ss-wrap" ref={ref}>
+    <div className="ss-wrap" ref={wrapRef}>
       <input
         className="ss-input"
         type="text"
@@ -1599,16 +2103,22 @@ const SearchableSelect = React.memo(function SearchableSelect({ value, onChange,
         onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}
       />
-      {open && (
-        <div className="ss-dropdown">
+      {open && createPortal(
+        <div
+          className="ss-dropdown"
+          ref={popRef}
+          style={{ left: pos.left, width: pos.width, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+        >
           {matches.length === 0
             ? <div className="ss-empty">No matches</div>
-            : matches.map(([id, label]) => (
-                <button key={id} className="ss-option" onMouseDown={() => { onChange(id); setQuery(''); setOpen(false); }}>
+            : matches.slice(0, visibleCount).map(([id, label]) => (
+                <button key={id} className="ss-option" title={label} onMouseDown={() => { onChange(id); setQuery(''); setOpen(false); }}>
                   {label}
                 </button>
               ))}
-        </div>
+          {visibleCount < matches.length && <div ref={sentinelRef} className="scroll-sentinel" />}
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -1622,7 +2132,7 @@ const WEEKDAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 // strings ('YYYY-MM-DD' or '' for empty), same contract as a date input.
 const DatePicker = React.memo(function DatePicker({ value, onChange, placeholder = 'Select date', className = '', clearable = true }) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, maxHeight: undefined });
   const [viewMonth, setViewMonth] = useState(() => {
     const d = value ? new Date(value + 'T00:00:00') : new Date();
     return new Date(d.getFullYear(), d.getMonth(), 1);
@@ -1632,7 +2142,10 @@ const DatePicker = React.memo(function DatePicker({ value, onChange, placeholder
 
   // Popup is portaled to <body> and fixed-positioned from the trigger's own
   // coordinates — cards like .job use overflow:hidden for their rounded status
-  // stripe, which would otherwise clip an absolutely-positioned dropdown.
+  // stripe, which would otherwise clip an absolutely-positioned dropdown. Flips
+  // above the trigger (anchored with `bottom` instead of `top`) when there's
+  // more room there than below, and caps `maxHeight` to whichever side it
+  // lands on so the calendar grid never runs off the viewport.
   useEffect(() => {
     if (!open) return;
     const rect = wrapRef.current.getBoundingClientRect();
@@ -1640,7 +2153,18 @@ const DatePicker = React.memo(function DatePicker({ value, onChange, placeholder
     let left = rect.left;
     if (left + POP_WIDTH > window.innerWidth - 8) left = window.innerWidth - POP_WIDTH - 8;
     if (left < 8) left = 8;
-    setPos({ top: rect.bottom + 6, left });
+
+    const GAP = 6;
+    const EDGE = 8;
+    const CEILING = 420;
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
   }, [open]);
 
   useEffect(() => {
@@ -1654,13 +2178,23 @@ const DatePicker = React.memo(function DatePicker({ value, onChange, placeholder
   }, []);
 
   // Scrolling/resizing while open would leave the popup floating over the wrong
-  // spot (its position isn't re-measured live), so just close it instead.
+  // spot (its position isn't re-measured live), so just close it instead --
+  // except for scroll events from inside the popup's own scrollable area
+  // (only reachable in constrained viewports now that it can be height-capped).
   useEffect(() => {
     if (!open) return;
-    const close = () => setOpen(false);
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
     window.addEventListener('scroll', close, true);
     window.addEventListener('resize', close);
     return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  // Lock background scroll while open, same reasoning as SearchableSelect.
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
   }, [open]);
 
   // Jump the visible month back to the selected (or current) date every time it opens.
@@ -1693,7 +2227,11 @@ const DatePicker = React.memo(function DatePicker({ value, onChange, placeholder
         )}
       </button>
       {open && createPortal(
-        <div className="dp-pop" ref={popRef} style={{ top: pos.top, left: pos.left }}>
+        <div
+          className="dp-pop"
+          ref={popRef}
+          style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+        >
           <div className="dp-head">
             <button type="button" className="dp-nav" onClick={() => shiftMonth(-1)} aria-label="Previous month">‹</button>
             <span className="dp-month">{viewMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>
@@ -1718,6 +2256,181 @@ const DatePicker = React.memo(function DatePicker({ value, onChange, placeholder
           <div className="dp-foot">
             <button type="button" className="dp-today-btn" onClick={() => pick(new Date())}>Today</button>
             {clearable && <button type="button" className="dp-clear-btn" onClick={() => { onChange(''); setOpen(false); }}>Clear</button>}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+});
+
+// Every 30 minutes across the full 24-hour day for TimePicker's scrollable
+// preset list -- the directly-typeable text field above it already covers
+// any exact HH:MM, so this is just quick-scan convenience, not the only way
+// to enter a time.
+const TIME_SLOTS = Array.from({ length: 48 }, (_, i) => {
+  const h = Math.floor(i / 2);
+  const m = (i % 2) * 30;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+});
+
+const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+// Distinct start times other techs already have on a job, for TimePicker's
+// quick-pick chips when adding a NEW assignment -- groups existing sibling
+// assignments by startTime (skipping ones without one yet) and collects
+// every tech name sharing that time, sorted earliest-first.
+function deriveTimeQuickPicks(assignments) {
+  const byTime = new Map();
+  assignments.forEach((a) => {
+    if (!a.startTime) return;
+    if (!byTime.has(a.startTime)) byTime.set(a.startTime, []);
+    byTime.get(a.startTime).push(a.technicianName || 'Tech');
+  });
+  return [...byTime.entries()]
+    .sort(([t1], [t2]) => t1.localeCompare(t2))
+    .map(([time, techNames]) => ({ time, techNames }));
+}
+
+// Custom time dropdown replacing native <input type="time"> for job-assignment
+// (and time-off / schedule-request) start/end times -- modeled directly on
+// DatePicker (portaled position:fixed panel, same flip-above/clamp-height/
+// outside-click/scroll-close/body-lock handling) so it's visually and
+// behaviorally consistent with the DatePicker sitting right next to it in
+// every assignment row. Unlike a plain preset list, a directly-typeable
+// HH:MM field is included so the app doesn't lose the native input's full
+// 24-hour, any-minute range -- the TIME_SLOTS list below it is a quick-pick
+// convenience, not the only way in. `value` may be '' (some call sites have
+// no sensible default, e.g. an unset end time) -- `placeholder` is shown
+// instead of forcing a fallback value inside the component itself, since
+// each call site already knows whether it wants to default to something
+// like '07:00' or leave it genuinely blank. `onChange(hhmm)` fires only when
+// a selection is actually finalized (preset click, quick-pick click, or
+// Enter/blur on the text field with a valid value) -- never on every
+// keystroke. `quickPicks` (optional): [{ time: 'HH:MM', techNames: string[] }].
+const TimePicker = React.memo(function TimePicker({ value, onChange, quickPicks, disabled = false, title, className = '', placeholder = '--:--', clearable = false }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, maxHeight: undefined });
+  const [text, setText] = useState(value || '');
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const POP_WIDTH = 240;
+    let left = rect.left;
+    if (left + POP_WIDTH > window.innerWidth - 8) left = window.innerWidth - POP_WIDTH - 8;
+    if (left < 8) left = 8;
+
+    const GAP = 6;
+    const EDGE = 8;
+    const CEILING = 320;
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      if (popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open]);
+
+  // Re-sync the typeable text field to the live `value` every time the
+  // dropdown opens, so it never shows stale text left over from a previous
+  // open/close cycle or an external change to `value` while it was closed.
+  useEffect(() => {
+    if (!open) return;
+    setText(value || '');
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const commit = (v) => { onChange(v); setOpen(false); };
+
+  const commitTyped = () => {
+    const t = text.trim();
+    if (TIME_RE.test(t)) onChange(t);
+    else setText(value || '');
+  };
+
+  return (
+    <div className={`tp-wrap ${className}`} ref={wrapRef}>
+      <button type="button" className={className} onClick={() => setOpen((o) => !o)} disabled={disabled} title={title}>
+        {value || placeholder}
+        {clearable && value && (
+          <span className="tp-clear" onClick={(e) => { e.stopPropagation(); onChange(''); }} role="button" aria-label="Clear time">×</span>
+        )}
+      </button>
+      {open && createPortal(
+        <div
+          className="tp-pop"
+          ref={popRef}
+          style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+        >
+          <input
+            className="tp-text"
+            type="text"
+            inputMode="numeric"
+            placeholder="HH:MM"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onBlur={commitTyped}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { commitTyped(); setOpen(false); }
+              if (e.key === 'Escape') setOpen(false);
+            }}
+            autoFocus
+          />
+          {quickPicks?.length > 0 && (
+            <div className="tp-quick">
+              {quickPicks.map((q) => (
+                <button
+                  type="button"
+                  key={q.time}
+                  className="tp-chip"
+                  title={q.techNames.join(', ')}
+                  onMouseDown={(e) => { e.preventDefault(); commit(q.time); }}
+                >
+                  {q.time} · {q.techNames.join(', ')}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="tp-list">
+            {TIME_SLOTS.map((t) => (
+              <button
+                type="button"
+                key={t}
+                className={`tp-option ${t === value ? 'sel' : ''}`}
+                onMouseDown={(e) => { e.preventDefault(); commit(t); }}
+              >
+                {t}
+              </button>
+            ))}
           </div>
         </div>,
         document.body
@@ -2116,11 +2829,11 @@ function RequestRow({ req, jobs, onApprove, onCounter, onDeny }) {
             </label>
             <label className="req-field">
               <span className="req-field-label">Start</span>
-              <input className="req-time" type="time" value={counterStart} onChange={(e) => setCounterStart(e.target.value)} />
+              <TimePicker className="req-time" value={counterStart} onChange={setCounterStart} />
             </label>
             <label className="req-field">
               <span className="req-field-label">End</span>
-              <input className="req-time" type="time" value={counterEnd} onChange={(e) => setCounterEnd(e.target.value)} />
+              <TimePicker className="req-time" value={counterEnd} onChange={setCounterEnd} clearable />
             </label>
           </div>
           <label className="req-field req-field-wide">
@@ -2485,11 +3198,11 @@ function AddTimeOffModal({ techs, onClose, onCreated }) {
           <div className="req-panel-row">
             <label className="req-field">
               <span className="req-field-label">Start</span>
-              <input className="req-time" type="time" value={start} onChange={(e) => setStart(e.target.value)} />
+              <TimePicker className="req-time" value={start} onChange={setStart} />
             </label>
             <label className="req-field">
               <span className="req-field-label">End</span>
-              <input className="req-time" type="time" value={end} onChange={(e) => setEnd(e.target.value)} />
+              <TimePicker className="req-time" value={end} onChange={setEnd} />
             </label>
           </div>
         </div>
@@ -2550,11 +3263,11 @@ function TimeOffEditModal({ entry, onClose, onChanged }) {
           <div className="req-panel-row">
             <label className="req-field">
               <span className="req-field-label">Start</span>
-              <input className="req-time" type="time" value={start} onChange={(e) => setStart(e.target.value)} />
+              <TimePicker className="req-time" value={start} onChange={setStart} />
             </label>
             <label className="req-field">
               <span className="req-field-label">End</span>
-              <input className="req-time" type="time" value={end} onChange={(e) => setEnd(e.target.value)} />
+              <TimePicker className="req-time" value={end} onChange={setEnd} clearable />
             </label>
           </div>
         </div>

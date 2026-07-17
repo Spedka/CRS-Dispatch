@@ -12,7 +12,21 @@ import { notifyTv } from './notifyTv.js';
 
 const f = config.fields;
 const o = config.objects;
+const n = config.dispatchNote;
 const FS_TASK_TYPE = 'CCTV Job/Work Order'; // only task type currently synced;
+
+function shapeNote(r) {
+  return {
+    id: r.Id,
+    text: r[n.body] ?? '',
+    opportunityId: r[n.opportunity] ?? null,
+    opportunitySpecific: r[n.opportunitySpecific] === true,
+    opportunityName: r[n.opportunityRelationship]?.Name ?? null,
+    opportunityLid: r[n.opportunityRelationship]?.[f.oppLid] ?? null,
+    createdDate: r.CreatedDate ?? null,
+    lastModifiedDate: r.LastModifiedDate ?? null,
+  };
+}
 
 export function shapeJob(r) {
   const child = r[o.assignmentChildRelationship];
@@ -795,6 +809,74 @@ api.get('/contacts', async (c) => {
       accounts: accountsByContact.get(r.Id) ?? [],
       lastModifiedDate: r.LastModifiedDate ?? null,
     })));
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Shared team notes (Dispatch_Note__c) — no per-user auth in this app, so these
+// are visible/editable by anyone with board access. Optionally linked to an
+// Opportunity via the lookup; Opportunity_Specific__c mirrors whether that
+// lookup is set (the client drives both fields together, never independently).
+api.get('/notes', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const rows = await sf.query(
+      `SELECT Id, ${n.body}, ${n.opportunity}, ${n.opportunitySpecific},
+              ${n.opportunityRelationship}.Name, ${n.opportunityRelationship}.${f.oppLid},
+              CreatedDate, LastModifiedDate
+       FROM ${n.sobject} ORDER BY LastModifiedDate DESC`
+    );
+    return c.json(rows.map(shapeNote));
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+api.post('/notes', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const { text, opportunityId } = await c.req.json();
+    const body = (text ?? '').trim();
+    if (!body) return c.json({ error: 'Note text is required' }, 400);
+    const created = await sf.createRecord(n.sobject, {
+      [n.body]: body,
+      [n.opportunity]: opportunityId || null,
+      [n.opportunitySpecific]: !!opportunityId,
+    });
+    return c.json({ id: created.id });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+api.patch('/notes/:id', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const id = c.req.param('id');
+    const { text, opportunityId } = await c.req.json();
+    const fields = {};
+    if (text !== undefined) {
+      const body = text.trim();
+      if (!body) return c.json({ error: 'Note text is required' }, 400);
+      fields[n.body] = body;
+    }
+    if (opportunityId !== undefined) {
+      fields[n.opportunity] = opportunityId || null;
+      fields[n.opportunitySpecific] = !!opportunityId;
+    }
+    await sf.updateRecord(n.sobject, id, fields);
+    return c.json({ success: true });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+api.delete('/notes/:id', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    await sf.deleteRecord(n.sobject, c.req.param('id'));
+    return c.json({ success: true });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
