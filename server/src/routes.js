@@ -14,6 +14,7 @@ const f = config.fields;
 const o = config.objects;
 const n = config.dispatchNote;
 const acc = config.account;
+const inv = config.invoicing;
 const FS_TASK_TYPE = 'CCTV Job/Work Order'; // only task type currently synced;
 
 function shapeNote(r) {
@@ -793,13 +794,47 @@ api.get('/accounts', async (c) => {
 
     const contactNameById = new Map(contactRecords.map((r) => [r.Id, r.Name]));
 
-    // LID -> { unpaid: [{id,name}], readyToBill: [{id,name}] } — LID__c, not
-    // AccountId, is the join key between Opportunity and Account in this org.
+    // Invoice records live on Invoicing__c (Job__c looks up to the
+    // Opportunity) — a Job can have more than one, so keep the full set per
+    // Job (not just the latest) for the Overdue / Ready to Bill popups.
+    const billingJobIds = billingRecords.map((r) => r.Id);
+    const invoicesByOppId = new Map();
+    if (billingJobIds.length > 0) {
+      const idList = billingJobIds.map((id) => `'${id}'`).join(',');
+      const invoiceRecords = await sf.query(
+        `SELECT Id, Name, ${inv.job}, ${inv.date}, ${inv.amount}, ${inv.status}, ${inv.totalInvoice},
+                ${inv.nextExpectedPayment}, ${inv.arAccount}, ${inv.arNumber}, ${inv.percentOfProject}, ${inv.billingType}
+         FROM ${inv.sobject} WHERE ${inv.job} IN (${idList})`
+      );
+      for (const r of invoiceRecords) {
+        const jobId = r[inv.job];
+        const list = invoicesByOppId.get(jobId) ?? [];
+        list.push({
+          id: r.Id,
+          number: r.Name,
+          date: r[inv.date] ?? null,
+          amount: r[inv.amount] ?? null,
+          status: r[inv.status] ?? null,
+          totalInvoice: r[inv.totalInvoice] ?? null,
+          nextExpectedPaymentDate: r[inv.nextExpectedPayment] ?? null,
+          arAccount: r[inv.arAccount] ?? null,
+          arNumber: r[inv.arNumber] ?? null,
+          percentOfProject: r[inv.percentOfProject] ?? null,
+          billingType: r[inv.billingType] ?? null,
+        });
+        invoicesByOppId.set(jobId, list);
+      }
+      // Most recent first, so the newest invoice is what's seen without scrolling.
+      for (const list of invoicesByOppId.values()) list.sort((x, y) => (y.date ?? '').localeCompare(x.date ?? ''));
+    }
+
+    // LID -> { unpaid: [{id,name,invoices}], readyToBill: [...] } — LID__c,
+    // not AccountId, is the join key between Opportunity and Account in this org.
     const billingByLid = new Map();
     for (const r of billingRecords) {
       const lid = r[f.oppLid];
       const entry = billingByLid.get(lid) ?? { unpaid: [], readyToBill: [] };
-      const job = { id: r.Id, name: r[f.oppName] };
+      const job = { id: r.Id, name: r[f.oppName], invoices: invoicesByOppId.get(r.Id) ?? [] };
       if (r[f.oppStatus] === 'Waiting on Payment') entry.unpaid.push(job);
       else entry.readyToBill.push(job);
       billingByLid.set(lid, entry);

@@ -127,4 +127,19 @@ export const config = {
     propertyContact: 'Property_Contact_Name__c',  // lookup -> Contact
     parent: 'ParentId',                           // self-lookup, management company
   },
+
+  // ---- Invoicing__c (invoice records tied to a Job/Opportunity) ----
+  invoicing: {
+    sobject: 'Invoicing__c',
+    job: 'Job__c',            // lookup -> Opportunity
+    date: 'Invouce_Date__c',  // sic — typo'd API name in this org; label is "Invoice Date"
+    amount: 'Invoice_Amount__c',
+    status: 'Invoice_Status__c',
+    totalInvoice: 'Total_Invoice__c',
+    nextExpectedPayment: 'Next_Expected_Payment_Date__c',
+    arAccount: 'AR_Account__c',
+    arNumber: 'AR_Number__c',
+    percentOfProject: 'Percent_of_Project__c',
+    billingType: 'Billing_Type__c',
+  },
 };

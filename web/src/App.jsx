@@ -184,6 +184,11 @@ function fmtDateTime(iso) {
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
+function fmtCurrency(n) {
+  if (n == null) return null;
+  return n.toLocaleString(undefined, { style: 'currency', currency: 'USD' });
+}
+
 function fmtAgo(ms) {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `synced ${s}s ago`;
@@ -2901,11 +2906,11 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [lidFilter, setLidFilter] = useState('');
-  // Infinite scroll, same visibleCount + IntersectionObserver idiom as
-  // ContactsTab / the outstanding-jobs list — accounts are already fully
-  // fetched client-side, so this only caps how many rows are mounted.
-  const [visibleCount, setVisibleCount] = useState(50);
-  const accountsSentinelRef = useRef(null);
+  // Filters which management-company dropdowns show — unlike the other
+  // filters above, it never narrows the accounts *inside* a matching group.
+  const [companyFilter, setCompanyFilter] = useState('');
+  const [showOverdue, setShowOverdue] = useState(false);
+  const [showReadyToBill, setShowReadyToBill] = useState(false);
   const [expanded, setExpanded] = useState(new Set());
   const [changingContact, setChangingContact] = useState(null); // accountId being reassigned
   const [pickerQuery, setPickerQuery] = useState('');
@@ -2979,6 +2984,9 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
     return [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   }, [accounts]);
 
+  const overdueCount = useMemo(() => accounts.filter((a) => a.unpaidJobs?.length > 0).length, [accounts]);
+  const readyToBillCount = useMemo(() => accounts.filter((a) => a.readyToBillJobs?.length > 0).length, [accounts]);
+
   const filtered = useMemo(() => accounts.filter((a) => {
     if (typeFilter && a.type !== typeFilter) return false;
     if (lidFilter && String(a.lid) !== lidFilter) return false;
@@ -2986,10 +2994,60 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
       const haystack = [a.name, a.street, a.city, a.state, a.zip].filter(Boolean).join(' ').toLowerCase();
       if (!haystack.includes(search.trim().toLowerCase())) return false;
     }
+    // Both on = union (either condition qualifies), not intersection.
+    if (showOverdue || showReadyToBill) {
+      const matches = (showOverdue && a.unpaidJobs?.length > 0) || (showReadyToBill && a.readyToBillJobs?.length > 0);
+      if (!matches) return false;
+    }
     return true;
-  }), [accounts, search, typeFilter, lidFilter]);
+  }), [accounts, search, typeFilter, lidFilter, showOverdue, showReadyToBill]);
 
-  const hasFilter = search || typeFilter || lidFilter;
+  const hasFilter = search || typeFilter || lidFilter || companyFilter || showOverdue || showReadyToBill;
+
+  // A management company is just an Account like any other — it can carry
+  // its own unpaidJobs/readyToBillJobs (billed directly to the company, not
+  // to one of its buildings). Grouping purely by `a.parentId` would only
+  // ever place an account as a *child*; it'd never recognize that an
+  // account's own id might *be* a group key, burying the company's own
+  // billing data under "No Management Company." managementCompanyIds is
+  // built from the full `accounts` list (not `filtered`) purely to *identify*
+  // which accounts are companies — whether one actually shows as its own
+  // group's anchor still depends on it passing the current filter, same as
+  // any other account (an account that doesn't match the filter shouldn't
+  // linger at the top of a group just because one of its children did).
+  const managementCompanyIds = useMemo(() => {
+    const set = new Set();
+    accounts.forEach((a) => { if (a.parentId) set.add(a.parentId); });
+    return set;
+  }, [accounts]);
+
+  const groups = useMemo(() => {
+    const map = new Map(); // key -> { key, name, accounts: [] }
+    const ensure = (key, name) => {
+      if (!map.has(key)) map.set(key, { key, name, accounts: [] });
+      return map.get(key);
+    };
+
+    for (const a of filtered) {
+      // Not exclusive: an account can be both a child of its own parent AND
+      // the management company anchoring its own children's group.
+      if (managementCompanyIds.has(a.id)) ensure(a.id, a.name).accounts.push({ ...a, __isManagementCompany: true });
+      if (a.parentId) ensure(a.parentId, a.parentName).accounts.push(a);
+      else if (!managementCompanyIds.has(a.id)) ensure('UNASSIGNED', 'No Management Company').accounts.push(a);
+    }
+
+    const list = [...map.values()];
+    list.sort((x, y) => x.key === 'UNASSIGNED' ? 1 : y.key === 'UNASSIGNED' ? -1 : x.name.localeCompare(y.name));
+    return list;
+  }, [filtered, managementCompanyIds]);
+
+  // Picks which dropdowns show, at the group level only — a matching
+  // group's accounts are never narrowed by this, unlike the filters above.
+  const visibleGroups = useMemo(() => {
+    if (!companyFilter.trim()) return groups;
+    const q = companyFilter.trim().toLowerCase();
+    return groups.filter((g) => g.name.toLowerCase().includes(q));
+  }, [groups, companyFilter]);
 
   useEffect(() => {
     if (!viewingContactId) return;
@@ -3004,22 +3062,6 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [viewingBilling]);
-
-  // A new search/filter is a new list — start from the top, same as the
-  // jobs list and ContactsTab do.
-  useEffect(() => {
-    setVisibleCount(50);
-  }, [search, typeFilter, lidFilter]);
-
-  useEffect(() => {
-    const el = accountsSentinelRef.current;
-    if (!el) return;
-    const io = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting) setVisibleCount((c) => c + 50);
-    }, { rootMargin: '400px' });
-    io.observe(el);
-    return () => io.disconnect();
-  }, [filtered.length]);
 
   const addressLine = (a) => [a.street, [a.city, a.state].filter(Boolean).join(', '), a.zip].filter(Boolean).join(' ') || null;
 
@@ -3047,6 +3089,113 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
       </span>
     );
   };
+
+  const renderAccountRow = (a) => (
+    <React.Fragment key={a.id}>
+      <tr>
+        <td>
+          <span className="contact-name">{a.name}</span>
+          {a.__isManagementCompany && <span className="mgmt-co-tag">Management Co.</span>}
+          <div>
+            <button className="buildings-toggle" onClick={() => toggle(a.id)}>
+              <span className="buildings-chevron">{expanded.has(a.id) ? '▾' : '▸'}</span>
+              <span>Account Details</span>
+            </button>
+          </div>
+        </td>
+        <td>{a.type ?? <span className="na">—</span>}</td>
+        <td>{a.lid ? <span className="lidtag">LID {a.lid}</span> : <span className="na">—</span>}</td>
+        <td>{addressLine(a) ?? <span className="na">—</span>}</td>
+        <td>
+          {editing?.accountId === a.id && editing?.field === 'phone'
+            ? <div className="contact-edit-row">
+                <input className="contact-edit-input" autoFocus type="tel" value={editing.value}
+                  onChange={(e) => setEditing((s) => ({ ...s, value: formatPhone(e.target.value) }))}
+                  onKeyDown={onEditKey} />
+                <button className="contact-edit-save" onClick={commitEdit}>Save</button>
+                <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
+              </div>
+            : <span className="contact-editable" onClick={() => startEdit(a.id, 'phone', formatPhone(a.phone))}>
+                {a.phone ? <a href={`tel:${a.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(a.phone)}</a> : <span className="na">—</span>}
+              </span>}
+        </td>
+        <td>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+            {a.unpaidJobs?.length > 0 && (
+              <button className="badge emergency badge-btn" onClick={() => setViewingBilling({ accountId: a.id, kind: 'unpaid' })}>
+                Overdue ({a.unpaidJobs.length})
+              </button>
+            )}
+            {a.readyToBillJobs?.length > 0 && (
+              <button className="badge dispatched badge-btn" onClick={() => setViewingBilling({ accountId: a.id, kind: 'readyToBill' })}>
+                Ready to Bill ({a.readyToBillJobs.length})
+              </button>
+            )}
+          </div>
+        </td>
+      </tr>
+      {expanded.has(a.id) && (
+        <tr className="contact-building-row">
+          <td colSpan={6}>
+            <div className="contact-building-meta" style={{ flexWrap: 'wrap', gap: '1.5rem' }}>
+              <span>Street: {editableCell(a, 'street', a.street)}</span>
+              <span>City: {editableCell(a, 'city', a.city)}</span>
+              <span>State: {editableCell(a, 'state', a.state)}</span>
+              <span>Zip: {editableCell(a, 'zip', a.zip)}</span>
+              <span>Website: {editableCell(a, 'website', a.website)}</span>
+              <span>Industry: {editableCell(a, 'industry', a.industry)}</span>
+              <span>Management company: {a.parentName ?? <span className="na">—</span>}</span>
+              <span>
+                Property contact: {a.propertyContactName
+                  ? <button className="linklike" onClick={() => setViewingContactId(a.propertyContactId)}>{a.propertyContactName}</button>
+                  : <span className="na">—</span>}{' '}
+                <button
+                  className="change-contact-btn"
+                  onClick={() => {
+                    setChangingContact(changingContact === a.id ? null : a.id);
+                    setPickerQuery('');
+                  }}
+                >
+                  Change contact
+                </button>
+              </span>
+            </div>
+            {changingContact === a.id && (
+              <div className="inline-contact-picker">
+                <input
+                  className="icp-input"
+                  type="text"
+                  placeholder="Search contacts…"
+                  value={pickerQuery}
+                  onChange={(e) => setPickerQuery(e.target.value)}
+                  autoFocus
+                />
+                <div className="icp-list">
+                  {contactOptions
+                    .filter(([, name]) => !pickerQuery.trim() || fuzzyNameMatch(pickerQuery, name))
+                    .slice(0, 8)
+                    .map(([id, name, company]) => (
+                      <button
+                        key={id}
+                        className="icp-option"
+                        disabled={saving}
+                        onClick={() => handleChangeContact(a.id, id)}
+                      >
+                        <span className="icp-name">{name}</span>
+                        {company && <span className="icp-company">{company}</span>}
+                      </button>
+                    ))}
+                </div>
+                <button className="icp-cancel" onClick={() => { setChangingContact(null); setPickerQuery(''); }}>
+                  Cancel
+                </button>
+              </div>
+            )}
+          </td>
+        </tr>
+      )}
+    </React.Fragment>
+  );
 
   return (
     <section>
@@ -3077,8 +3226,24 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
           options={lids.map((l) => [l, `LID ${l}`])}
           placeholder="LID…"
         />
+        <div className="searchbox" style={{ marginBottom: 0 }}>
+          <span className="si">⌕</span>
+          <input
+            className="searchinput"
+            type="text"
+            placeholder="Search by management company…"
+            value={companyFilter}
+            onChange={(e) => setCompanyFilter(e.target.value)}
+          />
+        </div>
+        <button className={`chip ${showOverdue ? 'on' : ''}`} onClick={() => setShowOverdue((v) => !v)}>
+          Overdue<span className="ct">{overdueCount}</span>
+        </button>
+        <button className={`chip ${showReadyToBill ? 'on' : ''}`} onClick={() => setShowReadyToBill((v) => !v)}>
+          Ready to Bill<span className="ct">{readyToBillCount}</span>
+        </button>
         {hasFilter && (
-          <button className="clearrange" onClick={() => { setSearch(''); setTypeFilter(''); setLidFilter(''); }}>
+          <button className="clearrange" onClick={() => { setSearch(''); setTypeFilter(''); setLidFilter(''); setCompanyFilter(''); setShowOverdue(false); setShowReadyToBill(false); }}>
             Clear filters
           </button>
         )}
@@ -3109,128 +3274,14 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
       {!loading && filtered.length === 0 && (
         <div className="empty">{hasFilter ? 'No accounts match those filters.' : 'No accounts found.'}</div>
       )}
-      {!loading && filtered.length > 0 && (
-        <div className="contacts-wrap">
-          <table className="contacts-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>LID</th>
-                <th>Address</th>
-                <th>Phone</th>
-                <th>Billing</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.slice(0, visibleCount).map((a) => (
-                <React.Fragment key={a.id}>
-                  <tr>
-                    <td>
-                      <span className="contact-name">{a.name}</span>
-                      <div>
-                        <button className="buildings-toggle" onClick={() => toggle(a.id)}>
-                          <span className="buildings-chevron">{expanded.has(a.id) ? '▾' : '▸'}</span>
-                          <span>Details</span>
-                        </button>
-                      </div>
-                    </td>
-                    <td>{a.type ?? <span className="na">—</span>}</td>
-                    <td>{a.lid ? <span className="lidtag">LID {a.lid}</span> : <span className="na">—</span>}</td>
-                    <td>{addressLine(a) ?? <span className="na">—</span>}</td>
-                    <td>
-                      {editing?.accountId === a.id && editing?.field === 'phone'
-                        ? <div className="contact-edit-row">
-                            <input className="contact-edit-input" autoFocus type="tel" value={editing.value}
-                              onChange={(e) => setEditing((s) => ({ ...s, value: formatPhone(e.target.value) }))}
-                              onKeyDown={onEditKey} />
-                            <button className="contact-edit-save" onClick={commitEdit}>Save</button>
-                            <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
-                          </div>
-                        : <span className="contact-editable" onClick={() => startEdit(a.id, 'phone', formatPhone(a.phone))}>
-                            {a.phone ? <a href={`tel:${a.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(a.phone)}</a> : <span className="na">—</span>}
-                          </span>}
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
-                        {a.unpaidJobs?.length > 0 && (
-                          <button className="badge emergency badge-btn" onClick={() => setViewingBilling({ accountId: a.id, kind: 'unpaid' })}>
-                            Overdue ({a.unpaidJobs.length})
-                          </button>
-                        )}
-                        {a.readyToBillJobs?.length > 0 && (
-                          <button className="badge dispatched badge-btn" onClick={() => setViewingBilling({ accountId: a.id, kind: 'readyToBill' })}>
-                            Ready to Bill ({a.readyToBillJobs.length})
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                  {expanded.has(a.id) && (
-                    <tr className="contact-building-row">
-                      <td colSpan={6}>
-                        <div className="contact-building-meta" style={{ flexWrap: 'wrap', gap: '1.5rem' }}>
-                          <span>Street: {editableCell(a, 'street', a.street)}</span>
-                          <span>City: {editableCell(a, 'city', a.city)}</span>
-                          <span>State: {editableCell(a, 'state', a.state)}</span>
-                          <span>Zip: {editableCell(a, 'zip', a.zip)}</span>
-                          <span>Website: {editableCell(a, 'website', a.website)}</span>
-                          <span>Industry: {editableCell(a, 'industry', a.industry)}</span>
-                          <span>Management company: {a.parentName ?? <span className="na">—</span>}</span>
-                          <span>
-                            Property contact: {a.propertyContactName
-                              ? <button className="linklike" onClick={() => setViewingContactId(a.propertyContactId)}>{a.propertyContactName}</button>
-                              : <span className="na">—</span>}{' '}
-                            <button
-                              className="change-contact-btn"
-                              onClick={() => {
-                                setChangingContact(changingContact === a.id ? null : a.id);
-                                setPickerQuery('');
-                              }}
-                            >
-                              Change contact
-                            </button>
-                          </span>
-                        </div>
-                        {changingContact === a.id && (
-                          <div className="inline-contact-picker">
-                            <input
-                              className="icp-input"
-                              type="text"
-                              placeholder="Search contacts…"
-                              value={pickerQuery}
-                              onChange={(e) => setPickerQuery(e.target.value)}
-                              autoFocus
-                            />
-                            <div className="icp-list">
-                              {contactOptions
-                                .filter(([, name]) => !pickerQuery.trim() || fuzzyNameMatch(pickerQuery, name))
-                                .slice(0, 8)
-                                .map(([id, name, company]) => (
-                                  <button
-                                    key={id}
-                                    className="icp-option"
-                                    disabled={saving}
-                                    onClick={() => handleChangeContact(a.id, id)}
-                                  >
-                                    <span className="icp-name">{name}</span>
-                                    {company && <span className="icp-company">{company}</span>}
-                                  </button>
-                                ))}
-                            </div>
-                            <button className="icp-cancel" onClick={() => { setChangingContact(null); setPickerQuery(''); }}>
-                              Cancel
-                            </button>
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
-          {visibleCount < filtered.length && <div ref={accountsSentinelRef} className="scroll-sentinel" />}
+      {!loading && filtered.length > 0 && visibleGroups.length === 0 && (
+        <div className="empty">No management companies match “{companyFilter}”.</div>
+      )}
+      {!loading && filtered.length > 0 && visibleGroups.length > 0 && (
+        <div className="mgmt-groups">
+          {visibleGroups.map((g) => (
+            <AccountGroupSection key={g.key} name={g.name} accounts={g.accounts} renderRow={renderAccountRow} />
+          ))}
         </div>
       )}
       {viewingContact && (
@@ -3251,24 +3302,128 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   );
 }
 
+function AccountGroupSection({ name, accounts, renderRow }) {
+  const [open, setOpen] = useState(false);
+  // Own visibleCount/sentinel, scoped to this group only — "No Management
+  // Company" alone can hold thousands of accounts, while most groups are
+  // small enough to just render in full once opened.
+  const [visibleCount, setVisibleCount] = useState(50);
+  const sentinelRef = useRef(null);
+
+  // Total overdue/ready-to-bill *invoices* across the group, not how many
+  // accounts have at least one — a single account with 2 overdue invoices
+  // should read as 2, not 1.
+  const sumInvoices = (jobs) => jobs?.reduce((s, j) => s + (j.invoices?.length || 0), 0) || 0;
+  const overdueCount = accounts.reduce((s, a) => s + sumInvoices(a.unpaidJobs), 0);
+  const readyToBillCount = accounts.reduce((s, a) => s + sumInvoices(a.readyToBillJobs), 0);
+
+  useEffect(() => {
+    if (!open) return;
+    const el = sentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) setVisibleCount((c) => c + 50);
+    }, { rootMargin: '400px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [open, accounts.length]);
+
+  return (
+    <div className="mgmt-group">
+      <button className="mgmt-group-header" onClick={() => setOpen((o) => !o)}>
+        <span className="mgmt-group-chevron">{open ? '▾' : '▸'}</span>
+        <span className="mgmt-group-name">{name}</span>
+        <span className="mgmt-group-count">{accounts.length} {accounts.length === 1 ? 'account' : 'accounts'}</span>
+        {overdueCount > 0 && <span className="badge emergency">Overdue {overdueCount}</span>}
+        {readyToBillCount > 0 && <span className="badge dispatched">Ready to Bill {readyToBillCount}</span>}
+      </button>
+      {open && (
+        <div className="contacts-wrap">
+          <table className="contacts-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>LID</th>
+                <th>Address</th>
+                <th>Phone</th>
+                <th>Billing</th>
+              </tr>
+            </thead>
+            <tbody>
+              {accounts.slice(0, visibleCount).map(renderRow)}
+            </tbody>
+          </table>
+          {visibleCount < accounts.length && <div ref={sentinelRef} className="scroll-sentinel" />}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BillingJobsModal({ account, kind, onClose }) {
   const jobs = kind === 'unpaid' ? account.unpaidJobs : account.readyToBillJobs;
   const title = kind === 'unpaid' ? 'Overdue' : 'Ready to Bill';
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <div className="modal-header">
           <div className="modal-title-row"><span className="jname">{title} — {account.name}</span></div>
           <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
         </div>
         <div className="modal-body">
-          {jobs.map((j) => <div key={j.id} className="contact-title">{j.name}</div>)}
+          {jobs.map((j) => <JobInvoiceRow key={j.id} job={j} />)}
         </div>
         <div className="modal-footer">
           <div className="modal-footer-spacer" />
           <button className="modal-cancel-btn" onClick={onClose}>Close</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function JobInvoiceRow({ job }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mgmt-group">
+      <button className="mgmt-group-header" onClick={() => setOpen((o) => !o)}>
+        <span className="mgmt-group-chevron">{open ? '▾' : '▸'}</span>
+        <span className="mgmt-group-name" style={{ fontWeight: 400 }}>{job.name}</span>
+        <span className="mgmt-group-count">{job.invoices.length} {job.invoices.length === 1 ? 'invoice' : 'invoices'}</span>
+      </button>
+      {open && (
+        <div style={{ padding: '10px 14px' }}>
+          {job.invoices.length === 0
+            ? <div className="na">No invoice on file</div>
+            : job.invoices.map((inv) => <InvoiceDetail key={inv.id} invoice={inv} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InvoiceDetail({ invoice }) {
+  const fields = [
+    ['Invoice #', invoice.number],
+    ['Invoice Date', fmtDate(invoice.date)],
+    ['Amount', fmtCurrency(invoice.amount)],
+    ['Status', invoice.status],
+    ['Total Invoice', fmtCurrency(invoice.totalInvoice)],
+    ['Next Expected Payment', fmtDate(invoice.nextExpectedPaymentDate)],
+    ['AR Account', invoice.arAccount],
+    ['AR Number', invoice.arNumber],
+    ['% of Project', invoice.percentOfProject != null ? `${invoice.percentOfProject}%` : null],
+    ['Billing Type', invoice.billingType],
+  ];
+  return (
+    <div className="invoice-detail">
+      {fields.map(([label, value]) => (
+        <div key={label} className="invoice-detail-row">
+          <span className="invoice-detail-label">{label}</span>
+          <span className="invoice-detail-value">{value ?? <span className="na">—</span>}</span>
+        </div>
+      ))}
     </div>
   );
 }

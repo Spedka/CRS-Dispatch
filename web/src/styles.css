@@ -439,6 +439,21 @@ td.open{background:var(--open-bg);}
 .icp-cancel{font:inherit;font-size:12px;font-weight:500;color:var(--ink-faint);background:none;border:none;cursor:pointer;text-align:left;padding:2px 4px;text-decoration:underline;text-underline-offset:2px;}
 .icp-cancel:hover{color:var(--ink);}
 
+/* Accounts tab — management-company groups + invoice detail popup */
+.mgmt-groups{display:flex;flex-direction:column;gap:8px;}
+.mgmt-group{border:1px solid var(--line-strong);border-radius:10px;overflow:hidden;}
+.mgmt-group-header{width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface);border:none;cursor:pointer;font:inherit;text-align:left;}
+.mgmt-group-header:hover{background:var(--surface-2);}
+.mgmt-group-chevron{font-size:10px;color:var(--ink-faint);width:10px;flex-shrink:0;}
+.mgmt-group-name{font-weight:600;color:var(--ink);flex:1;}
+.mgmt-group-count{font-size:12px;color:var(--ink-faint);white-space:nowrap;}
+.mgmt-co-tag{font-size:10.5px;font-weight:600;color:var(--ink-faint);background:var(--surface-2);border-radius:5px;padding:1px 6px;margin-left:8px;text-transform:uppercase;letter-spacing:.02em;}
+.invoice-detail{border-top:1px solid var(--line);padding:8px 0;display:grid;grid-template-columns:repeat(2,1fr);gap:4px 16px;}
+.invoice-detail:first-child{border-top:none;}
+.invoice-detail-row{display:flex;justify-content:space-between;gap:8px;font-size:13px;}
+.invoice-detail-label{color:var(--ink-faint);}
+.invoice-detail-value{color:var(--ink);font-weight:500;text-align:right;}
+
 /* Schedule requests tab */
 .req-list{display:flex;flex-direction:column;gap:10px;}
 .req-row{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 16px;display:flex;flex-direction:column;gap:10px;transition:box-shadow .15s,border-color .15s;}
