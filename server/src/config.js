@@ -108,4 +108,23 @@ export const config = {
     // the UI (see NoteEditModal in App.jsx), never toggled independently.
     opportunitySpecific: 'Opportunity_Specific__c',
   },
+
+  // ---- Account (the building/property Accounts tab reads/writes) ----
+  account: {
+    sobject: 'Account',
+    lid: 'LID__c',
+    type: 'Type',
+    industry: 'Industry',
+    phone: 'Phone',
+    website: 'Website',
+    // Billing* is the actual site/street address in this org (labeled just
+    // "Street"/"City"/etc. in Setup) — Shipping* is labeled "Mailing Street"
+    // and holds a c/o-style mailing address, not the building's address.
+    street: 'BillingStreet',
+    city: 'BillingCity',
+    state: 'BillingState',
+    zip: 'BillingPostalCode',
+    propertyContact: 'Property_Contact_Name__c',  // lookup -> Contact
+    parent: 'ParentId',                           // self-lookup, management company
+  },
 };

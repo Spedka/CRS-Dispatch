@@ -87,6 +87,15 @@ export const api = {
       body: JSON.stringify(fields),
     }).then(j),
 
+  getAccounts: () => fetch('/api/accounts').then(j),
+
+  updateAccount: (accountId, fields) =>
+    fetch(`/api/accounts/${accountId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+    }).then(j),
+
   getScheduleRequests: (opts) =>
     fetch(`/api/schedule-requests${opts?.resolved ? '?resolved=1' : ''}`).then(j),
 

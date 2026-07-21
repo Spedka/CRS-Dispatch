@@ -424,6 +424,9 @@ export default function App() {
   const [contacts, setContacts] = useState([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsLoaded, setContactsLoaded] = useState(false);
+  const [accounts, setAccounts] = useState([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountsLoaded, setAccountsLoaded] = useState(false);
   const [scheduleRequests, setScheduleRequests] = useState([]);
   const [requestsLoading, setRequestsLoading] = useState(false);
   // Resolved (Approved/Denied/Withdrawn) history -- deliberately not part of
@@ -561,7 +564,9 @@ export default function App() {
   }, [selectedJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (tab !== 'contacts' || contactsLoaded) return;
+    // Also loaded for the Accounts tab, not just Contacts — its "Change
+    // contact" picker needs the same contact directory ContactsTab uses.
+    if ((tab !== 'contacts' && tab !== 'accounts') || contactsLoaded) return;
     setContactsLoading(true);
     api.getContacts()
       .then((c) => { setContacts(c); setContactsLoaded(true); })
@@ -572,6 +577,20 @@ export default function App() {
   const updateContact = useCallback(async (contactId, fields) => {
     setContacts((prev) => prev.map((c) => c.id === contactId ? { ...c, ...fields } : c));
     await api.updateContact(contactId, fields);
+  }, []);
+
+  useEffect(() => {
+    if (tab !== 'accounts' || accountsLoaded) return;
+    setAccountsLoading(true);
+    api.getAccounts()
+      .then((a) => { setAccounts(a); setAccountsLoaded(true); })
+      .catch((e) => flash(`Accounts error: ${e.message}`))
+      .finally(() => setAccountsLoading(false));
+  }, [tab, accountsLoaded]);
+
+  const updateAccount = useCallback(async (accountId, fields) => {
+    setAccounts((prev) => prev.map((a) => a.id === accountId ? { ...a, ...fields } : a));
+    await api.updateAccount(accountId, fields);
   }, []);
 
   // Re-fetched on every visit (not cached like contacts) — a stale queue defeats
@@ -1023,6 +1042,9 @@ export default function App() {
               loadRequests();
               if (previousRequestsLoaded) loadPreviousRequests();
             }
+            if (tab === 'accounts') {
+              api.getAccounts().then(setAccounts).catch((e) => flash(`Accounts error: ${e.message}`));
+            }
           }}
           title="Reload from Salesforce"
         >↻ Refresh</button>
@@ -1038,6 +1060,7 @@ export default function App() {
         <button className={`tab ${tab === 'schedule' ? 'active' : ''}`} onClick={() => setTab('schedule')}>Tech Schedule</button>
         <button className={`tab ${tab === 'requests' ? 'active' : ''}`} onClick={() => setTab('requests')}>Requests</button>
         <button className={`tab ${tab === 'contacts' ? 'active' : ''}`} onClick={() => setTab('contacts')}>Contacts</button>
+        <button className={`tab ${tab === 'accounts' ? 'active' : ''}`} onClick={() => setTab('accounts')}>Accounts</button>
       </nav>
 
       <main>
@@ -1233,6 +1256,16 @@ export default function App() {
             contacts={contacts}
             loading={contactsLoading}
             onRefresh={async () => { const c = await api.getContacts(); setContacts(c); }}
+            onUpdateContact={updateContact}
+          />
+        )}
+        {tab === 'accounts' && (
+          <AccountsTab
+            accounts={accounts}
+            loading={accountsLoading}
+            contacts={contacts}
+            onRefresh={async () => { const a = await api.getAccounts(); setAccounts(a); }}
+            onUpdateAccount={updateAccount}
             onUpdateContact={updateContact}
           />
         )}
@@ -2861,6 +2894,475 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
         </div>
       )}
     </section>
+  );
+}
+
+function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, onUpdateContact }) {
+  const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [lidFilter, setLidFilter] = useState('');
+  // Infinite scroll, same visibleCount + IntersectionObserver idiom as
+  // ContactsTab / the outstanding-jobs list — accounts are already fully
+  // fetched client-side, so this only caps how many rows are mounted.
+  const [visibleCount, setVisibleCount] = useState(50);
+  const accountsSentinelRef = useRef(null);
+  const [expanded, setExpanded] = useState(new Set());
+  const [changingContact, setChangingContact] = useState(null); // accountId being reassigned
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(null); // { accountId, field, value }
+  // Id only, not a snapshot — so if the contact is edited (in this popup or
+  // elsewhere) while it's open, the popup re-derives the latest record from
+  // `contactsById` on every render instead of showing stale data.
+  const [viewingContactId, setViewingContactId] = useState(null);
+  // { accountId, kind: 'unpaid' | 'readyToBill' } | null — id-based for the
+  // same reason as viewingContactId above.
+  const [viewingBilling, setViewingBilling] = useState(null);
+
+  const startEdit = (accountId, field, value) => setEditing({ accountId, field, value: value ?? '' });
+
+  const commitEdit = async () => {
+    if (!editing) return;
+    const { accountId, field, value } = editing;
+    setEditing(null);
+    try {
+      await onUpdateAccount(accountId, { [field]: value });
+    } catch (e) {
+      alert(`Could not save: ${e.message}`);
+    }
+  };
+
+  const onEditKey = (e) => {
+    if (e.key === 'Enter') commitEdit();
+    if (e.key === 'Escape') setEditing(null);
+  };
+
+  const toggle = (id) => setExpanded((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const contactOptions = useMemo(() =>
+    contacts
+      .map((c) => [c.id, c.name, c.company])
+      .sort((a, b) => a[1].localeCompare(b[1]))
+  , [contacts]);
+
+  const handleChangeContact = async (accountId, contactId) => {
+    setSaving(true);
+    try {
+      await api.updateAccountContact(accountId, contactId);
+      setChangingContact(null);
+      setPickerQuery('');
+      await onRefresh();
+    } catch (e) {
+      alert(`Failed to update contact: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const contactsById = useMemo(() => new Map(contacts.map((c) => [c.id, c])), [contacts]);
+  const viewingContact = viewingContactId ? contactsById.get(viewingContactId) ?? null : null;
+  const viewingBillingAccount = viewingBilling ? accounts.find((a) => a.id === viewingBilling.accountId) ?? null : null;
+
+  const types = useMemo(() => {
+    const set = new Set();
+    accounts.forEach((a) => { if (a.type) set.add(a.type); });
+    return [...set].sort((x, y) => x.localeCompare(y));
+  }, [accounts]);
+
+  const lids = useMemo(() => {
+    const set = new Set();
+    accounts.forEach((a) => { if (a.lid != null && a.lid !== '') set.add(String(a.lid)); });
+    return [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [accounts]);
+
+  const filtered = useMemo(() => accounts.filter((a) => {
+    if (typeFilter && a.type !== typeFilter) return false;
+    if (lidFilter && String(a.lid) !== lidFilter) return false;
+    if (search.trim()) {
+      const haystack = [a.name, a.street, a.city, a.state, a.zip].filter(Boolean).join(' ').toLowerCase();
+      if (!haystack.includes(search.trim().toLowerCase())) return false;
+    }
+    return true;
+  }), [accounts, search, typeFilter, lidFilter]);
+
+  const hasFilter = search || typeFilter || lidFilter;
+
+  useEffect(() => {
+    if (!viewingContactId) return;
+    const onKey = (e) => { if (e.key === 'Escape') setViewingContactId(null); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [viewingContactId]);
+
+  useEffect(() => {
+    if (!viewingBilling) return;
+    const onKey = (e) => { if (e.key === 'Escape') setViewingBilling(null); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [viewingBilling]);
+
+  // A new search/filter is a new list — start from the top, same as the
+  // jobs list and ContactsTab do.
+  useEffect(() => {
+    setVisibleCount(50);
+  }, [search, typeFilter, lidFilter]);
+
+  useEffect(() => {
+    const el = accountsSentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) setVisibleCount((c) => c + 50);
+    }, { rootMargin: '400px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [filtered.length]);
+
+  const addressLine = (a) => [a.street, [a.city, a.state].filter(Boolean).join(', '), a.zip].filter(Boolean).join(' ') || null;
+
+  const editableCell = (a, field, value, opts) => {
+    const isEditing = editing?.accountId === a.id && editing?.field === field;
+    if (isEditing) {
+      return (
+        <div className="contact-edit-row">
+          <input
+            className="contact-edit-input"
+            autoFocus
+            type={opts?.type ?? 'text'}
+            value={editing.value}
+            onChange={(e) => setEditing((s) => ({ ...s, value: opts?.format ? opts.format(e.target.value) : e.target.value }))}
+            onKeyDown={onEditKey}
+          />
+          <button className="contact-edit-save" onClick={commitEdit}>Save</button>
+          <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
+        </div>
+      );
+    }
+    return (
+      <span className="contact-editable" onClick={() => startEdit(a.id, field, value)}>
+        {value ? value : <span className="na">—</span>}
+      </span>
+    );
+  };
+
+  return (
+    <section>
+      <div className="view-head">
+        <div><h2>Accounts</h2><p>{loading ? 'Loading…' : `${accounts.length} accounts from Salesforce`}</p></div>
+      </div>
+
+      <div className="contacts-toolbar">
+        <div className="searchbox" style={{ marginBottom: 0 }}>
+          <span className="si">⌕</span>
+          <input
+            className="searchinput"
+            type="text"
+            placeholder="Search by name or address…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <SearchableSelect
+          value={typeFilter}
+          onChange={setTypeFilter}
+          options={types.map((t) => [t, t])}
+          placeholder="Type…"
+        />
+        <SearchableSelect
+          value={lidFilter}
+          onChange={setLidFilter}
+          options={lids.map((l) => [l, `LID ${l}`])}
+          placeholder="LID…"
+        />
+        {hasFilter && (
+          <button className="clearrange" onClick={() => { setSearch(''); setTypeFilter(''); setLidFilter(''); }}>
+            Clear filters
+          </button>
+        )}
+        {!loading && <span className="contact-count">{filtered.length} shown</span>}
+      </div>
+
+      {loading && (
+        <div className="contacts-wrap">
+          <table className="contacts-table">
+            <thead>
+              <tr><th>Name</th><th>Type</th><th>LID</th><th>Address</th><th>Phone</th><th>Billing</th></tr>
+            </thead>
+            <tbody>
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <tr key={i}>
+                  <td><span className="skel-block" style={{ width: 120, height: 13, display: 'inline-block' }} /></td>
+                  <td><span className="skel-block" style={{ width: 80, height: 13, display: 'inline-block' }} /></td>
+                  <td><span className="skel-block" style={{ width: 50, height: 13, display: 'inline-block' }} /></td>
+                  <td><span className="skel-block" style={{ width: 160, height: 13, display: 'inline-block' }} /></td>
+                  <td><span className="skel-block" style={{ width: 90, height: 13, display: 'inline-block' }} /></td>
+                  <td><span className="skel-block" style={{ width: 70, height: 13, display: 'inline-block' }} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!loading && filtered.length === 0 && (
+        <div className="empty">{hasFilter ? 'No accounts match those filters.' : 'No accounts found.'}</div>
+      )}
+      {!loading && filtered.length > 0 && (
+        <div className="contacts-wrap">
+          <table className="contacts-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>LID</th>
+                <th>Address</th>
+                <th>Phone</th>
+                <th>Billing</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(0, visibleCount).map((a) => (
+                <React.Fragment key={a.id}>
+                  <tr>
+                    <td>
+                      <span className="contact-name">{a.name}</span>
+                      <div>
+                        <button className="buildings-toggle" onClick={() => toggle(a.id)}>
+                          <span className="buildings-chevron">{expanded.has(a.id) ? '▾' : '▸'}</span>
+                          <span>Details</span>
+                        </button>
+                      </div>
+                    </td>
+                    <td>{a.type ?? <span className="na">—</span>}</td>
+                    <td>{a.lid ? <span className="lidtag">LID {a.lid}</span> : <span className="na">—</span>}</td>
+                    <td>{addressLine(a) ?? <span className="na">—</span>}</td>
+                    <td>
+                      {editing?.accountId === a.id && editing?.field === 'phone'
+                        ? <div className="contact-edit-row">
+                            <input className="contact-edit-input" autoFocus type="tel" value={editing.value}
+                              onChange={(e) => setEditing((s) => ({ ...s, value: formatPhone(e.target.value) }))}
+                              onKeyDown={onEditKey} />
+                            <button className="contact-edit-save" onClick={commitEdit}>Save</button>
+                            <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
+                          </div>
+                        : <span className="contact-editable" onClick={() => startEdit(a.id, 'phone', formatPhone(a.phone))}>
+                            {a.phone ? <a href={`tel:${a.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(a.phone)}</a> : <span className="na">—</span>}
+                          </span>}
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+                        {a.unpaidJobs?.length > 0 && (
+                          <button className="badge emergency badge-btn" onClick={() => setViewingBilling({ accountId: a.id, kind: 'unpaid' })}>
+                            Overdue ({a.unpaidJobs.length})
+                          </button>
+                        )}
+                        {a.readyToBillJobs?.length > 0 && (
+                          <button className="badge dispatched badge-btn" onClick={() => setViewingBilling({ accountId: a.id, kind: 'readyToBill' })}>
+                            Ready to Bill ({a.readyToBillJobs.length})
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                  {expanded.has(a.id) && (
+                    <tr className="contact-building-row">
+                      <td colSpan={6}>
+                        <div className="contact-building-meta" style={{ flexWrap: 'wrap', gap: '1.5rem' }}>
+                          <span>Street: {editableCell(a, 'street', a.street)}</span>
+                          <span>City: {editableCell(a, 'city', a.city)}</span>
+                          <span>State: {editableCell(a, 'state', a.state)}</span>
+                          <span>Zip: {editableCell(a, 'zip', a.zip)}</span>
+                          <span>Website: {editableCell(a, 'website', a.website)}</span>
+                          <span>Industry: {editableCell(a, 'industry', a.industry)}</span>
+                          <span>Management company: {a.parentName ?? <span className="na">—</span>}</span>
+                          <span>
+                            Property contact: {a.propertyContactName
+                              ? <button className="linklike" onClick={() => setViewingContactId(a.propertyContactId)}>{a.propertyContactName}</button>
+                              : <span className="na">—</span>}{' '}
+                            <button
+                              className="change-contact-btn"
+                              onClick={() => {
+                                setChangingContact(changingContact === a.id ? null : a.id);
+                                setPickerQuery('');
+                              }}
+                            >
+                              Change contact
+                            </button>
+                          </span>
+                        </div>
+                        {changingContact === a.id && (
+                          <div className="inline-contact-picker">
+                            <input
+                              className="icp-input"
+                              type="text"
+                              placeholder="Search contacts…"
+                              value={pickerQuery}
+                              onChange={(e) => setPickerQuery(e.target.value)}
+                              autoFocus
+                            />
+                            <div className="icp-list">
+                              {contactOptions
+                                .filter(([, name]) => !pickerQuery.trim() || fuzzyNameMatch(pickerQuery, name))
+                                .slice(0, 8)
+                                .map(([id, name, company]) => (
+                                  <button
+                                    key={id}
+                                    className="icp-option"
+                                    disabled={saving}
+                                    onClick={() => handleChangeContact(a.id, id)}
+                                  >
+                                    <span className="icp-name">{name}</span>
+                                    {company && <span className="icp-company">{company}</span>}
+                                  </button>
+                                ))}
+                            </div>
+                            <button className="icp-cancel" onClick={() => { setChangingContact(null); setPickerQuery(''); }}>
+                              Cancel
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+          {visibleCount < filtered.length && <div ref={accountsSentinelRef} className="scroll-sentinel" />}
+        </div>
+      )}
+      {viewingContact && (
+        <ContactInfoModal
+          contact={viewingContact}
+          onUpdateContact={onUpdateContact}
+          onClose={() => setViewingContactId(null)}
+        />
+      )}
+      {viewingBilling && viewingBillingAccount && (
+        <BillingJobsModal
+          account={viewingBillingAccount}
+          kind={viewingBilling.kind}
+          onClose={() => setViewingBilling(null)}
+        />
+      )}
+    </section>
+  );
+}
+
+function BillingJobsModal({ account, kind, onClose }) {
+  const jobs = kind === 'unpaid' ? account.unpaidJobs : account.readyToBillJobs;
+  const title = kind === 'unpaid' ? 'Overdue' : 'Ready to Bill';
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">{title} — {account.name}</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          {jobs.map((j) => <div key={j.id} className="contact-title">{j.name}</div>)}
+        </div>
+        <div className="modal-footer">
+          <div className="modal-footer-spacer" />
+          <button className="modal-cancel-btn" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ContactInfoModal({ contact, onUpdateContact, onClose }) {
+  const [editing, setEditing] = useState(null); // { field, value }
+
+  const startEdit = (field, value) => setEditing({ field, value: value ?? '' });
+
+  const commitEdit = async () => {
+    if (!editing) return;
+    const { field, value } = editing;
+    setEditing(null);
+    try {
+      await onUpdateContact(contact.id, { [field]: value });
+    } catch (e) {
+      alert(`Could not save: ${e.message}`);
+    }
+  };
+
+  // Escape here is "cancel this field's edit," not "close the popup" — stop
+  // it from also reaching the parent's close-on-Escape listener.
+  const onEditKey = (e) => {
+    if (e.key === 'Enter') commitEdit();
+    if (e.key === 'Escape') { e.stopPropagation(); setEditing(null); }
+  };
+
+  const editableField = (field, value, opts) => {
+    if (editing?.field === field) {
+      return (
+        <div className="contact-edit-row">
+          <input
+            className="contact-edit-input"
+            autoFocus
+            type={opts?.type ?? 'text'}
+            value={editing.value}
+            onChange={(e) => setEditing((s) => ({ ...s, value: opts?.format ? opts.format(e.target.value) : e.target.value }))}
+            onKeyDown={onEditKey}
+          />
+          <button className="contact-edit-save" onClick={commitEdit}>Save</button>
+          <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
+        </div>
+      );
+    }
+    return (
+      <span className="contact-editable" onClick={() => startEdit(field, value)}>
+        {value ? value : <span className="na">{opts?.placeholder ?? '—'}</span>}
+      </span>
+    );
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row">{editableField('name', contact.name)}</div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          <div className="contact-title">{editableField('title', contact.title, { placeholder: 'Add title' })}</div>
+          {contact.company && <div className="contact-title">{contact.company}</div>}
+          <div>
+            {editing?.field === 'phone'
+              ? <div className="contact-edit-row">
+                  <input className="contact-edit-input" autoFocus type="tel" value={editing.value}
+                    onChange={(e) => setEditing((s) => ({ ...s, value: formatPhone(e.target.value) }))}
+                    onKeyDown={onEditKey} />
+                  <button className="contact-edit-save" onClick={commitEdit}>Save</button>
+                  <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
+                </div>
+              : <span className="contact-editable" onClick={() => startEdit('phone', formatPhone(contact.phone))}>
+                  {contact.phone ? <a href={`tel:${contact.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(contact.phone)}</a> : <span className="na">Add phone</span>}
+                </span>}
+          </div>
+          <div>
+            {editing?.field === 'email'
+              ? <div className="contact-edit-row">
+                  <input className="contact-edit-input" autoFocus type="email" value={editing.value}
+                    onChange={(e) => setEditing((s) => ({ ...s, value: e.target.value }))}
+                    onKeyDown={onEditKey} />
+                  <button className="contact-edit-save" onClick={commitEdit}>Save</button>
+                  <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
+                </div>
+              : <span className="contact-editable" onClick={() => startEdit('email', contact.email)}>
+                  {contact.email ? <a href={`mailto:${contact.email}`} className="contact-link" onClick={(e) => e.preventDefault()}>{contact.email}</a> : <span className="na">Add email</span>}
+                </span>}
+          </div>
+        </div>
+        <div className="modal-footer">
+          <div className="modal-footer-spacer" />
+          <button className="modal-cancel-btn" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
   );
 }
 

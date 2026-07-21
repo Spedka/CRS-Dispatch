@@ -13,6 +13,7 @@ import { notifyTv } from './notifyTv.js';
 const f = config.fields;
 const o = config.objects;
 const n = config.dispatchNote;
+const acc = config.account;
 const FS_TASK_TYPE = 'CCTV Job/Work Order'; // only task type currently synced;
 
 function shapeNote(r) {
@@ -750,6 +751,88 @@ api.patch('/accounts/:id/contact', async (c) => {
   }
 });
 
+api.patch('/accounts/:id', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const id = c.req.param('id');
+    const body = await c.req.json();
+
+    const fields = {};
+    if ('industry' in body) fields[acc.industry] = body.industry || null;
+    if ('phone' in body) fields[acc.phone] = body.phone || null;
+    if ('website' in body) fields[acc.website] = body.website || null;
+    if ('street' in body) fields[acc.street] = body.street || null;
+    if ('city' in body) fields[acc.city] = body.city || null;
+    if ('state' in body) fields[acc.state] = body.state || null;
+    if ('zip' in body) fields[acc.zip] = body.zip || null;
+
+    if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
+    await sf.updateRecord('Account', id, fields);
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+api.get('/accounts', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const [accountRecords, contactRecords, billingRecords] = await Promise.all([
+      sf.query(`SELECT Id, Name, ${acc.lid}, ${acc.type}, ${acc.industry}, ${acc.phone}, ${acc.website},
+                       ${acc.street}, ${acc.city}, ${acc.state}, ${acc.zip},
+                       ${acc.propertyContact}, ${acc.parent}, Parent.Name, LastModifiedDate
+                FROM Account ORDER BY Name`),
+      sf.query(`SELECT Id, Name FROM Contact`),
+      sf.query(`SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}
+                FROM Opportunity
+                WHERE ${f.oppStatus} IN ('Waiting on Payment', 'Installation Completed')
+                AND ${f.oppLid} != null
+                AND CloseDate >= 2025-01-01
+                AND (${f.oppType} != 'Monitoring' OR ${f.oppType} = null)`),
+    ]);
+
+    const contactNameById = new Map(contactRecords.map((r) => [r.Id, r.Name]));
+
+    // LID -> { unpaid: [{id,name}], readyToBill: [{id,name}] } — LID__c, not
+    // AccountId, is the join key between Opportunity and Account in this org.
+    const billingByLid = new Map();
+    for (const r of billingRecords) {
+      const lid = r[f.oppLid];
+      const entry = billingByLid.get(lid) ?? { unpaid: [], readyToBill: [] };
+      const job = { id: r.Id, name: r[f.oppName] };
+      if (r[f.oppStatus] === 'Waiting on Payment') entry.unpaid.push(job);
+      else entry.readyToBill.push(job);
+      billingByLid.set(lid, entry);
+    }
+
+    return c.json(accountRecords.map((r) => {
+      const billing = billingByLid.get(r[acc.lid]) ?? { unpaid: [], readyToBill: [] };
+      return {
+        id: r.Id,
+        name: r.Name,
+        lid: r[acc.lid] ?? null,
+        type: r[acc.type] ?? null,
+        industry: r[acc.industry] ?? null,
+        phone: r[acc.phone] ?? null,
+        website: r[acc.website] ?? null,
+        street: r[acc.street] ?? null,
+        city: r[acc.city] ?? null,
+        state: r[acc.state] ?? null,
+        zip: r[acc.zip] ?? null,
+        parentId: r[acc.parent] ?? null,
+        parentName: r.Parent?.Name ?? null,
+        propertyContactId: r[acc.propertyContact] ?? null,
+        propertyContactName: contactNameById.get(r[acc.propertyContact]) ?? null,
+        lastModifiedDate: r.LastModifiedDate ?? null,
+        unpaidJobs: billing.unpaid,
+        readyToBillJobs: billing.readyToBill,
+      };
+    }));
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 api.patch('/contacts/:id', async (c) => {
   try {
     const sf = createSalesforce(c.env);
@@ -764,6 +847,7 @@ api.patch('/contacts/:id', async (c) => {
     }
     if ('email' in body) fields.Email = body.email || null;
     if ('phone' in body) fields.Phone = body.phone || null;
+    if ('title' in body) fields.Title = body.title || null;
 
     if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
     await sf.updateRecord('Contact', id, fields);
