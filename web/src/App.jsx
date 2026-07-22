@@ -3310,12 +3310,11 @@ function AccountGroupSection({ name, accounts, renderRow }) {
   const [visibleCount, setVisibleCount] = useState(50);
   const sentinelRef = useRef(null);
 
-  // Total overdue/ready-to-bill *invoices* across the group, not how many
-  // accounts have at least one — a single account with 2 overdue invoices
-  // should read as 2, not 1.
-  const sumInvoices = (jobs) => jobs?.reduce((s, j) => s + (j.invoices?.length || 0), 0) || 0;
-  const overdueCount = accounts.reduce((s, a) => s + sumInvoices(a.unpaidJobs), 0);
-  const readyToBillCount = accounts.reduce((s, a) => s + sumInvoices(a.readyToBillJobs), 0);
+  // Total overdue/ready-to-bill *jobs* across the group — counting invoices
+  // instead used to make the badge vanish entirely for jobs that don't have
+  // an Invoicing__c record on file yet, even though they still need billing.
+  const overdueCount = accounts.reduce((s, a) => s + (a.unpaidJobs?.length || 0), 0);
+  const readyToBillCount = accounts.reduce((s, a) => s + (a.readyToBillJobs?.length || 0), 0);
 
   useEffect(() => {
     if (!open) return;
