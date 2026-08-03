@@ -44,11 +44,12 @@ export const api = {
 
   // status and scheduledDate are optional — when provided the server also updates
   // the SF Opportunity in the same request, eliminating a second round-trip.
-  addAssignment: (oppId, technicianId, workDate, startTime, status, scheduledDate) =>
+  // endTime is required by the server (400s without it) for real job assignments.
+  addAssignment: (oppId, technicianId, workDate, startTime, endTime, status, scheduledDate) =>
     fetch(`/api/jobs/${oppId}/assignments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ technicianId, workDate, startTime, status, scheduledDate }),
+      body: JSON.stringify({ technicianId, workDate, startTime, endTime, status, scheduledDate }),
     }).then(j),
 
   removeAssignment: (assignmentId) =>
@@ -73,11 +74,11 @@ export const api = {
 
   getContacts: () => fetch('/api/contacts').then(j),
 
-  updateAccountContact: (accountId, contactId) =>
+  updateAccountContact: (accountId, contactId, field = 'property') =>
     fetch(`/api/accounts/${accountId}/contact`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contactId }),
+      body: JSON.stringify({ contactId, field }),
     }).then(j),
 
   updateContact: (contactId, fields) =>

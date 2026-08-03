@@ -150,6 +150,23 @@ function fuzzyNameMatch(query, name) {
   });
 }
 
+// Wraps the first case-insensitive occurrence of `query` inside `text` in a
+// <mark> so a dispatcher can see why a row matched a name/address search.
+function highlightMatch(text, query) {
+  if (!text) return text;
+  const q = query.trim();
+  if (!q) return text;
+  const idx = text.toLowerCase().indexOf(q.toLowerCase());
+  if (idx === -1) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="search-hl">{text.slice(idx, idx + q.length)}</mark>
+      {text.slice(idx + q.length)}
+    </>
+  );
+}
+
 // Statuses that auto-advance to "Scheduled" the moment a job is given a date.
 // (Already-advanced statuses like In Progress are left alone.)
 const PRE_SCHEDULED = ['Quoted', 'Parts Ordered', 'Ready to be scheduled'];
@@ -228,7 +245,7 @@ function SyncedAgo({ lastSync }) {
 // except the one with a panel open (see the .map() call site in App).
 const JobCard = React.memo(function JobCard({
   job, readOnly, techs, fsLinkForJob, pendingAddForJob, jobNotes, onOpenNote, onDeleteNote,
-  onToggleDone, onAssignmentDateChange, onAssignmentTimeChange, onUnassign, onAssign,
+  onToggleDone, onAssignmentDateChange, onAssignmentTimeChange, onAssignmentEndTimeChange, onUnassign, onAssign,
   onSetStatus, onOpenFsLink, onCloseFsLink, onFsLinkChange, onPendingAddChange,
   onSearchFs, onConfirmFsLink,
 }) {
@@ -356,6 +373,15 @@ const JobCard = React.memo(function JobCard({
                   title="Start time"
                   disabled={a.completed}
                 />
+                <TimePicker
+                  className="atime"
+                  value={a.endTime || ''}
+                  onChange={(v) => onAssignmentEndTimeChange(job, a, v)}
+                  title="End time"
+                  placeholder="End"
+                  disabled={a.completed}
+                  clearable
+                />
                 {!a.workDate && !a.completed && <span className="untag">unscheduled</span>}
                 <button className="x" onClick={() => onUnassign(job, a.assignmentId)} aria-label="Remove">×</button>
               </div>
@@ -366,7 +392,7 @@ const JobCard = React.memo(function JobCard({
               const techId = e.target.value;
               if (!techId) return;
               e.target.value = '';
-              onPendingAddChange({ jobId: job.id, techId, date: job.scheduledDate || '', time: '' });
+              onPendingAddChange({ jobId: job.id, techId, dates: job.scheduledDate ? [job.scheduledDate] : [], time: '', endTime: '' });
             }}>
               <option value="">+ Add assignment</option>
               {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
@@ -374,7 +400,7 @@ const JobCard = React.memo(function JobCard({
             {pendingAddForJob && (
               <div className="inline-add">
                 <span className="pending-tech">{techs.find((t) => t.id === pendingAddForJob.techId)?.name}</span>
-                <DatePicker className="dp-adate" value={pendingAddForJob.date || ''} onChange={(v) => onPendingAddChange((p) => ({ ...p, date: v }))} placeholder="Date" />
+                <MultiDatePicker className="dp-adate" value={pendingAddForJob.dates} onChange={(v) => onPendingAddChange((p) => ({ ...p, dates: v }))} placeholder="Date(s)" />
                 <TimePicker
                   className="atime"
                   value={pendingAddForJob.time || '07:00'}
@@ -382,12 +408,32 @@ const JobCard = React.memo(function JobCard({
                   title="Start time"
                   quickPicks={deriveTimeQuickPicks(job.assignments)}
                 />
-                <button className="add-btn" onClick={async () => {
-                  const { techId, date, time } = pendingAddForJob;
-                  onPendingAddChange({ jobId: null, techId: '', date: '', time: '' });
-                  await onAssign(job, techId, date || '', time || '07:00');
-                }}>Add</button>
-                <button className="cancel-btn" onClick={() => onPendingAddChange({ jobId: null, techId: '', date: '', time: '' })}>Cancel</button>
+                <TimePicker
+                  className="atime"
+                  value={pendingAddForJob.endTime || ''}
+                  onChange={(v) => onPendingAddChange((p) => ({ ...p, endTime: v }))}
+                  title="End time (required)"
+                  placeholder="End"
+                />
+                <button
+                  className="add-btn"
+                  disabled={!pendingAddForJob.endTime}
+                  title={!pendingAddForJob.endTime ? 'Pick an end time first' : undefined}
+                  onClick={async () => {
+                    const { techId, dates, time, endTime } = pendingAddForJob;
+                    onPendingAddChange({ jobId: null, techId: '', dates: [], time: '', endTime: '' });
+                    // One Job_Assignment__c per selected day, same as the "Add
+                    // assignment" modal and chalkboard's own time-off picker --
+                    // chained sequentially so each call builds on the job state
+                    // the previous call returned, rather than re-adding onto a
+                    // stale snapshot and dropping earlier days.
+                    let current = job;
+                    for (const d of dates.length ? dates : ['']) {
+                      current = await onAssign(current, techId, d, time || '07:00', endTime);
+                    }
+                  }}
+                >Add</button>
+                <button className="cancel-btn" onClick={() => onPendingAddChange({ jobId: null, techId: '', dates: [], time: '', endTime: '' })}>Cancel</button>
               </div>
             )}
           </div>
@@ -421,11 +467,11 @@ export default function App() {
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
   const [lastSync, setLastSync] = useState(null);
-  const [pendingAdd, setPendingAdd] = useState({ jobId: null, techId: '', date: '', time: '' });
+  const [pendingAdd, setPendingAdd] = useState({ jobId: null, techId: '', dates: [], time: '', endTime: '' });
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [fsLink, setFsLink] = useState({ jobId: null, query: '', searching: false, matches: null, error: null });
   const [draftJob, setDraftJob] = useState(null);
-  const [draftPendingAdd, setDraftPendingAdd] = useState({ techId: '', date: '', time: '' });
+  const [draftPendingAdd, setDraftPendingAdd] = useState({ techId: '', date: '', time: '', endTime: '' });
   const [contacts, setContacts] = useState([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsLoaded, setContactsLoaded] = useState(false);
@@ -714,23 +760,36 @@ export default function App() {
     finally { pending.current -= 1; }
   }, []);
 
-  const assign = useCallback(async (job, technicianId, workDate, startTime = '07:00') => {
+  // Returns the updated job (or the original on failure) so callers adding
+  // several assignments in one go (multi-day pick) can thread the result of
+  // one call into the next instead of reusing a stale `job` snapshot — since
+  // `updated` below is built by appending onto whatever `job.assignments`
+  // was passed in, calling this repeatedly with the same stale `job` would
+  // silently drop every add but the last.
+  const assign = useCallback(async (job, technicianId, workDate, startTime = '07:00', endTime = '') => {
     const tech = techs.find((t) => t.id === technicianId);
     try {
       // Compute derived status before the call so the server can update the SF Opp
       // in the same request — eliminating the separate updateJob round-trip.
       const tentative = { ...job, assignments: [...job.assignments, { workDate, completed: false }] };
       const derived = deriveJobStatusFromAssignments(tentative);
-      const resp = await track(() => api.addAssignment(job.id, technicianId, workDate, startTime, derived.status, derived.scheduledDate));
+      const resp = await track(() => api.addAssignment(job.id, technicianId, workDate, startTime, endTime, derived.status, derived.scheduledDate));
       const assignmentId = resp.assignmentId;
       const created = resp.assignment;
       const newAssignment = created
-        ? { assignmentId: created.assignmentId, technicianId: created.technicianId, technicianName: created.technicianName, workDate: created.workDate, startTime: created.startTime || '07:00', completed: created.completed }
-        : { assignmentId, technicianId, technicianName: tech?.name, workDate: workDate || null, startTime: startTime || '07:00', completed: false };
-      const updated = { ...job, assignments: [...job.assignments, newAssignment] };
-      setJobs((prev) => prev.map((j) => j.id === job.id ? { ...updated, ...derived } : j));
+        ? { assignmentId: created.assignmentId, technicianId: created.technicianId, technicianName: created.technicianName, workDate: created.workDate, startTime: created.startTime || '07:00', endTime: created.endTime || null, completed: created.completed }
+        : { assignmentId, technicianId, technicianName: tech?.name, workDate: workDate || null, startTime: startTime || '07:00', endTime: endTime || null, completed: false };
+      // resp.fsStatus is only non-null when this call just bumped FS's status
+      // (e.g. Scheduled -> Assigned once a tech is added) -- the server
+      // already re-stamped FS_Status__c/FS_Last_Modified__c to match, so pick
+      // that up here too instead of showing the pre-bump value until the
+      // next full board reload.
+      const fsSnapshot = resp.fsStatus ? { fsStatus: resp.fsStatus, fsLastModified: resp.fsLastModified } : {};
+      const updated = { ...job, assignments: [...job.assignments, newAssignment], ...derived, ...fsSnapshot };
+      setJobs((prev) => prev.map((j) => j.id === job.id ? updated : j));
       flash(`${tech?.name} added to ${job.name}`);
-    } catch (e) { flash(`Could not assign: ${e.message}`); }
+      return updated;
+    } catch (e) { flash(`Could not assign: ${e.message}`); return job; }
   }, [techs, flash, track]);
 
   const unassign = useCallback(async (job, assignmentId) => {
@@ -791,6 +850,22 @@ export default function App() {
     } catch (e) { flash(`Could not save time: ${e.message}`); load(true); }
   }, [flash, track, load]);
 
+  // End time is required when *creating* a job assignment (see addAssignment
+  // routes), but existing rows may still predate that requirement — so
+  // editing stays nullable/clearable here rather than forcing a value in.
+  const setAssignmentEndTime = useCallback(async (job, a, time) => {
+    const t = time || null;
+    const updatedJob = {
+      ...job,
+      assignments: job.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, endTime: t } : x),
+    };
+    setJobs((prev) => prev.map((j) => j.id === job.id ? updatedJob : j));
+    try {
+      await track(() => api.updateAssignment(a.assignmentId, { endTime: t }));
+      await load(true);
+    } catch (e) { flash(`Could not save end time: ${e.message}`); load(true); }
+  }, [flash, track, load]);
+
   const setDate = async (job, date) => {
     // Giving an un-advanced job a date schedules it; clearing returns it to queue.
     let status = job.status;
@@ -832,6 +907,15 @@ export default function App() {
       : prev.map((j) => j.id === job.id ? { ...j, status } : j));
     try {
       const result = await track(() => api.updateJob(job.id, { status }));
+      // The server re-stamps FS_Status__c/FS_Last_Modified__c immediately
+      // whenever it pushes a status to FS -- merge that into local state
+      // right away instead of leaving the pre-push value showing on the
+      // badge until the next full board reload.
+      if (result.fsUpdated && result.fsStatus) {
+        setJobs((prev) => prev.map((j) => j.id === job.id
+          ? { ...j, fsStatus: result.fsStatus, fsLastModified: result.fsLastModified }
+          : j));
+      }
       if (offBoard) {
         flash(`${job.name} closed out`);
       } else if (result.fsUpdated) {
@@ -869,6 +953,11 @@ export default function App() {
       const result = await api.linkFsTask(jobId, fsTaskId);
       // Reload to pick up the FS status snapshot and any synced assignments
       await load(true);
+      // The calendar-tab job modal snapshots into `draftJob` on open and
+      // doesn't re-sync from `jobs` while it's open (see the effect that
+      // inits it) -- patch it directly so the badge flips immediately
+      // instead of waiting for the modal to be closed and reopened.
+      setDraftJob((d) => (d && d.id === jobId ? { ...d, fsTaskId } : d));
       const parts = [`Linked to "${fsTaskName}"`];
       if (result.assignmentsAdded > 0) {
         parts.push(`${result.assignmentsAdded} tech${result.assignmentsAdded > 1 ? 's' : ''} added`);
@@ -892,6 +981,7 @@ export default function App() {
     setJobs((prev) => prev.map((j) => j.id === originalJob.id
       ? { ...draftJob, status: finalStatus, scheduledDate: derived.scheduledDate }
       : j));
+    closeFsLink();
     setSelectedJobId(null);
 
     try {
@@ -907,17 +997,21 @@ export default function App() {
         const ch = {};
         if (da.workDate !== oa.workDate) ch.workDate = da.workDate || '';
         if ((da.startTime || '07:00') !== (oa.startTime || '07:00')) ch.startTime = da.startTime || '07:00';
+        if ((da.endTime || null) !== (oa.endTime || null)) ch.endTime = da.endTime || '';
         if (da.completed !== oa.completed) ch.completed = da.completed;
         if (Object.keys(ch).length > 0) await api.updateAssignment(da.assignmentId, ch);
       }
       // New assignments -- patch in the real assignmentId from each response
       // (same pattern as assign()) so a temp `_new_...` id never lingers in
       // state, where a later edit/remove on it would 404 against Salesforce.
+      // endTime always present here -- the Add button in the inline-add flow
+      // above is disabled until one is picked, same requirement the server
+      // enforces for this endpoint.
       for (const na of draftJob.assignments.filter((a) => a._new)) {
-        const resp = await api.addAssignment(draftJob.id, na.technicianId, na.workDate || '', na.startTime || '07:00');
+        const resp = await api.addAssignment(draftJob.id, na.technicianId, na.workDate || '', na.startTime || '07:00', na.endTime);
         const created = resp.assignment;
         const realAssignment = created
-          ? { assignmentId: created.assignmentId, technicianId: created.technicianId, technicianName: created.technicianName, workDate: created.workDate, startTime: created.startTime || '07:00', completed: created.completed }
+          ? { assignmentId: created.assignmentId, technicianId: created.technicianId, technicianName: created.technicianName, workDate: created.workDate, startTime: created.startTime || '07:00', endTime: created.endTime || null, completed: created.completed }
           : { ...na, assignmentId: resp.assignmentId, _new: undefined };
         setJobs((prev) => prev.map((j) => j.id === draftJob.id
           ? { ...j, assignments: j.assignments.map((a) => a.assignmentId === na.assignmentId ? realAssignment : a) }
@@ -932,7 +1026,7 @@ export default function App() {
     }
   };
 
-  const cancelModal = () => setSelectedJobId(null);
+  const cancelModal = () => { closeFsLink(); setSelectedJobId(null); };
 
   const oppTypes = useMemo(() =>
     [...new Set(jobs.map((j) => j.opportunityType).filter(Boolean))].sort()
@@ -1225,6 +1319,7 @@ export default function App() {
                   onToggleDone={toggleDone}
                   onAssignmentDateChange={setAssignmentDate}
                   onAssignmentTimeChange={setAssignmentTime}
+                  onAssignmentEndTimeChange={setAssignmentEndTime}
                   onUnassign={unassign}
                   onAssign={assign}
                   onSetStatus={setStatus}
@@ -1241,7 +1336,7 @@ export default function App() {
           </section>
         )}
 
-        {!loading && !error && tab === 'schedule' && <Schedule jobs={jobs} techs={techs} onJobClick={setSelectedJobId} />}
+        {!loading && !error && tab === 'schedule' && <Schedule jobs={jobs} techs={techs} onJobClick={setSelectedJobId} onAssign={assign} />}
         {tab === 'requests' && (
           <RequestsTab
             requests={scheduleRequests}
@@ -1285,6 +1380,10 @@ export default function App() {
               <div className="modal-title-row">
                 <span className="jname">{draftJob.name}</span>
                 {draftJob.lid && <span className="lidtag">LID {draftJob.lid}</span>}
+                {draftJob.fsTaskId
+                  ? <span className="fs-badge linked" title={`FS task: ${draftJob.fsTaskId}`}>⬡ FS</span>
+                  : <button className="fs-badge unlinked fs-attach-btn" title="Attach Field Squared job" onClick={() => fsLink.jobId === draftJob.id ? closeFsLink() : openFsLink(draftJob.id)}>⬡ Attach FS</button>}
+                <FsDriftBadge job={draftJob} />
                 <select
                   className={`statussel ${draftJob.status ? statusClass(draftJob.status) : 'unset'}`}
                   value={draftJob.status}
@@ -1298,6 +1397,41 @@ export default function App() {
               <button className="modal-close" onClick={cancelModal} aria-label="Close">×</button>
             </div>
             <div className="modal-body">
+              {fsLink.jobId === draftJob.id && (
+                <div className="fs-attach-panel">
+                  <div className="fs-attach-header">
+                    <span className="fs-attach-title">Search Field Squared</span>
+                    <button className="fs-attach-close" onClick={closeFsLink} aria-label="Close">×</button>
+                  </div>
+                  <div className="fs-attach-row">
+                    <input
+                      className="fs-attach-input"
+                      type="text"
+                      placeholder="Type part of the FS job name…"
+                      value={fsLink.query}
+                      onChange={(e) => setFsLink((s) => ({ ...s, query: e.target.value }))}
+                      onKeyDown={(e) => e.key === 'Enter' && searchFs(fsLink.query)}
+                      autoFocus
+                    />
+                    <button className="fs-btn-search" onClick={() => searchFs(fsLink.query)} disabled={fsLink.searching || fsLink.query.trim().length < 3}>
+                      {fsLink.searching ? '…' : 'Search'}
+                    </button>
+                  </div>
+                  {fsLink.error && <div className="fs-attach-error">{fsLink.error}</div>}
+                  {fsLink.matches !== null && fsLink.matches.length === 0 && (
+                    <div className="fs-attach-empty">No FS tasks found with that name.</div>
+                  )}
+                  {fsLink.matches && fsLink.matches.map((m) => (
+                    <div className="fs-attach-result" key={m.externalId}>
+                      <div className="fs-result-info">
+                        <div className="fs-result-name">{m.name}</div>
+                        <div className="fs-result-meta">{m.taskType} · {m.status}</div>
+                      </div>
+                      <button className="fs-btn-link" onClick={() => confirmFsLink(draftJob.id, m.externalId, m.name)}>Link</button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="meta">
                 <span><span className="ic">◍</span>{draftJob.address || 'No address'}</span>
                 {draftJob.closeDate && <span className="created">Close Date {fmtDate(draftJob.closeDate)}</span>}
@@ -1346,6 +1480,15 @@ export default function App() {
                         title="Start time"
                         disabled={a.completed}
                       />
+                      <TimePicker
+                        className="atime"
+                        value={a.endTime || ''}
+                        onChange={(v) => setDraftJob((d) => ({ ...d, assignments: d.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, endTime: v || null } : x) }))}
+                        title="End time"
+                        placeholder="End"
+                        disabled={a.completed}
+                        clearable
+                      />
                       {!a.workDate && !a.completed && <span className="untag">unscheduled</span>}
                       <button
                         className="x"
@@ -1367,7 +1510,7 @@ export default function App() {
                     const techId = e.target.value;
                     if (!techId) return;
                     e.target.value = '';
-                    setDraftPendingAdd({ techId, date: draftJob.scheduledDate || '', time: '' });
+                    setDraftPendingAdd({ techId, date: draftJob.scheduledDate || '', time: '', endTime: '' });
                   }}>
                     <option value="">+ Add assignment</option>
                     {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
@@ -1382,24 +1525,37 @@ export default function App() {
                         title="Start time"
                         quickPicks={deriveTimeQuickPicks(draftJob.assignments)}
                       />
-                      <button className="add-btn" onClick={() => {
-                        const { techId, date, time } = draftPendingAdd;
-                        const tech = techs.find((t) => t.id === techId);
-                        setDraftJob((d) => ({
-                          ...d,
-                          assignments: [...d.assignments, {
-                            assignmentId: `_new_${Date.now()}`,
-                            technicianId: techId,
-                            technicianName: tech?.name || '',
-                            workDate: date || null,
-                            startTime: time || '07:00',
-                            completed: false,
-                            _new: true,
-                          }],
-                        }));
-                        setDraftPendingAdd({ techId: '', date: '', time: '' });
-                      }}>Add</button>
-                      <button className="cancel-btn" onClick={() => setDraftPendingAdd({ techId: '', date: '', time: '' })}>Cancel</button>
+                      <TimePicker
+                        className="atime"
+                        value={draftPendingAdd.endTime || ''}
+                        onChange={(v) => setDraftPendingAdd((p) => ({ ...p, endTime: v }))}
+                        title="End time (required)"
+                        placeholder="End"
+                      />
+                      <button
+                        className="add-btn"
+                        disabled={!draftPendingAdd.endTime}
+                        title={!draftPendingAdd.endTime ? 'Pick an end time first' : undefined}
+                        onClick={() => {
+                          const { techId, date, time, endTime } = draftPendingAdd;
+                          const tech = techs.find((t) => t.id === techId);
+                          setDraftJob((d) => ({
+                            ...d,
+                            assignments: [...d.assignments, {
+                              assignmentId: `_new_${Date.now()}`,
+                              technicianId: techId,
+                              technicianName: tech?.name || '',
+                              workDate: date || null,
+                              startTime: time || '07:00',
+                              endTime: endTime || null,
+                              completed: false,
+                              _new: true,
+                            }],
+                          }));
+                          setDraftPendingAdd({ techId: '', date: '', time: '', endTime: '' });
+                        }}
+                      >Add</button>
+                      <button className="cancel-btn" onClick={() => setDraftPendingAdd({ techId: '', date: '', time: '', endTime: '' })}>Cancel</button>
                     </div>
                   )}
                 </div>
@@ -2902,6 +3058,341 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
   );
 }
 
+// Lists every contact whose standard AccountId lookup points at this account
+// (plus the legacy Property_Contact_Name__c contact, tagged, if it's not
+// already in that set) — modeled directly on NotesMenu's portaled-popup
+// pattern (position/click-outside/scroll-lock effects, .notes-pop* CSS).
+function AccountContactsMenu({ accountId, contacts, contactDirectory, propertyContactId, propertyContactName, onOpenContact, onLinkContact }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, maxHeight: 420 });
+  const [linking, setLinking] = useState(false);
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [saving, setSaving] = useState(false);
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+
+  const allContacts = useMemo(() => {
+    if (propertyContactId && !contacts.some((c) => c.id === propertyContactId)) {
+      return [...contacts, { id: propertyContactId, name: propertyContactName, title: null, __isPropertyContact: true }];
+    }
+    return contacts;
+  }, [contacts, propertyContactId, propertyContactName]);
+
+  // Only offer contacts not already shown in this account's own list — picking
+  // an already-linked one would just be a same-value no-op.
+  const linkedIds = useMemo(() => new Set(allContacts.map((c) => c.id)), [allContacts]);
+  const contactOptions = useMemo(() =>
+    contactDirectory
+      .filter((c) => !linkedIds.has(c.id))
+      .map((c) => [c.id, c.name, c.company])
+      .sort((a, b) => a[1].localeCompare(b[1]))
+  , [contactDirectory, linkedIds]);
+
+  useEffect(() => {
+    if (!open) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const POP_WIDTH = 320;
+    const GAP = 6;
+    const EDGE = 8;
+    const CEILING = 420;
+    let left = rect.left;
+    if (left + POP_WIDTH > window.innerWidth - EDGE) left = window.innerWidth - POP_WIDTH - EDGE;
+    if (left < EDGE) left = EDGE;
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      if (popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open]);
+
+  // Reset the in-progress picker whenever the popup itself closes, so
+  // reopening it doesn't resume a stale in-flight link.
+  useEffect(() => {
+    if (!open) { setLinking(false); setPickerQuery(''); }
+  }, [open]);
+
+  const openContact = (contact) => { setOpen(false); onOpenContact(contact.id); };
+
+  const commitLink = async (contactId) => {
+    setSaving(true);
+    try {
+      await onLinkContact(accountId, contactId);
+      setLinking(false);
+      setPickerQuery('');
+    } catch (e) {
+      alert(`Failed to link contact: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="notes-menu-wrap" ref={wrapRef}>
+      <button className="buildings-toggle" onClick={() => setOpen((o) => !o)}>
+        <span className="buildings-chevron">{open ? '▾' : '▸'}</span>
+        <span>Account Contacts{allContacts.length > 0 ? ` (${allContacts.length})` : ''}</span>
+      </button>
+      {open && createPortal(
+        <div
+          className="notes-pop"
+          ref={popRef}
+          style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+        >
+          <div className="notes-pop-head">
+            <span>Account Contacts</span>
+            <button className="notes-new-btn" onClick={() => { setLinking((v) => !v); setPickerQuery(''); }}>
+              + Add contact
+            </button>
+          </div>
+          {linking && (
+            <div className="inline-contact-picker">
+              <input
+                className="icp-input"
+                type="text"
+                placeholder="Search contacts…"
+                value={pickerQuery}
+                onChange={(e) => setPickerQuery(e.target.value)}
+                autoFocus
+              />
+              <div className="icp-list">
+                {contactOptions
+                  .filter(([, name]) => !pickerQuery.trim() || fuzzyNameMatch(pickerQuery, name))
+                  .slice(0, 8)
+                  .map(([id, name, company]) => (
+                    <button
+                      key={id}
+                      className="icp-option"
+                      disabled={saving}
+                      onClick={() => commitLink(id)}
+                    >
+                      <span className="icp-name">{name}</span>
+                      {company && <span className="icp-company">{company}</span>}
+                    </button>
+                  ))}
+              </div>
+              <button className="icp-cancel" onClick={() => { setLinking(false); setPickerQuery(''); }}>
+                Cancel
+              </button>
+            </div>
+          )}
+          <div className="notes-pop-list">
+            {allContacts.length === 0 && (
+              <div className="notes-pop-empty">No contacts linked to this account.</div>
+            )}
+            {allContacts.map((c) => (
+              <button className="notes-pop-item" key={c.id} onClick={() => openContact(c)}>
+                <span className="notes-pop-title-row">
+                  <span className="notes-pop-title">{c.name}</span>
+                  {c.id === propertyContactId && <span className="notes-pop-job-tag">Property contact</span>}
+                </span>
+                {c.title && <span className="notes-pop-preview">{c.title}</span>}
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+// AP contact — a single-value Contact lookup living directly on the Account,
+// but backed by one of two different SF fields depending on the account's own
+// kind: Accounts_Payable_Contact_Name__c for management/Customer accounts,
+// AP_Contact__c for LID/property accounts (a LID account's AP contact can
+// genuinely differ from its parent management company's, so this never
+// inherits/copies from the parent — each account reads and writes its own
+// field). Unlike AccountContactsMenu, this menu also owns the reassignment
+// picker (same inline search-and-pick UI the old Property Contact block used
+// to have).
+function PaymentContactMenu({ account, contacts, onOpenContact, onChangeAccountContact }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, maxHeight: 420 });
+  const [changingField, setChangingField] = useState(null); // 'apManagement' | 'apLid' | null
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [saving, setSaving] = useState(false);
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+
+  // Which literal SF field this account's AP contact writes to — the backend
+  // (GET /accounts) already resolved apContactId/apContactName using the same
+  // RecordType check, so this just has to agree with that for writes.
+  const apField = account.recordType === 'LID_Account' ? 'apLid' : 'apManagement';
+
+  const contactOptions = useMemo(() =>
+    contacts
+      .map((c) => [c.id, c.name, c.company])
+      .sort((a, b) => a[1].localeCompare(b[1]))
+  , [contacts]);
+
+  useEffect(() => {
+    if (!open) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const POP_WIDTH = 320;
+    const GAP = 6;
+    const EDGE = 8;
+    const CEILING = 420;
+    let left = rect.left;
+    if (left + POP_WIDTH > window.innerWidth - EDGE) left = window.innerWidth - POP_WIDTH - EDGE;
+    if (left < EDGE) left = EDGE;
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      if (popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open]);
+
+  // Reset the in-progress picker whenever the popup itself closes, so
+  // reopening it doesn't resume a stale in-flight edit.
+  useEffect(() => {
+    if (!open) { setChangingField(null); setPickerQuery(''); }
+  }, [open]);
+
+  const commitChange = async (field, contactId) => {
+    setSaving(true);
+    try {
+      await onChangeAccountContact(account.id, field, contactId);
+      setChangingField(null);
+      setPickerQuery('');
+    } catch (e) {
+      alert(`Failed to update contact: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const renderRow = (label, field, contactId, contactName) => (
+    <div className="notes-pop-item" key={field} style={{ cursor: 'default' }}>
+      <span className="notes-pop-title-row">
+        <span className="notes-pop-title">{label}</span>
+      </span>
+      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {contactName
+          ? <button className="linklike" onClick={() => { setOpen(false); onOpenContact(contactId); }}>{contactName}</button>
+          : <span className="na">—</span>}
+        <button
+          className="change-contact-btn"
+          onClick={() => {
+            setChangingField(changingField === field ? null : field);
+            setPickerQuery('');
+          }}
+        >
+          Change contact
+        </button>
+      </span>
+      {changingField === field && (
+        <div className="inline-contact-picker">
+          <input
+            className="icp-input"
+            type="text"
+            placeholder="Search contacts…"
+            value={pickerQuery}
+            onChange={(e) => setPickerQuery(e.target.value)}
+            autoFocus
+          />
+          <div className="icp-list">
+            {contactOptions
+              .filter(([, name]) => !pickerQuery.trim() || fuzzyNameMatch(pickerQuery, name))
+              .slice(0, 8)
+              .map(([id, name, company]) => (
+                <button
+                  key={id}
+                  className="icp-option"
+                  disabled={saving}
+                  onClick={() => commitChange(field, id)}
+                >
+                  <span className="icp-name">{name}</span>
+                  {company && <span className="icp-company">{company}</span>}
+                </button>
+              ))}
+          </div>
+          <button className="icp-cancel" onClick={() => { setChangingField(null); setPickerQuery(''); }}>
+            Cancel
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="notes-menu-wrap" ref={wrapRef}>
+      <button className="buildings-toggle" onClick={() => setOpen((o) => !o)}>
+        <span className="buildings-chevron">{open ? '▾' : '▸'}</span>
+        <span>Payment Contact</span>
+      </button>
+      {open && createPortal(
+        <div
+          className="notes-pop"
+          ref={popRef}
+          style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+        >
+          <div className="notes-pop-head">
+            <span>Payment Contact</span>
+          </div>
+          <div className="notes-pop-list">
+            {renderRow('AP Contact', apField, account.apContactId, account.apContactName)}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
 function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, onUpdateContact }) {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
@@ -2912,9 +3403,6 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   const [showOverdue, setShowOverdue] = useState(false);
   const [showReadyToBill, setShowReadyToBill] = useState(false);
   const [expanded, setExpanded] = useState(new Set());
-  const [changingContact, setChangingContact] = useState(null); // accountId being reassigned
-  const [pickerQuery, setPickerQuery] = useState('');
-  const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(null); // { accountId, field, value }
   // Id only, not a snapshot — so if the contact is edited (in this popup or
   // elsewhere) while it's open, the popup re-derives the latest record from
@@ -2924,9 +3412,9 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   // same reason as viewingContactId above.
   const [viewingBilling, setViewingBilling] = useState(null);
 
-  const startEdit = (accountId, field, value) => setEditing({ accountId, field, value: value ?? '' });
+  const startEdit = useCallback((accountId, field, value) => setEditing({ accountId, field, value: value ?? '' }), []);
 
-  const commitEdit = async () => {
+  const commitEdit = useCallback(async () => {
     if (!editing) return;
     const { accountId, field, value } = editing;
     setEditing(null);
@@ -2935,42 +3423,43 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
     } catch (e) {
       alert(`Could not save: ${e.message}`);
     }
-  };
+  }, [editing, onUpdateAccount]);
 
-  const onEditKey = (e) => {
+  const onEditKey = useCallback((e) => {
     if (e.key === 'Enter') commitEdit();
     if (e.key === 'Escape') setEditing(null);
-  };
+  }, [commitEdit]);
 
-  const toggle = (id) => setExpanded((prev) => {
+  const handleChangeAccountContact = useCallback(async (accountId, field, contactId) => {
+    await api.updateAccountContact(accountId, contactId, field);
+    await onRefresh();
+  }, [onRefresh]);
+
+  const handleLinkAccountContact = useCallback((accountId, contactId) => onUpdateContact(contactId, { accountId }), [onUpdateContact]);
+
+  const toggle = useCallback((id) => setExpanded((prev) => {
     const next = new Set(prev);
     next.has(id) ? next.delete(id) : next.add(id);
     return next;
-  });
-
-  const contactOptions = useMemo(() =>
-    contacts
-      .map((c) => [c.id, c.name, c.company])
-      .sort((a, b) => a[1].localeCompare(b[1]))
-  , [contacts]);
-
-  const handleChangeContact = async (accountId, contactId) => {
-    setSaving(true);
-    try {
-      await api.updateAccountContact(accountId, contactId);
-      setChangingContact(null);
-      setPickerQuery('');
-      await onRefresh();
-    } catch (e) {
-      alert(`Failed to update contact: ${e.message}`);
-    } finally {
-      setSaving(false);
-    }
-  };
+  }), []);
 
   const contactsById = useMemo(() => new Map(contacts.map((c) => [c.id, c])), [contacts]);
   const viewingContact = viewingContactId ? contactsById.get(viewingContactId) ?? null : null;
   const viewingBillingAccount = viewingBilling ? accounts.find((a) => a.id === viewingBilling.accountId) ?? null : null;
+
+  // Contacts whose standard AccountId lookup points at each account, grouped
+  // once (not filtered per row) to avoid an O(n²) scan over the full contacts
+  // list on every render.
+  const contactsByAccountId = useMemo(() => {
+    const map = new Map();
+    for (const c of contacts) {
+      if (!c.accountId) continue;
+      const arr = map.get(c.accountId) ?? [];
+      arr.push(c);
+      map.set(c.accountId, arr);
+    }
+    return map;
+  }, [contacts]);
 
   const types = useMemo(() => {
     const set = new Set();
@@ -2994,15 +3483,19 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
       const haystack = [a.name, a.street, a.city, a.state, a.zip].filter(Boolean).join(' ').toLowerCase();
       if (!haystack.includes(search.trim().toLowerCase())) return false;
     }
-    // Both on = union (either condition qualifies), not intersection.
-    if (showOverdue || showReadyToBill) {
-      const matches = (showOverdue && a.unpaidJobs?.length > 0) || (showReadyToBill && a.readyToBillJobs?.length > 0);
-      if (!matches) return false;
-    }
+    // Both on = intersection (account must qualify for both), not union.
+    if (showOverdue && !(a.unpaidJobs?.length > 0)) return false;
+    if (showReadyToBill && !(a.readyToBillJobs?.length > 0)) return false;
     return true;
   }), [accounts, search, typeFilter, lidFilter, showOverdue, showReadyToBill]);
 
   const hasFilter = search || typeFilter || lidFilter || companyFilter || showOverdue || showReadyToBill;
+
+  // Once a name/address search narrows things down to a small, unambiguous
+  // set of accounts, auto-expand their management-company group(s) instead
+  // of making the dispatcher click open an accordion to see the very thing
+  // the search just found.
+  const searchNarrowed = search.trim().length > 0 && filtered.length > 0 && filtered.length <= 5;
 
   // A management company is just an Account like any other — it can carry
   // its own unpaidJobs/readyToBillJobs (billed directly to the company, not
@@ -3049,6 +3542,25 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
     return groups.filter((g) => g.name.toLowerCase().includes(q));
   }, [groups, companyFilter]);
 
+  // Windowed rendering of the group list itself — mirrors the Jobs list /
+  // Contacts tab / SearchableSelect pattern so typing a broad query doesn't
+  // force every management-company header (and its badge-count math) to
+  // mount at once.
+  const [visibleGroupCount, setVisibleGroupCount] = useState(30);
+  const groupSentinelRef = useRef(null);
+
+  useEffect(() => { setVisibleGroupCount(30); }, [visibleGroups.length]);
+
+  useEffect(() => {
+    const el = groupSentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) setVisibleGroupCount((c) => c + 30);
+    }, { rootMargin: '400px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [visibleGroups.length]);
+
   useEffect(() => {
     if (!viewingContactId) return;
     const onKey = (e) => { if (e.key === 'Escape') setViewingContactId(null); };
@@ -3065,7 +3577,7 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
 
   const addressLine = (a) => [a.street, [a.city, a.state].filter(Boolean).join(', '), a.zip].filter(Boolean).join(' ') || null;
 
-  const editableCell = (a, field, value, opts) => {
+  const editableCell = useCallback((a, field, value, opts) => {
     const isEditing = editing?.accountId === a.id && editing?.field === field;
     if (isEditing) {
       return (
@@ -3088,24 +3600,39 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
         {value ? value : <span className="na">—</span>}
       </span>
     );
-  };
+  }, [editing, onEditKey, commitEdit, startEdit]);
 
-  const renderAccountRow = (a) => (
+  const renderAccountRow = useCallback((a) => (
     <React.Fragment key={a.id}>
       <tr>
         <td>
-          <span className="contact-name">{a.name}</span>
+          <span className="contact-name">{search.trim() ? highlightMatch(a.name, search) : a.name}</span>
           {a.__isManagementCompany && <span className="mgmt-co-tag">Management Co.</span>}
-          <div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button className="buildings-toggle" onClick={() => toggle(a.id)}>
               <span className="buildings-chevron">{expanded.has(a.id) ? '▾' : '▸'}</span>
               <span>Account Details</span>
             </button>
+            <AccountContactsMenu
+              accountId={a.id}
+              contacts={contactsByAccountId.get(a.id) ?? []}
+              contactDirectory={contacts}
+              propertyContactId={a.propertyContactId}
+              propertyContactName={a.propertyContactName}
+              onOpenContact={setViewingContactId}
+              onLinkContact={handleLinkAccountContact}
+            />
+            <PaymentContactMenu
+              account={a}
+              contacts={contacts}
+              onOpenContact={setViewingContactId}
+              onChangeAccountContact={handleChangeAccountContact}
+            />
           </div>
         </td>
         <td>{a.type ?? <span className="na">—</span>}</td>
         <td>{a.lid ? <span className="lidtag">LID {a.lid}</span> : <span className="na">—</span>}</td>
-        <td>{addressLine(a) ?? <span className="na">—</span>}</td>
+        <td>{addressLine(a) ? (search.trim() ? highlightMatch(addressLine(a), search) : addressLine(a)) : <span className="na">—</span>}</td>
         <td>
           {editing?.accountId === a.id && editing?.field === 'phone'
             ? <div className="contact-edit-row">
@@ -3145,57 +3672,12 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
               <span>Website: {editableCell(a, 'website', a.website)}</span>
               <span>Industry: {editableCell(a, 'industry', a.industry)}</span>
               <span>Management company: {a.parentName ?? <span className="na">—</span>}</span>
-              <span>
-                Property contact: {a.propertyContactName
-                  ? <button className="linklike" onClick={() => setViewingContactId(a.propertyContactId)}>{a.propertyContactName}</button>
-                  : <span className="na">—</span>}{' '}
-                <button
-                  className="change-contact-btn"
-                  onClick={() => {
-                    setChangingContact(changingContact === a.id ? null : a.id);
-                    setPickerQuery('');
-                  }}
-                >
-                  Change contact
-                </button>
-              </span>
             </div>
-            {changingContact === a.id && (
-              <div className="inline-contact-picker">
-                <input
-                  className="icp-input"
-                  type="text"
-                  placeholder="Search contacts…"
-                  value={pickerQuery}
-                  onChange={(e) => setPickerQuery(e.target.value)}
-                  autoFocus
-                />
-                <div className="icp-list">
-                  {contactOptions
-                    .filter(([, name]) => !pickerQuery.trim() || fuzzyNameMatch(pickerQuery, name))
-                    .slice(0, 8)
-                    .map(([id, name, company]) => (
-                      <button
-                        key={id}
-                        className="icp-option"
-                        disabled={saving}
-                        onClick={() => handleChangeContact(a.id, id)}
-                      >
-                        <span className="icp-name">{name}</span>
-                        {company && <span className="icp-company">{company}</span>}
-                      </button>
-                    ))}
-                </div>
-                <button className="icp-cancel" onClick={() => { setChangingContact(null); setPickerQuery(''); }}>
-                  Cancel
-                </button>
-              </div>
-            )}
           </td>
         </tr>
       )}
     </React.Fragment>
-  );
+  ), [expanded, editing, search, toggle, contactsByAccountId, contacts, handleLinkAccountContact, handleChangeAccountContact, editableCell, onEditKey, commitEdit, startEdit]);
 
   return (
     <section>
@@ -3279,14 +3761,16 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
       )}
       {!loading && filtered.length > 0 && visibleGroups.length > 0 && (
         <div className="mgmt-groups">
-          {visibleGroups.map((g) => (
-            <AccountGroupSection key={g.key} name={g.name} accounts={g.accounts} renderRow={renderAccountRow} />
+          {visibleGroups.slice(0, visibleGroupCount).map((g) => (
+            <AccountGroupSection key={g.key} name={g.name} accounts={g.accounts} renderRow={renderAccountRow} forceOpen={searchNarrowed} />
           ))}
+          {visibleGroupCount < visibleGroups.length && <div ref={groupSentinelRef} className="scroll-sentinel" />}
         </div>
       )}
       {viewingContact && (
         <ContactInfoModal
           contact={viewingContact}
+          accounts={accounts}
           onUpdateContact={onUpdateContact}
           onClose={() => setViewingContactId(null)}
         />
@@ -3302,7 +3786,7 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   );
 }
 
-function AccountGroupSection({ name, accounts, renderRow }) {
+const AccountGroupSection = React.memo(function AccountGroupSection({ name, accounts, renderRow, forceOpen }) {
   const [open, setOpen] = useState(false);
   // Own visibleCount/sentinel, scoped to this group only — "No Management
   // Company" alone can hold thousands of accounts, while most groups are
@@ -3310,11 +3794,20 @@ function AccountGroupSection({ name, accounts, renderRow }) {
   const [visibleCount, setVisibleCount] = useState(50);
   const sentinelRef = useRef(null);
 
+  // A narrowed search (see searchNarrowed in AccountsTab) flips this true so
+  // the group holding the match(es) opens itself — doesn't fight a manual
+  // collapse afterward since it only fires on the false->true transition.
+  useEffect(() => {
+    if (forceOpen) setOpen(true);
+  }, [forceOpen]);
+
   // Total overdue/ready-to-bill *jobs* across the group — counting invoices
   // instead used to make the badge vanish entirely for jobs that don't have
   // an Invoicing__c record on file yet, even though they still need billing.
-  const overdueCount = accounts.reduce((s, a) => s + (a.unpaidJobs?.length || 0), 0);
-  const readyToBillCount = accounts.reduce((s, a) => s + (a.readyToBillJobs?.length || 0), 0);
+  // Memoized because "No Management Company" can hold thousands of accounts
+  // and this shouldn't re-run on every unrelated re-render.
+  const overdueCount = useMemo(() => accounts.reduce((s, a) => s + (a.unpaidJobs?.length || 0), 0), [accounts]);
+  const readyToBillCount = useMemo(() => accounts.reduce((s, a) => s + (a.readyToBillJobs?.length || 0), 0), [accounts]);
 
   useEffect(() => {
     if (!open) return;
@@ -3358,7 +3851,7 @@ function AccountGroupSection({ name, accounts, renderRow }) {
       )}
     </div>
   );
-}
+});
 
 function BillingJobsModal({ account, kind, onClose }) {
   const jobs = kind === 'unpaid' ? account.unpaidJobs : account.readyToBillJobs;
@@ -3427,8 +3920,12 @@ function InvoiceDetail({ invoice }) {
   );
 }
 
-function ContactInfoModal({ contact, onUpdateContact, onClose }) {
+function ContactInfoModal({ contact, accounts, onUpdateContact, onClose }) {
   const [editing, setEditing] = useState(null); // { field, value }
+
+  const accountOptions = useMemo(() =>
+    accounts.map((a) => [a.id, a.name]).sort((x, y) => x[1].localeCompare(y[1]))
+  , [accounts]);
 
   const startEdit = (field, value) => setEditing({ field, value: value ?? '' });
 
@@ -3483,7 +3980,14 @@ function ContactInfoModal({ contact, onUpdateContact, onClose }) {
         </div>
         <div className="modal-body">
           <div className="contact-title">{editableField('title', contact.title, { placeholder: 'Add title' })}</div>
-          {contact.company && <div className="contact-title">{contact.company}</div>}
+          <div className="contact-title">
+            <SearchableSelect
+              value={contact.accountId ?? ''}
+              onChange={(id) => onUpdateContact(contact.id, { accountId: id || null })}
+              options={accountOptions}
+              placeholder="Search accounts…"
+            />
+          </div>
           <div>
             {editing?.field === 'phone'
               ? <div className="contact-edit-row">
@@ -3794,7 +4298,7 @@ function rangeLabel(mode, anchor) {
 const CLOSED_LIST_STATUSES = ['Pending Customer Approval', 'Quoted', 'Parts Ordered', 'Ready to be scheduled'];
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
-function Schedule({ jobs, techs, onJobClick }) {
+function Schedule({ jobs, techs, onJobClick, onAssign }) {
   const [mode, setMode] = useState('week');
   const [anchor, setAnchor] = useState(() => startOfDay(new Date()));
   const [techFilter, setTechFilter] = useState('all');
@@ -3807,6 +4311,7 @@ function Schedule({ jobs, techs, onJobClick }) {
   const [timeOff, setTimeOff] = useState([]);
   const [editingOff, setEditingOff] = useState(null);
   const [addingOff, setAddingOff] = useState(false);
+  const [addingAssignment, setAddingAssignment] = useState(false);
 
   const timeOffRange = useMemo(() => {
     if (mode === 'week') {
@@ -3867,7 +4372,10 @@ function Schedule({ jobs, techs, onJobClick }) {
         <div className="schedule-main">
       <div className="view-head">
         <div><h2>Who's on what</h2><p>Each tech's load by day. Empty cells are open.</p></div>
-        <button className="refresh" onClick={() => setAddingOff(true)}>+ Add Time Off</button>
+        <div className="view-head-actions">
+          <button className="refresh" onClick={() => setAddingAssignment(true)}>+ Add Assignment</button>
+          <button className="refresh" onClick={() => setAddingOff(true)}>+ Add Time Off</button>
+        </div>
       </div>
 
       <div className="schedbar">
@@ -3941,7 +4449,90 @@ function Schedule({ jobs, techs, onJobClick }) {
           onCreated={loadTimeOff}
         />
       )}
+      {addingAssignment && (
+        <AddAssignmentModal
+          jobs={jobs}
+          techs={techs}
+          onClose={() => setAddingAssignment(false)}
+          onAssign={onAssign}
+        />
+      )}
     </section>
+  );
+}
+
+function AddAssignmentModal({ jobs, techs, onClose, onAssign }) {
+  const [opportunityId, setOpportunityId] = useState('');
+  const [technicianId, setTechnicianId] = useState('');
+  const [dates, setDates] = useState([]);
+  const [time, setTime] = useState('07:00');
+  const [endTime, setEndTime] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const jobOptions = useMemo(() => jobs.map((j) => [j.id, j.name]), [jobs]);
+
+  // assign() (passed down as onAssign) already swallows its own errors and shows
+  // a toast, same as JobCard's inline add-assignment flow -- so there's no local
+  // error state here, and the modal always closes once the calls settle.
+  //
+  // One Job_Assignment__c per selected day (same pattern as AddTimeOffModal),
+  // but chained sequentially rather than fired concurrently with
+  // Promise.allSettled: onAssign returns the updated job so each call builds
+  // on the previous one's result instead of re-adding onto a stale snapshot,
+  // which would silently drop every day but the last.
+  const save = async () => {
+    if (!opportunityId || !technicianId || dates.length === 0 || !endTime) return;
+    let job = jobs.find((j) => j.id === opportunityId);
+    if (!job) return;
+    setSaving(true);
+    for (const d of dates) {
+      job = await onAssign(job, technicianId, d, time, endTime);
+    }
+    onClose();
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={() => !saving && onClose()}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Add assignment</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={saving}>×</button>
+        </div>
+        <div className="modal-body">
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Opportunity</span>
+            <SearchableSelect value={opportunityId} onChange={setOpportunityId} options={jobOptions} placeholder="Pick the opportunity…" />
+          </label>
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Technician</span>
+            <select className="techfilter" value={technicianId} onChange={(e) => setTechnicianId(e.target.value)}>
+              <option value="">Select a technician…</option>
+              {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </label>
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Date(s)</span>
+            <MultiDatePicker value={dates} onChange={setDates} placeholder="Select date(s)" />
+          </label>
+          <div className="req-panel-row">
+            <label className="req-field">
+              <span className="req-field-label">Start</span>
+              <TimePicker className="req-time" value={time} onChange={setTime} />
+            </label>
+            <label className="req-field">
+              <span className="req-field-label">End</span>
+              <TimePicker className="req-time" value={endTime} onChange={setEndTime} placeholder="End" />
+            </label>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="modal-save-btn" onClick={save} disabled={saving || !opportunityId || !technicianId || dates.length === 0 || !endTime}>
+            {saving ? 'Adding…' : dates.length > 1 ? `Add assignment (${dates.length} days)` : 'Add assignment'}
+          </button>
+          <button className="modal-cancel-btn" onClick={onClose} disabled={saving}>Cancel</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -4094,6 +4685,17 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
   const todayIso = isoOf(startOfDay(new Date()));
   const rows = techFilter === 'all' ? techs : techs.filter((t) => t.id === techFilter);
 
+  // Completed assignments collapse into a per-cell "✓N done" toggle by
+  // default -- keyed by "techId|iso" rather than lifted to Schedule, since
+  // nothing outside this grid needs it and remounting on Week/Month switch
+  // already resets it to all-collapsed, which is the desired default.
+  const [expandedCells, setExpandedCells] = useState(() => new Set());
+  const toggleCell = (key) => setExpandedCells((prev) => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  });
+
   // techId -> iso -> [{ name, startTime }], sorted by start time
   const grid = useMemo(() => {
     const m = {};
@@ -4139,7 +4741,11 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
               {days.map((d) => {
                 const iso = isoOf(d);
                 const items = grid[t.id]?.[iso] || [];
+                const activeItems = items.filter((it) => !it.completed);
+                const doneItems = items.filter((it) => it.completed);
                 const off = timeOffByTechDate[t.id]?.[iso];
+                const cellKey = `${t.id}|${iso}`;
+                const showDone = expandedCells.has(cellKey);
                 const cls = `${items.length || off ? '' : 'open'} ${iso === todayIso ? 'todaycol' : ''} ${off ? 'offcol' : ''}`.trim();
                 return (
                   <td key={iso} className={cls}>
@@ -4149,9 +4755,26 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
                       </div>
                     )}
                     {items.length === 0 && !off && <span className="free">✓ Open</span>}
-                    {items.map((item, i) => (
-                      <div className={`jchip${item.completed ? ' done' : ''}`} key={i} onClick={() => onJobClick(item.jobId)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(item.jobId)}>
-                        {item.completed && <span className="jdone-mark" title="Worked">✓</span>}
+                    {activeItems.map((item, i) => (
+                      <div className="jchip" key={i} onClick={() => onJobClick(item.jobId)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(item.jobId)}>
+                        <span className="jtime">{item.startTime}</span>
+                        {item.name.split('—')[0].trim()}
+                      </div>
+                    ))}
+                    {doneItems.length > 0 && (
+                      <button
+                        type="button"
+                        className="done-toggle"
+                        aria-expanded={showDone}
+                        onClick={() => toggleCell(cellKey)}
+                      >
+                        <span>✓{doneItems.length} done</span>
+                        <span className="done-toggle-chevron">{showDone ? '▾' : '▸'}</span>
+                      </button>
+                    )}
+                    {showDone && doneItems.map((item, i) => (
+                      <div className="jchip done" key={i} onClick={() => onJobClick(item.jobId)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(item.jobId)}>
+                        <span className="jdone-mark" title="Worked">✓</span>
                         <span className="jtime">{item.startTime}</span>
                         {item.name.split('—')[0].trim()}
                       </div>
@@ -4170,6 +4793,18 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
 function MonthGrid({ jobs, anchor, techFilter, onJobClick, timeOff, onEditOff }) {
   const todayIso = isoOf(startOfDay(new Date()));
   const month = anchor.getMonth();
+
+  // A fully-completed job already drops out of `byDate` below (see
+  // nextScheduledAssignmentDate) -- this only handles the mixed-completion
+  // case, where completed techs' initials collapse into a per-job "✓N"
+  // toggle by default. Keyed by job id, local to this grid (see WeekGrid's
+  // matching expandedCells for the same reasoning).
+  const [expandedJobs, setExpandedJobs] = useState(() => new Set());
+  const toggleJob = (id) => setExpandedJobs((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
 
   const cells = useMemo(() => {
     const first = new Date(anchor.getFullYear(), month, 1);
@@ -4221,12 +4856,29 @@ function MonthGrid({ jobs, anchor, techFilter, onJobClick, timeOff, onEditOff })
                 <span className="jn">{r.technicianName}</span>
               </div>
             ))}
-            {items.map((j) => (
-              <div className="dayjob" data-status={statusClass(j.status)} key={j.id} title={j.name} onClick={() => onJobClick(j.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(j.id)}>
-                <span className="jn">{j.name.split('—')[0].trim()}</span>
-                {j.assignments.length > 0 && <span className="inits">{j.assignments.map((a) => initials(a.technicianName)).join(' ')}</span>}
-              </div>
-            ))}
+            {items.map((j) => {
+              const activeA = j.assignments.filter((a) => !a.completed);
+              const doneA = j.assignments.filter((a) => a.completed);
+              const showDone = expandedJobs.has(j.id);
+              return (
+                <div className="dayjob" data-status={statusClass(j.status)} key={j.id} title={j.name} onClick={() => onJobClick(j.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(j.id)}>
+                  <span className="jn">{j.name.split('—')[0].trim()}</span>
+                  {activeA.length > 0 && <span className="inits">{activeA.map((a) => initials(a.technicianName)).join(' ')}</span>}
+                  {showDone && doneA.length > 0 && <span className="inits inits-done">{doneA.map((a) => initials(a.technicianName)).join(' ')}</span>}
+                  {doneA.length > 0 && (
+                    <button
+                      type="button"
+                      className="done-toggle-mini"
+                      aria-expanded={showDone}
+                      aria-label={`${doneA.length} completed technician${doneA.length > 1 ? 's' : ''} hidden, toggle to show`}
+                      onClick={(e) => { e.stopPropagation(); toggleJob(j.id); }}
+                    >
+                      ✓{doneA.length}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         );
       })}

@@ -3,6 +3,7 @@ import { createSalesforce } from './salesforce.js';
 import { config } from './config.js';
 import { getTechDirectory } from './assignments.js';
 import { notifyTech } from './notifyBoard.js';
+import { isFsStatusCompatible } from './statusMap.js';
 
 const f = config.fields;
 const o = config.objects;
@@ -10,6 +11,11 @@ const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 const OVERLAP_MS = 5 * 60 * 1000;
 const MIN_INTERVAL_MS = 60 * 1000;
 const MAX_UNLINKED_PER_RUN = 30;
+// Safety cap on the drift-verification pass below — the suspect set should
+// normally be small (only jobs the drift badge would actually flag), but
+// this bounds worst-case FS API calls in one tick if a status-list change
+// ever caused mass false-flagging.
+const MAX_DRIFT_CHECK_PER_RUN = 30;
 // Window for assignment reconciliation — slightly larger than the cron interval
 // to avoid gaps if a run starts a few seconds late.
 const RECONCILE_WINDOW_MS = 10 * 60 * 1000;
@@ -63,7 +69,7 @@ export async function runFsSync(env) {
   let linkedOpps;
   try {
     linkedOpps = await sf.query(
-      `SELECT Id, ${f.oppFsTaskId}, ${f.oppFsStatus}
+      `SELECT Id, ${f.oppFsTaskId}, ${f.oppFsStatus}, ${f.oppStatus}
        FROM Opportunity WHERE ${f.oppFsTaskId} != null LIMIT 2000`
     );
   } catch (e) {
@@ -150,6 +156,42 @@ export async function runFsSync(env) {
   if (noMatchIds.length > 0) {
     const updated = [...skipIds, ...noMatchIds];
     await KV.put(NO_MATCH_KEY, JSON.stringify(updated), { expirationTtl: 86400 });
+  }
+
+  // ---- Drift verification (stale FS_Status__c snapshot, not a real
+  // disagreement) ----
+  // Pure SOQL-based check, no FS API calls yet: flag linked opps whose
+  // Project_Status__c and cached FS_Status__c look incompatible per the
+  // same table the board's drift badge uses. Most flagged jobs are a real,
+  // human-visible disagreement that should stay untouched — this pass
+  // never writes Project_Status__c. But the flag might instead mean the
+  // cached FS_Status__c snapshot itself is simply stale (this cron's other
+  // refresh triggers below only catch "FS reports it modified" or "no
+  // snapshot yet", never "snapshot present but wrong"). So each suspect
+  // gets one live FS re-check, and FS_Status__c/FS_Last_Modified__c are
+  // corrected ONLY if that live value actually differs from what's cached.
+  const suspectOpps = linkedOpps
+    .filter(o => o[f.oppFsStatus] && !isFsStatusCompatible(o[f.oppStatus], o[f.oppFsStatus]))
+    .slice(0, MAX_DRIFT_CHECK_PER_RUN);
+
+  if (suspectOpps.length > 0) {
+    console.log(`[fs-sync] ${suspectOpps.length} linked opp(s) flagged by status drift check — verifying live FS status`);
+  }
+
+  for (const opp of suspectOpps) {
+    try {
+      const fullTask = await fs.getTask(opp[f.oppFsTaskId]);
+      const liveStatus = fullTask.Status ?? null;
+      if (liveStatus !== opp[f.oppFsStatus]) {
+        await sf.updateRecord('Opportunity', opp.Id, {
+          [f.oppFsStatus]: liveStatus,
+          [f.oppFsLastModified]: fullTask.LastUpdated ?? null,
+        });
+        console.log(`[fs-sync] corrected stale FS_Status__c snapshot for ${opp.Id}: "${opp[f.oppFsStatus]}" → "${liveStatus}"`);
+      }
+    } catch (e) {
+      console.error(`[fs-sync] drift-check getTask failed for ${opp.Id}:`, e.message);
+    }
   }
 
   // ---- Status snapshot + assignment sync (recently-modified linked tasks) ----

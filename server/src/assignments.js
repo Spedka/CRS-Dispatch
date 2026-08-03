@@ -72,11 +72,20 @@ function fsObjectId() {
 }
 
 // Pass null/empty isoDate to return null which skips the Schedules write.
-export function buildFsSchedules(task, isoDate, localTime = '08:00') {
+// endLocalTime is the dispatcher's actual chosen end time ("HH:MM"); when
+// omitted (schedule-request approvals with no proposed end, or other legacy
+// callers) this falls back to the old start+1hr placeholder rather than
+// failing the sync outright.
+export function buildFsSchedules(task, isoDate, localTime = '08:00', endLocalTime = null) {
   if (!isoDate) return null;
   const start = toFsDateTime(isoDate, localTime);
-  const h = parseInt(start.slice(11, 13), 10);
-  const end = start.slice(0, 11) + String((h + 1) % 24).padStart(2, '0') + start.slice(13);
+  let end;
+  if (endLocalTime) {
+    end = toFsDateTime(isoDate, endLocalTime);
+  } else {
+    const h = parseInt(start.slice(11, 13), 10);
+    end = start.slice(0, 11) + String((h + 1) % 24).padStart(2, '0') + start.slice(13);
+  }
   const existing = Array.isArray(task.Schedules) ? task.Schedules[0] : null;
   const toId = (u) => (typeof u === 'string' ? u : u?.ObjectId ?? null);
   if (existing) {
@@ -136,7 +145,7 @@ export async function createAssignment(env, oppId, {
   let assignmentRec = null;
   try {
     const recs = await sf.query(
-      `SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentDate}, ${o.assignmentStartTime},
+      `SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime},
               ${o.assignmentCompleted}, ${o.assignmentTechRelationship}.Name
        FROM ${o.assignment} WHERE Id='${esc(createdId)}'`
     );
@@ -148,6 +157,7 @@ export async function createAssignment(env, oppId, {
         technicianName: r[o.assignmentTechRelationship]?.Name ?? null,
         workDate: r[o.assignmentDate] ?? null,
         startTime: normTime(r[o.assignmentStartTime]) || '07:00',
+        endTime: normTime(r[o.assignmentEndTime]),
         completed: r[o.assignmentCompleted] === true,
       };
     }
@@ -173,6 +183,10 @@ export async function createAssignment(env, oppId, {
   // (see the fsTaskId check below), but skip explicitly here on the same
   // condition as the guard above so the intent isn't implicit.
   const fsDebug = { techName: assignmentRec?.technicianName ?? null, fsUserId: null, fsTaskId: null, patch: null, error: null };
+  // Set only once the FS status bump below is actually pushed successfully --
+  // used to re-stamp the FS_Status__c/FS_Last_Modified__c mirror so it never
+  // trails behind a bump this same call just made (see the re-stamp below).
+  let fsStampedStatus = null;
   if (assignmentRec?.technicianName && !isTimeOff) {
     const techDir = await getTechDirectory(sf);
     const fsUserId = techDir.byName[assignmentRec.technicianName]?.fsUserId;
@@ -203,12 +217,13 @@ export async function createAssignment(env, oppId, {
           // rather than workDate so adding a later assignment doesn't move FS forward.
           const assignDate = scheduledDate ?? workDate ?? opps[0]?.[f.oppScheduledDate];
           if (assignDate) {
-            const sched = buildFsSchedules(task, assignDate, startTime || '08:00');
+            const sched = buildFsSchedules(task, assignDate, startTime || '08:00', endTime || null);
             if (sched) fsPatch.Schedules = sched;
           }
           fsDebug.patch = Object.keys(fsPatch);
           if (Object.keys(fsPatch).length > 0) {
             await fs.patchTask(fsTaskId, task, fsPatch);
+            if (fsPatch.Status) fsStampedStatus = fsPatch.Status;
           }
         }
       } catch (fsErr) {
@@ -219,12 +234,23 @@ export async function createAssignment(env, oppId, {
   }
 
   // Update SF Opp status/scheduledDate in the same request so the caller
-  // doesn't need a separate updateJob round-trip.
-  if (status != null || scheduledDate != null) {
+  // doesn't need a separate updateJob round-trip. Also re-stamp the
+  // FS_Status__c/FS_Last_Modified__c mirror here if the FS patch above just
+  // bumped FS's status (e.g. Scheduled -> Assigned once a tech is added) --
+  // otherwise the board's FS badge would show the pre-bump value for up to
+  // 5 min until the next fs-sync cron tick, same reasoning as the
+  // PATCH /jobs/:id write-through path's re-stamp.
+  let fsLastModifiedStamp = null;
+  if (status != null || scheduledDate != null || fsStampedStatus) {
     try {
       const oppPayload = {};
       if (status != null) oppPayload[f.oppStatus] = status || null;
       if (scheduledDate != null) oppPayload[f.oppScheduledDate] = scheduledDate === '' ? null : scheduledDate;
+      if (fsStampedStatus) {
+        fsLastModifiedStamp = new Date().toISOString();
+        oppPayload[f.oppFsStatus] = fsStampedStatus;
+        oppPayload[f.oppFsLastModified] = fsLastModifiedStamp;
+      }
       if (Object.keys(oppPayload).length > 0) await sf.updateRecord('Opportunity', oppId, oppPayload);
     } catch (oppErr) {
       console.error('[routes] SF Opp update failed (assignment kept):', oppErr.message);
@@ -236,5 +262,14 @@ export async function createAssignment(env, oppId, {
   // duplicate this call at each site.
   await notifyTech(env, assignmentRec?.technicianName, 'assignment');
 
-  return { assignmentId: createdId, assignment: assignmentRec, fsDebug };
+  return {
+    assignmentId: createdId,
+    assignment: assignmentRec,
+    fsDebug,
+    // Non-null only when this call actually pushed a status bump to FS --
+    // lets the caller (routes.js, and from there the client) update its own
+    // fsStatus/fsLastModified without waiting on a full board reload.
+    fsStatus: fsStampedStatus,
+    fsLastModified: fsLastModifiedStamp,
+  };
 }

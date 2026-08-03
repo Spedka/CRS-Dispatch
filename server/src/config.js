@@ -125,6 +125,8 @@ export const config = {
     state: 'BillingState',
     zip: 'BillingPostalCode',
     propertyContact: 'Property_Contact_Name__c',  // lookup -> Contact
+    apContact: 'Accounts_Payable_Contact_Name__c', // lookup -> Contact, AP contact on management/Customer accounts
+    apContactLid: 'AP_Contact__c',                 // lookup -> Contact, AP contact on LID/property accounts (was AR_Contact__c)
     parent: 'ParentId',                           // self-lookup, management company
   },
 

@@ -41,6 +41,7 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
 @keyframes skel-pulse{0%,100%{opacity:.5;}50%{opacity:1;}}
 .skel-block{background:var(--line-strong);border-radius:6px;animation:skel-pulse 1.3s ease-in-out infinite;}
 .view-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px;}
+.view-head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 .view-head h2{font-family:'Space Grotesk',sans-serif;font-size:21px;font-weight:600;}
 .view-head p{margin:2px 0 0;color:var(--ink-soft);font-size:13px;}
 
@@ -122,6 +123,12 @@ td.open{background:var(--open-bg);}
 .jchip.done .jtime{color:var(--ink-faint);}
 .jdone-mark{color:var(--brand);font-size:11px;line-height:1;}
 .jtime{font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:500;color:var(--brand);background:var(--scheduled-bg);border-radius:4px;padding:1px 5px;flex-shrink:0;}
+
+/* per-cell "completed assignments" collapse toggle (WeekGrid) */
+.done-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;gap:6px;font:inherit;font-size:11px;font-weight:600;color:var(--ink-faint);background:var(--surface-2);border:1px dashed var(--line-strong);border-radius:7px;padding:4px 9px;margin-bottom:6px;cursor:pointer;}
+.done-toggle:hover{color:var(--ink-soft);border-color:var(--ink-faint);}
+.done-toggle[aria-expanded=true]{background:var(--surface);border-style:solid;}
+.done-toggle-chevron{font-size:10px;color:var(--ink-faint);}
 
 /* job search */
 .searchbox{position:relative;max-width:340px;margin-bottom:16px;}
@@ -245,6 +252,10 @@ td.open{background:var(--open-bg);}
 .dayjob:hover{background:var(--surface);border-left-width:3px;}
 .dayjob .jn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--ink);}
 .dayjob .inits{font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:var(--ink-faint);white-space:nowrap;}
+.dayjob .inits-done{opacity:.6;font-style:italic;}
+.done-toggle-mini{font:inherit;font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:600;color:var(--ink-faint);background:var(--surface);border:1px solid var(--line-strong);border-radius:5px;padding:1px 5px;cursor:pointer;flex-shrink:0;}
+.done-toggle-mini:hover{color:var(--ink-soft);border-color:var(--ink-faint);}
+.done-toggle-mini[aria-expanded=true]{background:var(--surface-2);}
 
 .dayoff{display:flex;align-items:center;gap:6px;font-size:11px;background:#EDE4F7;border-left:3px solid #B98FE0;border-radius:5px;padding:3px 7px;cursor:pointer;}
 .dayoff:hover{background:#E1D3F5;}
@@ -407,7 +418,12 @@ td.open{background:var(--open-bg);}
 .ss-input{font:inherit;font-size:12.5px;border:1px solid var(--line-strong);border-radius:8px;padding:6px 10px;color:var(--ink);background:var(--surface);width:180px;}
 .ss-input:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
 .ss-dropdown{position:fixed;overflow-y:auto;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);z-index:300;display:flex;flex-direction:column;gap:10px;padding:10px;}
-.ss-option{font:inherit;font-size:13.5px;line-height:1.4;text-align:left;background:none;border:none;padding:14px 16px;border-radius:7px;cursor:pointer;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
+/* flex-shrink:0 is load-bearing: .ss-option sets overflow:hidden (for its
+   ellipsis), which drops its flexbox automatic min-height to 0 -- without
+   flex-shrink:0, once the list is taller than .ss-dropdown's capped
+   maxHeight, flex squishes every option to cram them all in instead of
+   letting the container's overflow-y:auto scroll. */
+.ss-option{font:inherit;font-size:13.5px;line-height:1.4;text-align:left;background:none;border:none;padding:14px 16px;border-radius:7px;cursor:pointer;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;flex-shrink:0;}
 .ss-option:hover{background:var(--surface-2);}
 .ss-empty{font-size:12px;color:var(--ink-faint);padding:8px 10px;}
 .ss-selected{display:inline-flex;align-items:center;gap:7px;font:inherit;font-size:12.5px;font-weight:600;color:var(--ink);background:var(--scheduled-bg);border:1px solid var(--scheduled);border-radius:8px;padding:6px 10px;cursor:pointer;white-space:nowrap;}
@@ -447,6 +463,7 @@ td.open{background:var(--open-bg);}
 .mgmt-group-chevron{font-size:10px;color:var(--ink-faint);width:10px;flex-shrink:0;}
 .mgmt-group-name{font-weight:600;color:var(--ink);flex:1;}
 .mgmt-group-count{font-size:12px;color:var(--ink-faint);white-space:nowrap;}
+.search-hl{background:#FDE68A;color:var(--ink);border-radius:3px;padding:0 1px;}
 .mgmt-co-tag{font-size:10.5px;font-weight:600;color:var(--ink-faint);background:var(--surface-2);border-radius:5px;padding:1px 6px;margin-left:8px;text-transform:uppercase;letter-spacing:.02em;}
 .invoice-detail{border-top:1px solid var(--line);padding:8px 0;display:grid;grid-template-columns:repeat(2,1fr);gap:4px 16px;}
 .invoice-detail:first-child{border-top:none;}

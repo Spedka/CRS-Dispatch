@@ -39,6 +39,7 @@ export function shapeJob(r) {
         technicianName: a[o.assignmentTechRelationship]?.Name ?? null,
         workDate: a[o.assignmentDate] ?? null,
         startTime: normTime(a[o.assignmentStartTime]) || '07:00',
+        endTime: normTime(a[o.assignmentEndTime]),
         completed: a[o.assignmentCompleted] === true,
       }))
     : [];
@@ -79,7 +80,7 @@ export async function getAllJobs(env) {
            ${f.oppFsTaskId}, ${f.oppFsStatus}, ${f.oppFsLastModified}, ${f.oppType}, CreatedDate, CloseDate,
            ${f.addrStreet}, ${f.addrCity}, ${f.addrState}, ${f.addrZip},
            (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
-                   ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}
+                   ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}, ${o.assignmentCompleted}
             FROM ${o.assignmentChildRelationship})
     FROM Opportunity
     WHERE ${f.oppStatus} IN (${inList})
@@ -151,7 +152,7 @@ api.get('/jobs', async (c) => {
              ${f.oppFsTaskId}, ${f.oppFsStatus}, ${f.oppFsLastModified}, ${f.oppType}, CreatedDate, CloseDate,
              ${f.addrStreet}, ${f.addrCity}, ${f.addrState}, ${f.addrZip},
              (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
-                     ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}
+                     ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}, ${o.assignmentCompleted}
               FROM ${o.assignmentChildRelationship})
       FROM Opportunity
       WHERE ${f.oppStatus} IN (${inList})
@@ -349,6 +350,11 @@ api.patch('/jobs/:id', async (c) => {
 
     let fsUpdated = false;
     let fsError = null;
+    // Surfaced in the response so the client can patch its own local
+    // fsStatus/fsLastModified immediately instead of showing the pre-push
+    // value until its next full board reload.
+    let fsStampedStatus = null;
+    let fsStampedLastModified = null;
 
     const hasDateChange = 'scheduledDate' in body;
     if (fsTaskId && ('status' in body || hasDateChange)) {
@@ -372,21 +378,23 @@ api.patch('/jobs/:id', async (c) => {
         } else if (hasDateChange) {
           // Date change (± status): one getTask for Schedules ObjectId, then one patch.
           let assignTime = '08:00';
+          let assignEndTime = null;
           if (body.scheduledDate) {
             try {
               const asgn = await sf.query(
-                `SELECT ${o.assignmentStartTime} FROM ${o.assignment}
+                `SELECT ${o.assignmentStartTime}, ${o.assignmentEndTime} FROM ${o.assignment}
                  WHERE ${o.assignmentOppLookup} = '${esc(id)}'
                    AND ${o.assignmentCompleted} = false
                    AND ${o.assignmentDate} != null
                  ORDER BY ${o.assignmentDate} ASC NULLS LAST LIMIT 1`
               );
               if (asgn[0]?.[o.assignmentStartTime]) assignTime = asgn[0][o.assignmentStartTime];
+              if (asgn[0]?.[o.assignmentEndTime]) assignEndTime = normTime(asgn[0][o.assignmentEndTime]);
             } catch (_) {}
           }
           const task = await fs.getTask(fsTaskId);
           const sched = body.scheduledDate
-            ? buildFsSchedules(task, body.scheduledDate, assignTime)
+            ? buildFsSchedules(task, body.scheduledDate, assignTime, assignEndTime)
             : [];
           const fsPatch = {};
           if (fsStatus) fsPatch.Status = fsStatus;
@@ -405,9 +413,11 @@ api.patch('/jobs/:id', async (c) => {
         // doesn't report an API-pushed change. Mirrors the same two fields
         // the fs-link endpoint stamps elsewhere in this file.
         if (fsUpdated && fsStatus) {
+          fsStampedStatus = fsStatus;
+          fsStampedLastModified = new Date().toISOString();
           await sf.updateRecord('Opportunity', id, {
-            [f.oppFsStatus]: fsStatus,
-            [f.oppFsLastModified]: new Date().toISOString(),
+            [f.oppFsStatus]: fsStampedStatus,
+            [f.oppFsLastModified]: fsStampedLastModified,
           });
         }
       } catch (fsErr) {
@@ -417,7 +427,7 @@ api.patch('/jobs/:id', async (c) => {
     }
 
     await notifyTv(c.env, 'job-updated');
-    return c.json({ ok: true, fsUpdated, fsError });
+    return c.json({ ok: true, fsUpdated, fsError, fsStatus: fsStampedStatus, fsLastModified: fsStampedLastModified });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -426,11 +436,16 @@ api.patch('/jobs/:id', async (c) => {
 api.post('/jobs/:oppId/assignments', async (c) => {
   try {
     const oppId = c.req.param('oppId');
-    const { technicianId, workDate, startTime, status, scheduledDate, deriveScheduledDate } = await c.req.json();
+    const { technicianId, workDate, startTime, endTime, status, scheduledDate, deriveScheduledDate } = await c.req.json();
     if (!technicianId) return c.json({ error: 'technicianId required' }, 400);
+    // Required for real job assignments (unlike time off / schedule-request
+    // approvals, which call createAssignment directly and keep endTime
+    // optional) — an end time is what lets the FS Schedule sync below carry
+    // a real duration instead of the old hardcoded start+1hr placeholder.
+    if (!endTime) return c.json({ error: 'endTime required' }, 400);
 
     const result = await createAssignment(c.env, oppId, {
-      technicianId, workDate, startTime, status, scheduledDate, deriveScheduledDate,
+      technicianId, workDate, startTime, endTime, status, scheduledDate, deriveScheduledDate,
     });
     await notifyTv(c.env, 'assignment-added');
     return c.json(result);
@@ -449,8 +464,6 @@ api.patch('/assignments/:id', async (c) => {
     if (typeof body.completed === 'boolean') fields[o.assignmentCompleted] = body.completed;
     if ('workDate' in body) fields[o.assignmentDate] = body.workDate === '' ? null : body.workDate;
     if ('startTime' in body) fields[o.assignmentStartTime] = toSfTime(body.startTime || '07:00');
-    // End_Time__c isn't part of the FS-facing job flow (FS's own Schedules always
-    // derive their end as start+1hr) — only time off actually uses it.
     if ('endTime' in body) fields[o.assignmentEndTime] = toSfTime(body.endTime || null);
     if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
 
@@ -459,11 +472,12 @@ api.patch('/assignments/:id', async (c) => {
     let oppId = null;
     let workDateForFs = null;
     let startTimeForFs = null;
+    let endTimeForFs = null;
     let techName = null;
-    const needsFsSync = 'workDate' in body || 'startTime' in body;
+    const needsFsSync = 'workDate' in body || 'startTime' in body || 'endTime' in body;
     try {
       const rows = await sf.query(
-        `SELECT ${o.assignmentOppLookup}, ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentTechRelationship}.Name
+        `SELECT ${o.assignmentOppLookup}, ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}, ${o.assignmentTechRelationship}.Name
          FROM ${o.assignment} WHERE Id = '${esc(id)}' LIMIT 1`
       );
       if (rows[0]) {
@@ -476,6 +490,9 @@ api.patch('/assignments/:id', async (c) => {
           startTimeForFs = 'startTime' in body
             ? (body.startTime || '07:00')
             : normTime(rows[0][o.assignmentStartTime]) || '07:00';
+          endTimeForFs = 'endTime' in body
+            ? (body.endTime || null)
+            : normTime(rows[0][o.assignmentEndTime]);
         }
       }
     } catch (e) {
@@ -497,12 +514,12 @@ api.patch('/assignments/:id', async (c) => {
           const task = await fs.getTask(fsTaskId);
           let sched;
           if (workDateForFs) {
-            sched = buildFsSchedules(task, workDateForFs, startTimeForFs);
+            sched = buildFsSchedules(task, workDateForFs, startTimeForFs, endTimeForFs);
           } else {
             // workDate was cleared — SF update already committed (null date), so just
             // query all assignments; the date filter below drops this one naturally.
             const remaining = await sf.query(
-              `SELECT ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted}
+              `SELECT ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}, ${o.assignmentCompleted}
                FROM ${o.assignment} WHERE ${o.assignmentOppLookup} = '${esc(oppId)}'`
             );
             const next = remaining
@@ -512,7 +529,7 @@ api.patch('/assignments/:id', async (c) => {
                 return d !== 0 ? d : (normTime(a[o.assignmentStartTime]) || '').localeCompare(normTime(b[o.assignmentStartTime]) || '');
               })[0];
             sched = next
-              ? buildFsSchedules(task, next[o.assignmentDate], normTime(next[o.assignmentStartTime]) || '08:00')
+              ? buildFsSchedules(task, next[o.assignmentDate], normTime(next[o.assignmentStartTime]) || '08:00', normTime(next[o.assignmentEndTime]))
               : [];
           }
           if (sched !== null) await fs.patchTask(fsTaskId, task, { Schedules: sched });
@@ -572,7 +589,7 @@ api.delete('/assignments/:id', async (c) => {
           // Query runs after sf.deleteRecord so the removed assignment is gone.
           // Include tech ID so we can check whether this tech still has other assignments.
           const remaining = await sf.query(
-            `SELECT ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentCompleted},
+            `SELECT ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}, ${o.assignmentCompleted},
                     ${o.assignmentTechLookup}
              FROM ${o.assignment} WHERE ${o.assignmentOppLookup} = '${esc(oppId)}'`
           );
@@ -591,7 +608,7 @@ api.delete('/assignments/:id', async (c) => {
           const patch = { Users: updatedUsers };
           if (next) {
             const time = normTime(next[o.assignmentStartTime]) || '08:00';
-            patch.Schedules = buildFsSchedules(task, next[o.assignmentDate], time);
+            patch.Schedules = buildFsSchedules(task, next[o.assignmentDate], time, normTime(next[o.assignmentEndTime]));
           } else {
             patch.Schedules = [];   // no dated assignments remain — clear FS schedule
           }
@@ -739,12 +756,14 @@ api.patch('/accounts/:id/contact', async (c) => {
   try {
     const sf = createSalesforce(c.env);
     const id = c.req.param('id');
-    const { contactId } = await c.req.json();
+    const { contactId, field } = await c.req.json();
     if (!contactId) return c.json({ error: 'contactId required' }, 400);
 
-    await sf.updateRecord('Account', id, {
-      Property_Contact_Name__c: contactId,
-    });
+    const fieldMap = { property: acc.propertyContact, apManagement: acc.apContact, apLid: acc.apContactLid };
+    const sfField = fieldMap[field ?? 'property'];
+    if (!sfField) return c.json({ error: 'Invalid field' }, 400);
+
+    await sf.updateRecord('Account', id, { [sfField]: contactId });
 
     return c.json({ ok: true });
   } catch (e) {
@@ -781,7 +800,8 @@ api.get('/accounts', async (c) => {
     const [accountRecords, contactRecords, billingRecords] = await Promise.all([
       sf.query(`SELECT Id, Name, ${acc.lid}, ${acc.type}, ${acc.industry}, ${acc.phone}, ${acc.website},
                        ${acc.street}, ${acc.city}, ${acc.state}, ${acc.zip},
-                       ${acc.propertyContact}, ${acc.parent}, Parent.Name, LastModifiedDate
+                       ${acc.propertyContact}, ${acc.apContact}, ${acc.apContactLid},
+                       ${acc.parent}, Parent.Name, RecordType.DeveloperName, LastModifiedDate
                 FROM Account ORDER BY Name`),
       sf.query(`SELECT Id, Name FROM Contact`),
       sf.query(`SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}
@@ -842,6 +862,17 @@ api.get('/accounts', async (c) => {
 
     return c.json(accountRecords.map((r) => {
       const billing = billingByLid.get(r[acc.lid]) ?? { unpaid: [], readyToBill: [] };
+      // Two SF fields represent the same concept (AP contact — who invoices go
+      // to), split by which kind of account they live on: apContact for
+      // management/Customer accounts, apContactLid for LID/property accounts.
+      // Prefer whichever matches this account's own RecordType, but fall back
+      // to the other field if that one is empty — a handful of accounts only
+      // have the "other" field populated (leftover from before AP_Contact__c
+      // replaced AR_Contact__c), and hiding real data isn't the goal here.
+      const isLidAccount = r.RecordType?.DeveloperName === 'LID_Account';
+      const apContactId = (isLidAccount ? r[acc.apContactLid] : r[acc.apContact])
+        ?? (isLidAccount ? r[acc.apContact] : r[acc.apContactLid])
+        ?? null;
       return {
         id: r.Id,
         name: r.Name,
@@ -856,8 +887,11 @@ api.get('/accounts', async (c) => {
         zip: r[acc.zip] ?? null,
         parentId: r[acc.parent] ?? null,
         parentName: r.Parent?.Name ?? null,
+        recordType: r.RecordType?.DeveloperName ?? null,
         propertyContactId: r[acc.propertyContact] ?? null,
         propertyContactName: contactNameById.get(r[acc.propertyContact]) ?? null,
+        apContactId,
+        apContactName: contactNameById.get(apContactId) ?? null,
         lastModifiedDate: r.LastModifiedDate ?? null,
         unpaidJobs: billing.unpaid,
         readyToBillJobs: billing.readyToBill,
@@ -883,6 +917,7 @@ api.patch('/contacts/:id', async (c) => {
     if ('email' in body) fields.Email = body.email || null;
     if ('phone' in body) fields.Phone = body.phone || null;
     if ('title' in body) fields.Title = body.title || null;
+    if ('accountId' in body) fields.AccountId = body.accountId || null;
 
     if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
     await sf.updateRecord('Contact', id, fields);
@@ -925,6 +960,7 @@ api.get('/contacts', async (c) => {
       phone: r.Phone ?? null,
       title: r.Title ?? null,
       company: r.Account?.Name ?? null,
+      accountId: r.AccountId ?? null,
       accounts: accountsByContact.get(r.Id) ?? [],
       lastModifiedDate: r.LastModifiedDate ?? null,
     })));
@@ -1026,19 +1062,11 @@ api.post('/jobs/:id/fs-link', async (c) => {
           `SELECT ${f.oppScheduledDate} FROM Opportunity WHERE Id = '${esc(id)}' LIMIT 1`
         ),
         fs.getTask(fsTaskId),
-        sf.query(`SELECT ${o.assignmentTechRelationship}.Name, ${o.assignmentStartTime} FROM ${o.assignment} WHERE ${o.assignmentOppLookup} = '${esc(id)}'`),
+        sf.query(`SELECT ${o.assignmentTechRelationship}.Name, ${o.assignmentStartTime}, ${o.assignmentEndTime} FROM ${o.assignment} WHERE ${o.assignmentOppLookup} = '${esc(id)}'`),
         getTechDirectory(sf),
       ]);
       const sfOpp = oppRows[0];
       if (!sfOpp) throw new Error('Opp not found');
-
-      // Stamp the raw FS status snapshot now that we have the full task —
-      // same fields fsSync.js's cron writes. Display-only; nothing reads this
-      // to drive a status write anymore.
-      await sf.updateRecord('Opportunity', id, {
-        [f.oppFsStatus]: fullTask.Status ?? null,
-        [f.oppFsLastModified]: fullTask.LastUpdated ?? null,
-      });
 
       // Sync users: FS → SF — find techs in FS not yet in SF.
       const syncableUserIds = (Array.isArray(fullTask.Users) ? fullTask.Users : [])
@@ -1067,12 +1095,24 @@ api.post('/jobs/:id/fs-link', async (c) => {
       if (targetFsStatus) fsPatch.Status = targetFsStatus;
       if (sfOpp[f.oppScheduledDate]) {
         const firstTime = existingAssignments[0]?.[o.assignmentStartTime] ?? '08:00';
-        const sched = buildFsSchedules(fullTask, sfOpp[f.oppScheduledDate], firstTime);
+        const firstEndTime = normTime(existingAssignments[0]?.[o.assignmentEndTime]);
+        const sched = buildFsSchedules(fullTask, sfOpp[f.oppScheduledDate], firstTime, firstEndTime);
         if (sched) fsPatch.Schedules = sched;
       }
       if (Object.keys(fsPatch).length > 0) {
         await fs.patchTask(fsTaskId, fullTask, fsPatch);
       }
+
+      // Stamp the raw FS status snapshot now that we know the FINAL status --
+      // targetFsStatus if we just bumped it (Scheduled -> Assigned), otherwise
+      // whatever FS already had. Done after the patch above (not before) so a
+      // bump this same call just made is never immediately shown as stale
+      // until the next fs-sync cron tick. Display-only; nothing reads this
+      // to drive a status write anymore.
+      await sf.updateRecord('Opportunity', id, {
+        [f.oppFsStatus]: targetFsStatus ?? fullTask.Status ?? null,
+        [f.oppFsLastModified]: Object.keys(fsPatch).length > 0 ? new Date().toISOString() : (fullTask.LastUpdated ?? null),
+      });
 
       // Add missing SF assignments from FS.
       if (syncableUserIds.length > 0) {
