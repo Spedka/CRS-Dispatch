@@ -175,7 +175,7 @@ td.open{background:var(--open-bg);}
 .segbtn.on{background:var(--surface);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(22,32,46,.08);}
 .techfilter{font:inherit;font-size:12.5px;font-weight:500;color:var(--ink);background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:6px 12px;cursor:pointer;}
 .techfilter:hover{border-color:var(--ink-faint);}
-.lidtag{font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line);border-radius:5px;padding:2px 7px;}
+.lidtag,.quote-type{font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line);border-radius:5px;padding:2px 7px;}
 .unschedule{font:inherit;font-size:12px;font-weight:500;color:var(--ink-soft);background:none;border:none;cursor:pointer;padding:4px 6px;border-radius:6px;text-decoration:underline;text-underline-offset:2px;}
 .unschedule:hover{color:var(--emergency);background:var(--emergency-bg);text-decoration:none;}
 .unsched-tag{font-size:11px;font-weight:600;color:var(--ink-faint);background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:3px 9px;}
@@ -248,6 +248,14 @@ td.open{background:var(--open-bg);}
 .dayjob[data-status=scheduled]{border-left-color:var(--scheduled);}
 .dayjob[data-status=dispatched]{border-left-color:var(--dispatched);}
 .dayjob[data-status=emergency]{border-left-color:var(--emergency);}
+/* QuotesMonthGrid/QuotesWeekGrid only -- a quote can appear twice (once for
+   its due date, once for its review deadline), so these are colored by
+   which kind of entry it is rather than by status like the Tech Schedule
+   calendar above. Blue vs. amber (not blue vs. indigo) deliberately --
+   --scheduled/--dispatched are both blue-family and too close to tell apart
+   at a 3px border, see the legend (.quote-cal-legend) for the non-color cue. */
+.dayjob[data-kind=due]{border-left-color:var(--scheduled);}
+.dayjob[data-kind=review]{border-left-color:var(--needs);}
 .dayjob{cursor:pointer;}
 .dayjob:hover{background:var(--surface);border-left-width:3px;}
 .dayjob .jn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--ink);}
@@ -291,7 +299,7 @@ td.open{background:var(--open-bg);}
 .notes-pop-list{overflow-y:auto;padding:6px;display:flex;flex-direction:column;gap:2px;}
 .notes-pop-empty{font-size:12.5px;color:var(--ink-faint);padding:14px 10px;text-align:center;}
 .notes-pop-err{color:var(--emergency);font-size:12.5px;}
-.notes-pop-item{display:flex;flex-direction:column;align-items:stretch;gap:2px;text-align:left;background:none;border:none;border-radius:8px;padding:8px 10px;cursor:pointer;}
+.notes-pop-item{display:flex;flex-direction:column;align-items:stretch;gap:2px;text-align:left;background:none;border:none;border-radius:8px;padding:8px 10px;cursor:pointer;text-decoration:none;}
 .notes-pop-item:hover{background:var(--surface-2);}
 /* JobNotesBadge only -- wraps .notes-pop-item with a hover-revealed delete
    button; NotesMenu's own list uses .notes-pop-item directly, unwrapped. */
@@ -353,6 +361,30 @@ td.open{background:var(--open-bg);}
 .job-notes-wrap{position:relative;display:inline-flex;margin-left:auto;}
 .job-notes-badge{font:inherit;font-size:12.5px;font-weight:700;padding:5px 12px;border-radius:7px;letter-spacing:.3px;flex-shrink:0;cursor:pointer;color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line-strong);}
 .job-notes-badge:hover{color:var(--ink);border-color:var(--ink-faint);}
+/* Groups Sent + Documents as one unit -- .job-notes-wrap's own margin-left:auto
+   is meant for a single trailing badge; with two in a row it splits the free
+   space between them instead of pushing the pair together, so it's reset to 0
+   on children here and only the group as a whole gets the auto margin. */
+.quote-actions{display:flex;gap:8px;margin-left:auto;}
+.quote-actions .job-notes-wrap{margin-left:0;}
+/* Same due/review color coding as the Quotes calendar's .dayjob[data-kind=...]. */
+.quote-due{color:var(--scheduled);}
+.quote-review-deadline{color:var(--needs);}
+/* Calendar-mode-only key explaining the due/review dot colors above the grid. */
+.quote-cal-legend{display:flex;gap:16px;margin-bottom:10px;font-size:12px;color:var(--ink-soft);}
+.quote-cal-legend-item{display:inline-flex;align-items:center;gap:6px;}
+.quote-cal-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.quote-cal-dot.due{background:var(--scheduled);}
+.quote-cal-dot.review{background:var(--needs);}
+/* QuotesTab schedbar: the Needs Quote/Sent view toggle stays put on the left
+   (.seg's own margin-left:auto would otherwise fight the trailing group for
+   space), and the Week/Month + List/Calendar segs are grouped into one
+   right-aligned unit for the same reason .quote-actions groups Sent+Documents
+   above -- multiple auto-margined siblings split the free space between
+   themselves instead of moving together. */
+.quote-view-seg{margin-left:0;}
+.schedbar-actions{display:flex;gap:8px;margin-left:auto;}
+.schedbar-actions .seg{margin-left:0;}
 
 /* FS drift badge — dispatch status vs FS's own reported status.
    Reuses the same green/grey as .fs-badge.linked/.unlinked above so the
@@ -454,6 +486,14 @@ td.open{background:var(--open-bg);}
 .icp-company{font-size:11px;color:var(--ink-faint);}
 .icp-cancel{font:inherit;font-size:12px;font-weight:500;color:var(--ink-faint);background:none;border:none;cursor:pointer;text-align:left;padding:2px 4px;text-decoration:underline;text-underline-offset:2px;}
 .icp-cancel:hover{color:var(--ink);}
+/* Selected-recipient chips, QuoteRecipientButton only. */
+.icp-chips{display:flex;flex-wrap:wrap;gap:5px;}
+.icp-chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:500;color:var(--ink);background:var(--surface);border:1px solid var(--line-strong);border-radius:999px;padding:3px 6px 3px 9px;}
+.icp-chip button{font:inherit;font-size:13px;line-height:1;color:var(--ink-faint);background:none;border:none;cursor:pointer;padding:0 2px;}
+.icp-chip button:hover{color:var(--emergency);}
+.icp-send-btn,.fs-btn-search{display:inline-flex;align-items:center;justify-content:center;padding:0 16px;height:32px;background:var(--brand);color:#fff;border:none;border-radius:7px;font:600 13px/1 inherit;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:background .15s;}
+.icp-send-btn:hover:not(:disabled),.fs-btn-search:hover:not(:disabled){background:var(--brand-bright);}
+.icp-send-btn:disabled,.fs-btn-search:disabled{opacity:.45;cursor:default;}
 
 /* Accounts tab — management-company groups + invoice detail popup */
 .mgmt-groups{display:flex;flex-direction:column;gap:8px;}

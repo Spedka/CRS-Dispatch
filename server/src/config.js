@@ -31,6 +31,20 @@ export const config = {
     addrState: 'Job_State__c',
     addrZip: 'Job_Zip_Code__c',
     oppType: 'Opportunity_Type__c',
+    // Quoting due date — Date field on Opportunity. Used only by the Quotes tab.
+    oppBidDate: 'Bid_Date__c',
+    // Standard Account lookup — the bidding customer account. Used only by the Quotes tab.
+    oppAccountRelationship: 'Account',
+    // Checkbox stamped true once the "Sent" email actually goes out — not
+    // when status merely changes, so the plain status dropdown never sets it.
+    // (Renamed from Quote_Sent__c.)
+    oppSentToCustomer: 'Sent_To_Customer__c',
+    // Checkbox stamped true once the "Review" email actually goes out — same
+    // convention as oppSentToCustomer above.
+    oppReadyForReview: 'Ready_For_Review__c',
+    // DateTime field — internal review deadline, shown alongside oppBidDate
+    // and used to place a second calendar entry for a quote.
+    oppReviewDeadline: 'Review_Deadline__c',
 
     // ---- Field Squared integration ----
     // External ID field on Opportunity — Text(50), External ID, Unique.
@@ -130,6 +144,13 @@ export const config = {
     parent: 'ParentId',                           // self-lookup, management company
   },
 
+  // ---- Quotes tab (Opportunities in the pre-scheduling quoting stage) ----
+  quotes: {
+    status: 'Needs Quote', // Project_Status__c value that puts an Opportunity on the Quotes tab
+    reviewStatus: 'Needs Quote Review', // ...the internal-review stage
+    sentStatus: 'Pending Customer Approval', // ...the "Quote Sent" tab -- status-based, same as the other two views (the Sent_To_Customer__c checkbox is still written by the Sent button, just no longer used to decide what's displayed)
+  },
+
   // ---- Invoicing__c (invoice records tied to a Job/Opportunity) ----
   invoicing: {
     sobject: 'Invoicing__c',
@@ -143,5 +164,67 @@ export const config = {
     arNumber: 'AR_Number__c',
     percentOfProject: 'Percent_of_Project__c',
     billingType: 'Billing_Type__c',
+  },
+
+  // ---- Available_Inventory__c (current parts stock at a location). A
+  // "location" is an Opportunity lookup — either a real job Opportunity, or
+  // the single sentinel "Service Stock" Opportunity (its Id lives in the env
+  // var SERVICE_STOCK_OPPORTUNITY_ID, same convention as
+  // TIME_OFF_OPPORTUNITY_ID/NEW_WO_OPPORTUNITY_ID). Service Stock is kept off
+  // the dispatch board by giving it a Project_Status__c value outside
+  // jobStatusValues ("AR Approval", matching TIME_OFF_OPPORTUNITY_ID) — no
+  // extra exclusion logic needed anywhere. One row per Opportunity+Product
+  // pair — Add Inventory upserts into it, Part Checkout decrements it.
+  inventory: {
+    sobject: 'Available_Inventory__c',
+    opportunity: 'Opportunity__c',
+    opportunityRelationship: 'Opportunity__r',
+    product: 'Product__c',                      // lookup -> standard Product2
+    productRelationship: 'Product__r',
+    quantity: 'Quantity__c',                    // allowed to go negative, see parts.js adjustInventory()
+    price: 'Price__c',                          // mirrored from PricebookEntry.UnitPrice on every Add Inventory write — not a formula field, Product2 has no price field of its own
+    poNumber: 'PO_Number__c',
+    poUploaded: 'PO_Uploaded__c',
+  },
+
+  // ---- Part_Checkout__c (append-only log of a checkout event — one row per
+  // part per checkout submission, never updated after creation).
+  // Material_Req_Attached__c is required-in-the-UI only — deliberately no SF
+  // validation rule or Flow enforces it, same no-Flow convention as the rest
+  // of this feature.
+  checkout: {
+    sobject: 'Part_Checkout__c',
+    opportunity: 'Opportunity__c',
+    opportunityRelationship: 'Opportunity__r',
+    checkedOutBy: 'Checked_Out_By__c',           // lookup -> Technician__c, active-only filtered in UI
+    checkedOutByRelationship: 'Checked_Out_By__r',
+    checkoutDate: 'Checkout_Date__c',            // defaults to today in UI, editable
+    truckNumber: 'Truck_Number__c',              // required (live validation rule confirms it, matches UI)
+    materialRequestNumber: 'Material_Request_Number__c',
+    materialReqAttached: 'Material_Req_Attached__c',
+    product: 'Product__c',
+    productRelationship: 'Product__r',
+    quantity: 'Quantity__c',
+    flaggedForReview: 'Flag_For_Review__c',      // NOT required — confirmed live API name (no "ged")
+    inventory: 'Inventory__c',                   // lookup -> Available_Inventory__c, the row this checkout decremented
+    inventoryRelationship: 'Inventory__r',
+  },
+
+  // ---- Product2 (standard parts catalog — confirmed live in this org: real,
+  // populated, already the catalog QuoteLineItem.Product2Id points to for
+  // quoting). Product2 has no price field itself — Price__c on
+  // Available_Inventory__c is sourced from PricebookEntry.UnitPrice on the
+  // Standard Price Book instead (see parts.js's catalog query, which joins
+  // the two client-side).
+  product: {
+    sobject: 'Product2',
+    name: 'Name',
+    code: 'ProductCode',
+    description: 'Description',
+    family: 'Family',
+    vendor: 'Vendor__c',
+    brand: 'Brand__c',
+    category: 'Product_Category__c',
+    subCategory: 'Product_SubCategory__c',
   },
 };

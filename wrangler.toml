@@ -39,8 +39,24 @@ SF_LOGIN_URL = "https://crsbuilding.my.salesforce.com"
 TIME_OFF_OPPORTUNITY_ID = "006Uh00000v6XJpIAM"
 NEW_WO_OPPORTUNITY_ID   = "006Uh00000v5szqIAA"
 
+# Same sentinel-Opportunity trick, for the Parts tab's general (not-a-job)
+# stock bucket. Create a real Opportunity named "Service Stock" under Account
+# "CRS Building Automation Systems, Inc" (no trailing period -- same Account
+# the two sentinels above use), Project_Status__c = "AR Approval" (same value
+# TIME_OFF_OPPORTUNITY_ID uses, already outside jobStatusValues), then paste
+# its Id here. Left blank until that Opportunity exists -- GET /parts/*
+# routes return a clear 500 rather than failing silently while this is unset.
+SERVICE_STOCK_OPPORTUNITY_ID = "006Uh00000xQHpfIAG"
+
 # Public URL of the chalkboard app — magic links from POST /api/tech-link point here.
 CHALKBOARD_APP_URL = "https://chalkboard.crsbas.workers.dev"
+
+# Verified Organization-Wide Email Address (Setup → Organization-Wide
+# Addresses, DisplayName "CRS Updates") used by sf.sendEmail() (server/src/
+# salesforce.js) for the Quotes tab's "Sent" notification -- makes the email
+# appear as "CRS Updates" rather than the Client Credentials integration
+# user's own name. Falls back to senderType: CurrentUser if unset.
+SF_ORG_WIDE_EMAIL = "adminandcustomersupport@crssafetysolutions.com"
 
 # Optional: second-layer token cache so cold isolates don't each re-auth.
 [[kv_namespaces]]

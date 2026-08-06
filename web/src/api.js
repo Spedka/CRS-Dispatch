@@ -151,4 +151,53 @@ export const api = {
   removeNote: (id) =>
     fetch(`/api/notes/${id}`, { method: 'DELETE' }).then(j),
 
+  getQuotes: (view) =>
+    fetch('/api/jobs/quotes' + (view ? `?view=${encodeURIComponent(view)}` : '')).then(j),
+
+  getQuoteDocuments: (oppId) =>
+    fetch(`/api/jobs/quotes/${oppId}/documents`).then(j),
+
+  getUsers: () => fetch('/api/users').then(j),
+
+  sendQuoteEmail: (oppId, recipients) =>
+    fetch(`/api/jobs/quotes/${oppId}/send-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipients }),
+    }).then(j),
+
+  sendQuoteReviewEmail: (oppId, recipients) =>
+    fetch(`/api/jobs/quotes/${oppId}/send-review-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipients }),
+    }).then(j),
+
+  getPartsInventory: () => fetch('/api/parts/inventory').then(j),
+
+  getPartsCatalog: () => fetch('/api/parts/catalog').then(j),
+
+  getServiceStock: () => fetch('/api/parts/service-stock').then(j),
+
+  addInventory: (opportunityId, { poNumber, poUploaded, lines }) =>
+    fetch('/api/parts/inventory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ opportunityId, poNumber, poUploaded, lines }),
+    }).then(j),
+
+  checkoutParts: (opportunityId, { checkedOutById, checkoutDate, truckNumber, materialRequestNumber, materialReqAttached, lines }) =>
+    fetch('/api/parts/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ opportunityId, checkedOutById, checkoutDate, truckNumber, materialRequestNumber, materialReqAttached, lines }),
+    }).then(j),
+
+  updateInventoryRow: (id, fields) =>
+    fetch(`/api/parts/inventory/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+    }).then(j),
+
 };

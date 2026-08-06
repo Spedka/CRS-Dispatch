@@ -4,6 +4,8 @@ import { api } from './api.js';
 
 // Map your real status strings to a color treatment. Unknown -> neutral.
 const STATUS_CLASS = {
+  'Needs Quote': 'needs',             // amber — pre-scheduling quote stage, Quotes tab only
+  'Needs Quote Review': 'dispatched', // indigo — quote drafted, awaiting internal review
   'Pending Customer Approval': 'scheduled',
   'Quoted': 'scheduled',
   'Parts Ordered': 'needs',
@@ -478,6 +480,16 @@ export default function App() {
   const [accounts, setAccounts] = useState([]);
   const [accountsLoading, setAccountsLoading] = useState(false);
   const [accountsLoaded, setAccountsLoaded] = useState(false);
+  const [quotes, setQuotes] = useState([]);
+  const [quotesLoading, setQuotesLoading] = useState(false);
+  // 'needs' (Project_Status__c = Needs Quote) or 'sent' (Quote_Sent__c checked)
+  // -- different SOQL filters, so a view change re-fetches. quotesLoadedView
+  // tracks which one `quotes` currently holds, same lazy-once idea as
+  // contactsLoaded/accountsLoaded but keyed by view instead of a plain bool.
+  const [quotesView, setQuotesView] = useState('needs');
+  const [quotesLoadedView, setQuotesLoadedView] = useState(null);
+  const [emailUsers, setEmailUsers] = useState([]);
+  const [emailUsersLoaded, setEmailUsersLoaded] = useState(false);
   const [scheduleRequests, setScheduleRequests] = useState([]);
   const [requestsLoading, setRequestsLoading] = useState(false);
   // Resolved (Approved/Denied/Withdrawn) history -- deliberately not part of
@@ -489,6 +501,13 @@ export default function App() {
   const [previousRequestsLoaded, setPreviousRequestsLoaded] = useState(false);
   const [manageTechsOpen, setManageTechsOpen] = useState(false);
   const [techLinksOpen, setTechLinksOpen] = useState(false);
+  const [inventoryGroups, setInventoryGroups] = useState([]);
+  const [inventoryLoading, setInventoryLoading] = useState(false);
+  const [inventoryLoaded, setInventoryLoaded] = useState(false);
+  const [catalog, setCatalog] = useState([]);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [serviceStock, setServiceStock] = useState(null);       // {id, name}
+  const [serviceStockLoaded, setServiceStockLoaded] = useState(false);
 
   useEffect(() => {
     localStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
@@ -644,6 +663,46 @@ export default function App() {
     await api.updateAccount(accountId, fields);
   }, []);
 
+  useEffect(() => {
+    if (tab !== 'parts' || inventoryLoaded) return;
+    setInventoryLoading(true);
+    api.getPartsInventory()
+      .then((g) => { setInventoryGroups(g); setInventoryLoaded(true); })
+      .catch((e) => flash(`Parts error: ${e.message}`))
+      .finally(() => setInventoryLoading(false));
+  }, [tab, inventoryLoaded]);
+
+  useEffect(() => {
+    if (tab !== 'parts' || catalogLoaded) return;
+    api.getPartsCatalog().then((p) => { setCatalog(p); setCatalogLoaded(true); }).catch((e) => flash(`Catalog error: ${e.message}`));
+  }, [tab, catalogLoaded]);
+
+  useEffect(() => {
+    if (tab !== 'parts' || serviceStockLoaded) return;
+    api.getServiceStock().then((s) => { setServiceStock(s); setServiceStockLoaded(true); }).catch((e) => flash(`Service Stock error: ${e.message}`));
+  }, [tab, serviceStockLoaded]);
+
+  const updateInventoryRow = useCallback(async (rowId, fields) => {
+    setInventoryGroups((prev) => prev.map((g) => ({
+      ...g, rows: g.rows.map((r) => r.id === rowId ? { ...r, ...fields } : r),
+    })));
+    await api.updateInventoryRow(rowId, fields);
+  }, []);
+
+  const refreshInventory = useCallback(async () => {
+    const g = await api.getPartsInventory();
+    setInventoryGroups(g);
+  }, []);
+
+  useEffect(() => {
+    if (tab !== 'quotes' || quotesLoadedView === quotesView) return;
+    setQuotesLoading(true);
+    api.getQuotes(quotesView === 'needs' ? undefined : quotesView)
+      .then((qs) => { setQuotes(qs); setQuotesLoadedView(quotesView); })
+      .catch((e) => flash(`Quotes error: ${e.message}`))
+      .finally(() => setQuotesLoading(false));
+  }, [tab, quotesView, quotesLoadedView]);
+
   // Re-fetched on every visit (not cached like contacts) — a stale queue defeats
   // the point of a negotiation panel where the office and tech take turns.
   const loadRequests = useCallback(async () => {
@@ -753,6 +812,80 @@ export default function App() {
   // the pending ref, both stable) so JobCard's React.memo below actually works:
   // an unstable handler prop defeats memoization for every row, not just one.
   const flash = useCallback((msg) => { setToast(msg); setTimeout(() => setToast(null), 2200); }, []);
+
+  // Always re-fetches whichever view (needs/sent) is currently showing
+  // afterward, rather than optimistically patching local state -- a status
+  // change can move a quote out of (or, since Quote_Sent__c is independent
+  // of status, sometimes not out of) the currently-visible filter, and only
+  // the server knows which for sure.
+  const updateQuoteStatus = useCallback(async (quote, status) => {
+    try {
+      const result = await api.updateJob(quote.id, { status });
+      if (result.fsUpdated) flash('Status updated · FS synced');
+      else if (result.fsError) flash(`Salesforce updated · FS error: ${result.fsError}`);
+      else flash('Status updated');
+    } catch (e) {
+      flash(`Could not update: ${e.message}`);
+    } finally {
+      api.getQuotes(quotesView === 'needs' ? undefined : quotesView).then(setQuotes).catch(() => {});
+    }
+  }, [flash, quotesView]);
+
+  const loadEmailUsers = useCallback(() => {
+    if (emailUsersLoaded) return;
+    api.getUsers()
+      .then((u) => { setEmailUsers(u); setEmailUsersLoaded(true); })
+      .catch((e) => flash(`Couldn't load people: ${e.message}`));
+  }, [emailUsersLoaded, flash]);
+
+  // Email goes out FIRST -- the status only moves to Pending Customer
+  // Approval if the email actually sends. This is the opposite order (and
+  // opposite guarantee) from the rest of this app's write-through convention
+  // (SF write lands unconditionally, side effects are best-effort after) --
+  // here the status change itself is the thing gated on success, by design,
+  // so a failed send never leaves a quote looking like it went to the
+  // customer when it didn't.
+  const sendQuote = useCallback(async (quote, recipientEmails) => {
+    try {
+      const emailResult = await api.sendQuoteEmail(quote.id, recipientEmails);
+      try {
+        const result = await api.updateJob(quote.id, { status: 'Pending Customer Approval' });
+        if (emailResult.stampError) {
+          flash(`Quote sent · Sent_To_Customer__c not updated: ${emailResult.stampError}`);
+        } else {
+          flash(result.fsUpdated ? 'Quote sent · FS synced · email delivered' : 'Quote sent · email delivered');
+        }
+      } catch (e) {
+        flash(`Email delivered · status NOT updated: ${e.message}`);
+      }
+    } catch (e) {
+      flash(`Email failed, status left unchanged: ${e.message}`);
+    } finally {
+      api.getQuotes(quotesView === 'needs' ? undefined : quotesView).then(setQuotes).catch(() => {});
+    }
+  }, [flash, quotesView]);
+
+  // Same email-first/status-second/no-rollback-on-email-failure guarantee as
+  // sendQuote above, for the earlier "ready for internal review" stage.
+  const reviewQuote = useCallback(async (quote, recipientEmails) => {
+    try {
+      const emailResult = await api.sendQuoteReviewEmail(quote.id, recipientEmails);
+      try {
+        const result = await api.updateJob(quote.id, { status: 'Needs Quote Review' });
+        if (emailResult.stampError) {
+          flash(`Review requested · Ready_For_Review__c not updated: ${emailResult.stampError}`);
+        } else {
+          flash(result.fsUpdated ? 'Review requested · FS synced · email delivered' : 'Review requested · email delivered');
+        }
+      } catch (e) {
+        flash(`Email delivered · status NOT updated: ${e.message}`);
+      }
+    } catch (e) {
+      flash(`Email failed, status left unchanged: ${e.message}`);
+    } finally {
+      api.getQuotes(quotesView === 'needs' ? undefined : quotesView).then(setQuotes).catch(() => {});
+    }
+  }, [flash, quotesView]);
 
   const track = useCallback(async (fn) => {
     pending.current += 1;
@@ -1144,6 +1277,12 @@ export default function App() {
             if (tab === 'accounts') {
               api.getAccounts().then(setAccounts).catch((e) => flash(`Accounts error: ${e.message}`));
             }
+            if (tab === 'quotes') {
+              api.getQuotes(quotesView === 'needs' ? undefined : quotesView).then(setQuotes).catch((e) => flash(`Quotes error: ${e.message}`));
+            }
+            if (tab === 'parts') {
+              api.getPartsInventory().then(setInventoryGroups).catch((e) => flash(`Parts error: ${e.message}`));
+            }
           }}
           title="Reload from Salesforce"
         >↻ Refresh</button>
@@ -1160,6 +1299,8 @@ export default function App() {
         <button className={`tab ${tab === 'requests' ? 'active' : ''}`} onClick={() => setTab('requests')}>Requests</button>
         <button className={`tab ${tab === 'contacts' ? 'active' : ''}`} onClick={() => setTab('contacts')}>Contacts</button>
         <button className={`tab ${tab === 'accounts' ? 'active' : ''}`} onClick={() => setTab('accounts')}>Accounts</button>
+        <button className={`tab ${tab === 'quotes' ? 'active' : ''}`} onClick={() => setTab('quotes')}>Quotes</button>
+        <button className={`tab ${tab === 'parts' ? 'active' : ''}`} onClick={() => setTab('parts')}>Parts</button>
       </nav>
 
       <main>
@@ -1210,7 +1351,7 @@ export default function App() {
             <div className="rangefilter">
               <span className="rl">Closed</span>
               <DatePicker value={closedFrom} onChange={setClosedFrom} placeholder="From" />
-              <span className="dash">–</span>
+              <span className="dash">-</span>
               <DatePicker value={closedTo} onChange={setClosedTo} placeholder="To" />
               <select
                 className="ctlselect datepreset"
@@ -1367,6 +1508,32 @@ export default function App() {
             onRefresh={async () => { const a = await api.getAccounts(); setAccounts(a); }}
             onUpdateAccount={updateAccount}
             onUpdateContact={updateContact}
+          />
+        )}
+        {tab === 'quotes' && (
+          <QuotesTab
+            quotes={quotes}
+            loading={quotesLoading}
+            quotesView={quotesView}
+            onViewChange={setQuotesView}
+            onStatusChange={updateQuoteStatus}
+            onSend={sendQuote}
+            onReview={reviewQuote}
+            users={emailUsers}
+            usersLoaded={emailUsersLoaded}
+            onLoadUsers={loadEmailUsers}
+          />
+        )}
+        {tab === 'parts' && (
+          <PartsTab
+            groups={inventoryGroups}
+            loading={inventoryLoading}
+            jobs={jobs}
+            techs={techs}
+            catalog={catalog}
+            serviceStock={serviceStock}
+            onRefresh={refreshInventory}
+            onUpdateRow={updateInventoryRow}
           />
         )}
       </main>
@@ -4882,6 +5049,993 @@ function MonthGrid({ jobs, anchor, techFilter, onJobClick, timeOff, onEditOff })
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Quotes with no due date sort after every dated quote, list-view only —
+// the calendar view can't place them at all, so they're simply omitted there.
+const quoteSortKey = (q) => q.dueDate || '9999-99-99';
+
+function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, onSend, onReview, users, usersLoaded, onLoadUsers }) {
+  const [mode, setMode] = useState('list');
+  const [calMode, setCalMode] = useState('month');
+  const [anchor, setAnchor] = useState(() => startOfDay(new Date()));
+  const [selectedQuote, setSelectedQuote] = useState(null);
+
+  const sorted = useMemo(
+    () => [...quotes].sort((a, b) => quoteSortKey(a).localeCompare(quoteSortKey(b))),
+    [quotes]
+  );
+
+  const shift = (dir) => {
+    const d = new Date(anchor);
+    if (calMode === 'week') d.setDate(d.getDate() + dir * 7);
+    else d.setMonth(d.getMonth() + dir);
+    setAnchor(startOfDay(d));
+  };
+
+  useEffect(() => {
+    if (!selectedQuote) return;
+    const onKey = (e) => { if (e.key === 'Escape') setSelectedQuote(null); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [selectedQuote]);
+
+  return (
+    <section>
+      <div className="view-head">
+        <div>
+          <h2>Quotes</h2>
+          <p>{
+            quotesView === 'sent' ? 'Opportunities a quote has been sent for, live from Salesforce.' :
+            quotesView === 'review' ? 'Opportunities with a quote ready for internal review, live from Salesforce.' :
+            'Opportunities awaiting a quote, live from Salesforce.'
+          }</p>
+        </div>
+      </div>
+
+      <div className="schedbar">
+        <div className="seg quote-view-seg">
+          <button className={`segbtn ${quotesView === 'needs' ? 'on' : ''}`} onClick={() => onViewChange('needs')}>Needs Quote</button>
+          <button className={`segbtn ${quotesView === 'review' ? 'on' : ''}`} onClick={() => onViewChange('review')}>Needs Quote Review</button>
+          <button className={`segbtn ${quotesView === 'sent' ? 'on' : ''}`} onClick={() => onViewChange('sent')}>Quote Sent</button>
+        </div>
+        {mode === 'calendar' && (
+          <>
+            <div className="navbtns">
+              <button className="navbtn" onClick={() => shift(-1)} aria-label="Previous">‹</button>
+              <button className="navbtn" onClick={() => setAnchor(startOfDay(new Date()))}>Today</button>
+              <button className="navbtn" onClick={() => shift(1)} aria-label="Next">›</button>
+            </div>
+            <div className="rangelabel">{rangeLabel(calMode, anchor)}</div>
+          </>
+        )}
+        <div className="schedbar-actions">
+          {mode === 'calendar' && (
+            <div className="seg">
+              <button className={`segbtn ${calMode === 'week' ? 'on' : ''}`} onClick={() => setCalMode('week')}>Week</button>
+              <button className={`segbtn ${calMode === 'month' ? 'on' : ''}`} onClick={() => setCalMode('month')}>Month</button>
+            </div>
+          )}
+          <div className="seg">
+            <button className={`segbtn ${mode === 'list' ? 'on' : ''}`} onClick={() => setMode('list')}>List</button>
+            <button className={`segbtn ${mode === 'calendar' ? 'on' : ''}`} onClick={() => setMode('calendar')}>Calendar</button>
+          </div>
+        </div>
+      </div>
+
+      {loading && (
+        <div className="jobs">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="job">
+              <div className="stripe skel-block" />
+              <div className="body">
+                <div className="row1">
+                  <span className="skel-block" style={{ width: 140, height: 15 }} />
+                  <span className="skel-block" style={{ width: 60, height: 15 }} />
+                </div>
+                <div className="meta">
+                  <span className="skel-block" style={{ width: '40%', height: 12 }} />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!loading && mode === 'list' && (
+        sorted.length === 0 ? (
+          <div className="empty">{
+            quotesView === 'sent' ? 'No quotes have been sent yet.' :
+            quotesView === 'review' ? 'No quotes are ready for review yet.' :
+            'No quotes right now.'
+          }</div>
+        ) : (
+          <div className="jobs">
+            {sorted.map((q) => (
+              <div className="job" key={q.id}>
+                <div className="stripe" data-status={statusClass(q.status)} />
+                <div className="body">
+                  <div className="row1">
+                    <span className="jname">{q.name}</span>
+                    {q.opportunityType && <span className="quote-type">{q.opportunityType}</span>}
+                    <QuoteStatusSelect status={q.status} onChange={(status) => onStatusChange(q, status)} />
+                    <div className="quote-actions">
+                      <QuoteRecipientButton quote={q} label="Ready For Review" title="Send this quote for internal review" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onReview} />
+                      <QuoteRecipientButton quote={q} label="Sent" title="Send this quote for customer approval" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onSend} />
+                      <QuoteDocumentsBadge quoteId={q.id} />
+                    </div>
+                  </div>
+                  <div className="meta">
+                    {q.accountName && <span><span className="ic">◍</span>{q.accountName}</span>}
+                    <span className="created quote-due">{q.dueDate ? `Due ${fmtDate(q.dueDate)}` : 'No due date set'}</span>
+                    {q.reviewDeadline && <span className="created quote-review-deadline">Review by {fmtDateTime(q.reviewDeadline)}</span>}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      )}
+
+      {!loading && mode === 'calendar' && (
+        <div className="quote-cal-legend">
+          <span className="quote-cal-legend-item"><span className="quote-cal-dot due" />Due Date</span>
+          <span className="quote-cal-legend-item"><span className="quote-cal-dot review" />Review Deadline</span>
+        </div>
+      )}
+      {!loading && mode === 'calendar' && calMode === 'month' && (
+        <QuotesMonthGrid quotes={sorted} anchor={anchor} onQuoteClick={setSelectedQuote} />
+      )}
+      {!loading && mode === 'calendar' && calMode === 'week' && (
+        <QuotesWeekGrid quotes={sorted} anchor={anchor} onQuoteClick={setSelectedQuote} />
+      )}
+
+      {selectedQuote && (
+        <QuoteDetailModal
+          quote={selectedQuote}
+          onClose={() => setSelectedQuote(null)}
+          onStatusChange={(status) => {
+            onStatusChange(selectedQuote, status);
+            setSelectedQuote(null);
+          }}
+          onSend={(quote, recipientEmails) => {
+            onSend(quote, recipientEmails);
+            setSelectedQuote(null);
+          }}
+          onReview={(quote, recipientEmails) => {
+            onReview(quote, recipientEmails);
+            setSelectedQuote(null);
+          }}
+          users={users}
+          usersLoaded={usersLoaded}
+          onLoadUsers={onLoadUsers}
+        />
+      )}
+    </section>
+  );
+}
+
+function QuotesMonthGrid({ quotes, anchor, onQuoteClick }) {
+  const todayIso = isoOf(startOfDay(new Date()));
+  const month = anchor.getMonth();
+
+  const cells = useMemo(() => {
+    const first = new Date(anchor.getFullYear(), month, 1);
+    const last = new Date(anchor.getFullYear(), month + 1, 0);
+    const gridStart = startOfWeek(first);
+    const gridEnd = addDays(startOfWeek(last), 6);
+    const total = Math.round((gridEnd - gridStart) / 86400000) + 1;
+    return Array.from({ length: total }, (_, i) => addDays(gridStart, i));
+  }, [anchor, month]);
+
+  // iso -> [{quote, kind}]; a quote contributes an entry per date it has set
+  // (due date, review deadline, both, or neither) -- see quoteSortKey for
+  // why quotes with no dueDate still appear in list view regardless.
+  const byDate = useMemo(() => {
+    const m = {};
+    quotes.forEach((q) => {
+      if (q.dueDate) (m[q.dueDate] ||= []).push({ quote: q, kind: 'due' });
+      if (q.reviewDeadline) {
+        const iso = isoOf(new Date(q.reviewDeadline));
+        (m[iso] ||= []).push({ quote: q, kind: 'review' });
+      }
+    });
+    return m;
+  }, [quotes]);
+
+  const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  return (
+    <div className="month">
+      {WD.map((w) => <div className="wd" key={w}>{w}</div>)}
+      {cells.map((d) => {
+        const iso = isoOf(d);
+        const out = d.getMonth() !== month;
+        const items = byDate[iso] || [];
+        return (
+          <div className={`daycell ${out ? 'out' : ''} ${iso === todayIso ? 'today' : ''}`} key={iso}>
+            <div className="daynum">{d.getDate()}</div>
+            {items.map(({ quote: q, kind }) => (
+              <div
+                className="dayjob"
+                data-kind={kind}
+                key={`${q.id}-${kind}`}
+                title={kind === 'review' ? `Review deadline ${fmtDateTime(q.reviewDeadline)}: ${q.name}` : `Due ${fmtDate(q.dueDate)}: ${q.name}`}
+                onClick={() => onQuoteClick(q)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => e.key === 'Enter' && onQuoteClick(q)}
+              >
+                <span className="jn">{q.name}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Single-week strip -- reuses the .month grid's CSS (7 columns) with just one
+// row of day cells instead of a full padded month.
+function QuotesWeekGrid({ quotes, anchor, onQuoteClick }) {
+  const todayIso = isoOf(startOfDay(new Date()));
+
+  const cells = useMemo(() => {
+    const s = startOfWeek(anchor);
+    return Array.from({ length: 7 }, (_, i) => addDays(s, i));
+  }, [anchor]);
+
+  const byDate = useMemo(() => {
+    const m = {};
+    quotes.forEach((q) => {
+      if (q.dueDate) (m[q.dueDate] ||= []).push({ quote: q, kind: 'due' });
+      if (q.reviewDeadline) {
+        const iso = isoOf(new Date(q.reviewDeadline));
+        (m[iso] ||= []).push({ quote: q, kind: 'review' });
+      }
+    });
+    return m;
+  }, [quotes]);
+
+  const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  return (
+    <div className="month">
+      {WD.map((w) => <div className="wd" key={w}>{w}</div>)}
+      {cells.map((d) => {
+        const iso = isoOf(d);
+        const items = byDate[iso] || [];
+        return (
+          <div className={`daycell ${iso === todayIso ? 'today' : ''}`} key={iso}>
+            <div className="daynum">{d.getDate()}</div>
+            {items.map(({ quote: q, kind }) => (
+              <div
+                className="dayjob"
+                data-kind={kind}
+                key={`${q.id}-${kind}`}
+                title={kind === 'review' ? `Review deadline ${fmtDateTime(q.reviewDeadline)}: ${q.name}` : `Due ${fmtDate(q.dueDate)}: ${q.name}`}
+                onClick={() => onQuoteClick(q)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => e.key === 'Enter' && onQuoteClick(q)}
+              >
+                <span className="jn">{q.name}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Only the one dispatcher-driven transition this tab supports: moving a
+// quote past the quoting stage once it's ready for the customer to sign off.
+// A changed value flows through routes.js's normal PATCH /jobs/:id
+// write-through, so an FS-linked opportunity gets pushed to FS too.
+function QuoteStatusSelect({ status, onChange }) {
+  return (
+    <select
+      className={`statussel ${statusClass(status)}`}
+      value={status}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => { e.stopPropagation(); onChange(e.target.value); }}
+    >
+      <option value="Needs Quote">Needs Quote</option>
+      <option value="Needs Quote Review">Needs Quote Review</option>
+      <option value="Pending Customer Approval">Pending Customer Approval</option>
+    </select>
+  );
+}
+
+// Picks one or more Salesforce Users to notify, then moves the quote to
+// Pending Customer Approval and emails them (sf.sendEmail in salesforce.js,
+// Salesforce's own outbound mail rather than a third-party provider).
+// The directory is fetched once, lazily, on first open -- shared across every
+// button instance via the users/usersLoaded/onLoadUsers props lifted to App.
+// Generalized from a single "Sent" button once "Review" needed the exact
+// same recipient-picker shape -- label/title/onConfirm are the only things
+// that differ between the two call sites.
+function QuoteRecipientButton({ quote, label, title, users, usersLoaded, onLoadUsers, onConfirm }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState([]);
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, maxHeight: 380 });
+
+  useEffect(() => {
+    if (open && !usersLoaded) onLoadUsers();
+  }, [open, usersLoaded, onLoadUsers]);
+
+  useEffect(() => {
+    if (!open) { setQuery(''); setSelected([]); }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const POP_WIDTH = 300;
+    const GAP = 6;
+    const EDGE = 8;
+    const CEILING = 380;
+    let left = rect.left;
+    if (left + POP_WIDTH > window.innerWidth - EDGE) left = window.innerWidth - POP_WIDTH - EDGE;
+    if (left < EDGE) left = EDGE;
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      if (popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open]);
+
+  const toggleUser = (u) => {
+    setSelected((prev) => prev.some((s) => s.id === u.id) ? prev.filter((s) => s.id !== u.id) : [...prev, u]);
+  };
+
+  // No slice cap here (unlike AccountContactsMenu's icp-list, which this is
+  // otherwise modeled on) -- .icp-list already scrolls, and silently hiding
+  // people past the Nth alphabetically is worse than a scrollbar for finding
+  // an email recipient.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const selectedIds = new Set(selected.map((s) => s.id));
+    return users
+      .filter((u) => !selectedIds.has(u.id))
+      .filter((u) => !q || fuzzyNameMatch(query, u.name) || u.email.toLowerCase().includes(q));
+  }, [users, query, selected]);
+
+  const handleSend = () => {
+    onConfirm(quote, selected.map((u) => u.email));
+    setOpen(false);
+  };
+
+  return (
+    <div className="job-notes-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        className="job-notes-badge"
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+        title={title}
+      >
+        {label}
+      </button>
+      {open && createPortal(
+        <div
+          className="notes-pop job-notes-pop"
+          ref={popRef}
+          style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+        >
+          <div className="inline-contact-picker">
+            <input
+              className="icp-input"
+              type="text"
+              placeholder="Search people to notify…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              autoFocus
+            />
+            {selected.length > 0 && (
+              <div className="icp-chips">
+                {selected.map((u) => (
+                  <span className="icp-chip" key={u.id}>
+                    {u.name}
+                    <button type="button" onClick={(e) => { e.stopPropagation(); toggleUser(u); }} aria-label={`Remove ${u.name}`}>×</button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="icp-list">
+              {!usersLoaded && <div className="notes-pop-empty">Loading…</div>}
+              {usersLoaded && filtered.map((u) => (
+                <button key={u.id} type="button" className="icp-option" onClick={(e) => { e.stopPropagation(); toggleUser(u); }}>
+                  <span className="icp-name">{u.name}</span>
+                  <span className="icp-company">{u.email}</span>
+                </button>
+              ))}
+              {usersLoaded && filtered.length === 0 && selected.length === 0 && (
+                <div className="notes-pop-empty">No matches</div>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="icp-send-btn"
+            disabled={selected.length === 0}
+            onClick={(e) => { e.stopPropagation(); handleSend(); }}
+          >
+            Send{selected.length > 0 ? ` to ${selected.length}` : ''}
+          </button>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+function QuoteDetailModal({ quote, onClose, onStatusChange, onSend, onReview, users, usersLoaded, onLoadUsers }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row">
+            <span className="jname">{quote.name}</span>
+            {quote.opportunityType && <span className="quote-type">{quote.opportunityType}</span>}
+            <QuoteStatusSelect status={quote.status} onChange={onStatusChange} />
+          </div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          <div className="meta">
+            {quote.accountName && <span><span className="ic">◍</span>{quote.accountName}</span>}
+            <span className="created quote-due">{quote.dueDate ? `Due ${fmtDate(quote.dueDate)}` : 'No due date set'}</span>
+            {quote.reviewDeadline && <span className="created quote-review-deadline">Review by {fmtDateTime(quote.reviewDeadline)}</span>}
+          </div>
+          <div className="quote-actions">
+            <QuoteRecipientButton quote={quote} label="Ready For Review" title="Send this quote for internal review" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onReview} />
+            <QuoteRecipientButton quote={quote} label="Sent" title="Send this quote for customer approval" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onSend} />
+            <QuoteDocumentsBadge quoteId={quote.id} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuoteDocumentsBadge({ quoteId }) {
+  const [open, setOpen] = useState(false);
+  const [docs, setDocs] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(null);
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, maxHeight: 320 });
+
+  // Fetched lazily per-badge on first open rather than prefetched for every
+  // quote up front -- avoids N document queries firing just from loading the
+  // tab, when most of them will never be opened.
+  useEffect(() => {
+    if (!open || loaded) return;
+    api.getQuoteDocuments(quoteId)
+      .then((d) => { setDocs(d); setLoaded(true); })
+      .catch((e) => setLoadError(e.message));
+  }, [open, loaded, quoteId]);
+
+  useEffect(() => {
+    if (!open) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const POP_WIDTH = 280;
+    const GAP = 6;
+    const EDGE = 8;
+    const CEILING = 320;
+    let left = rect.left;
+    if (left + POP_WIDTH > window.innerWidth - EDGE) left = window.innerWidth - POP_WIDTH - EDGE;
+    if (left < EDGE) left = EDGE;
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      if (popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open]);
+
+  return (
+    <div className="job-notes-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        className="job-notes-badge"
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+        title="Notes and attachments on this opportunity"
+      >
+        Documents
+      </button>
+      {open && createPortal(
+        <div
+          className="notes-pop job-notes-pop"
+          ref={popRef}
+          style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+        >
+          <div className="notes-pop-list">
+            {loadError && <div className="notes-pop-err">{loadError}</div>}
+            {!loadError && !loaded && <div className="notes-pop-empty">Loading…</div>}
+            {!loadError && loaded && docs.length === 0 && <div className="notes-pop-empty">No documents</div>}
+            {!loadError && docs.map((doc) => (
+              <div className="notes-pop-row" key={doc.id}>
+                <a
+                  className="notes-pop-item"
+                  href={doc.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <span className="notes-pop-title">{doc.name}</span>
+                  {doc.lastModified && <span className="notes-pop-preview">{fmtDate(doc.lastModified.slice(0, 10))}</span>}
+                </a>
+              </div>
+            ))}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+// Shared by AddInventoryModal/CheckoutModal — Service Stock unshifted onto
+// the front (not pushed) so it sorts first in SearchableSelect's own
+// order-preserving filter, mirroring how NoteEditModal prepends the
+// currently-linked opportunity when it's missing from `jobs`.
+function buildOppOptions(jobs, serviceStock) {
+  const base = jobs.map((j) => [j.id, j.lid ? `${j.name} — LID ${j.lid}` : j.name]);
+  if (serviceStock && !base.some(([id]) => id === serviceStock.id)) base.unshift([serviceStock.id, serviceStock.name]);
+  return base;
+}
+
+function catalogOptionsFor(catalog) {
+  return catalog.map((p) => [p.id, p.code ? `${p.code} — ${p.name}` : p.name]);
+}
+
+function PartsTab({ groups, loading, jobs, techs, catalog, serviceStock, onRefresh, onUpdateRow }) {
+  const [addingInventory, setAddingInventory] = useState(false);
+  const [checkingOut, setCheckingOut] = useState(false);
+  const [search, setSearch] = useState('');
+
+  // Filters each group's own rows down to matches on part # or name, then
+  // drops any group left with zero matching rows -- same idea as AccountsTab's
+  // `filtered`, but applied per-group since a part can exist under several
+  // Opportunities at once and a search should surface all of them, not just
+  // the first match.
+  const searchTerm = search.trim().toLowerCase();
+  const visibleGroups = useMemo(() => {
+    if (!searchTerm) return groups;
+    return groups
+      .map((g) => ({
+        ...g,
+        rows: g.rows.filter((r) =>
+          (r.productCode && r.productCode.toLowerCase().includes(searchTerm)) ||
+          (r.productName && r.productName.toLowerCase().includes(searchTerm))
+        ),
+      }))
+      .filter((g) => g.rows.length > 0);
+  }, [groups, searchTerm]);
+
+  return (
+    <section>
+      <div className="view-head">
+        <div>
+          <h2>Parts</h2>
+          <p>{loading ? 'Loading…' : `${groups.length} location${groups.length === 1 ? '' : 's'} with inventory on file`}</p>
+        </div>
+        <div className="view-head-actions">
+          <div className="searchbox" style={{ marginBottom: 0 }}>
+            <span className="si">⌕</span>
+            <input
+              className="searchinput"
+              type="text"
+              placeholder="Search by part # or name…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          <button className="refresh" onClick={() => setAddingInventory(true)}>+ Add Inventory</button>
+          <button className="refresh" onClick={() => setCheckingOut(true)}>+ Part Checkout</button>
+        </div>
+      </div>
+
+      {!loading && groups.length === 0 && <div className="state">No inventory on file yet.</div>}
+      {!loading && groups.length > 0 && searchTerm && visibleGroups.length === 0 && (
+        <div className="state">No parts match "{search.trim()}".</div>
+      )}
+
+      {visibleGroups.map((g) => (
+        <InventoryGroupSection key={g.opportunityId} group={g} onUpdateRow={onUpdateRow} forceOpen={!!searchTerm} />
+      ))}
+
+      {addingInventory && (
+        <AddInventoryModal
+          jobs={jobs}
+          catalog={catalog}
+          serviceStock={serviceStock}
+          onClose={() => setAddingInventory(false)}
+          onSaved={async () => { setAddingInventory(false); await onRefresh(); }}
+        />
+      )}
+      {checkingOut && (
+        <CheckoutModal
+          jobs={jobs}
+          techs={techs}
+          catalog={catalog}
+          serviceStock={serviceStock}
+          onClose={() => setCheckingOut(false)}
+          onSaved={async () => { setCheckingOut(false); await onRefresh(); }}
+        />
+      )}
+    </section>
+  );
+}
+
+// One collapsible section per Opportunity, modeled on AccountGroupSection --
+// Service Stock (isServiceStock) starts open since it's the busiest bucket,
+// every other job starts collapsed. Inline quantity edit reuses ContactsTab's
+// exact edit-cell convention (.contact-edit-row/-input/-save/-cancel,
+// .contact-editable), including its no-rollback-on-failure behavior -- same
+// as every other inline edit in this app (see updateContact/updateAccount).
+const InventoryGroupSection = React.memo(function InventoryGroupSection({ group, onUpdateRow, forceOpen }) {
+  const [open, setOpen] = useState(group.isServiceStock);
+  const [editing, setEditing] = useState(null); // { rowId, value }
+
+  // A search that's narrowed this group down to matching rows only (see
+  // `search` in PartsTab) should show them without an extra click -- same
+  // idea as AccountGroupSection's own forceOpen.
+  useEffect(() => {
+    if (forceOpen) setOpen(true);
+  }, [forceOpen]);
+
+  const startEdit = (row) => setEditing({ rowId: row.id, value: String(row.quantity) });
+
+  const commitEdit = async () => {
+    if (!editing) return;
+    const { rowId, value } = editing;
+    const n = Number(value);
+    setEditing(null);
+    if (Number.isNaN(n)) return;
+    try {
+      await onUpdateRow(rowId, { quantity: n });
+    } catch (e) {
+      alert(`Could not save: ${e.message}`);
+    }
+  };
+
+  const onEditKey = (e) => {
+    if (e.key === 'Enter') commitEdit();
+    if (e.key === 'Escape') setEditing(null);
+  };
+
+  return (
+    <div className="mgmt-group">
+      <button className="mgmt-group-header" onClick={() => setOpen((o) => !o)}>
+        <span className="mgmt-group-chevron">{open ? '▾' : '▸'}</span>
+        <span className="mgmt-group-name">{group.opportunityName}</span>
+        {group.opportunityLid && <span className="lidtag">LID {group.opportunityLid}</span>}
+        <span className="mgmt-group-count">{group.rows.length} part{group.rows.length === 1 ? '' : 's'}</span>
+      </button>
+      {open && (
+        <div className="contacts-wrap">
+          <table className="contacts-table">
+            <thead>
+              <tr>
+                <th>Part #</th>
+                <th>Name</th>
+                <th>Qty</th>
+                <th>Price</th>
+                <th>PO #</th>
+                <th>PO Uploaded</th>
+              </tr>
+            </thead>
+            <tbody>
+              {group.rows.map((r) => (
+                <tr key={r.id}>
+                  <td>{r.productCode || '—'}</td>
+                  <td>{r.productName}</td>
+                  <td>
+                    {editing?.rowId === r.id
+                      ? <div className="contact-edit-row">
+                          <input
+                            className="contact-edit-input"
+                            autoFocus
+                            type="number"
+                            value={editing.value}
+                            onChange={(e) => setEditing({ rowId: r.id, value: e.target.value })}
+                            onKeyDown={onEditKey}
+                          />
+                          <button className="contact-edit-save" onClick={commitEdit}>Save</button>
+                          <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
+                        </div>
+                      : <span className="contact-editable" onClick={() => startEdit(r)}>{r.quantity}</span>}
+                  </td>
+                  <td>{r.price != null ? `$${Number(r.price).toFixed(2)}` : '—'}</td>
+                  <td>{r.poNumber || '—'}</td>
+                  <td>{r.poUploaded ? 'Yes' : 'No'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+});
+
+// Add Inventory -- Opportunity + PO # / PO-uploaded are shared across the
+// whole submission; each repeatable line only carries Product + Quantity.
+// No precedent in this codebase for an add/remove-row multi-line form, built
+// from scratch; everything else (SearchableSelect, .modal-form-error inline
+// validation, .modal-save-btn/.modal-cancel-btn footer) reuses existing
+// conventions.
+function AddInventoryModal({ jobs, catalog, serviceStock, onClose, onSaved }) {
+  const [opportunityId, setOpportunityId] = useState('');
+  const [poNumber, setPoNumber] = useState('');
+  const [poUploaded, setPoUploaded] = useState(false);
+  const [lines, setLines] = useState([{ productId: '', quantity: '' }]);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const oppOptions = useMemo(() => buildOppOptions(jobs, serviceStock), [jobs, serviceStock]);
+  const catalogOptions = useMemo(() => catalogOptionsFor(catalog), [catalog]);
+
+  const updateLine = (i, field, value) => setLines((ls) => ls.map((l, idx) => idx === i ? { ...l, [field]: value } : l));
+  const addLine = () => setLines((ls) => [...ls, { productId: '', quantity: '' }]);
+  const removeLine = (i) => setLines((ls) => (ls.length > 1 ? ls.filter((_, idx) => idx !== i) : ls));
+
+  const save = async () => {
+    setErr(null);
+    if (!opportunityId) { setErr('Opportunity is required'); return; }
+    const clean = lines.filter((l) => l.productId && Number(l.quantity) > 0);
+    if (clean.length === 0) { setErr('At least one product + quantity line is required'); return; }
+    setSaving(true);
+    try {
+      await api.addInventory(opportunityId, {
+        poNumber: poNumber.trim() || null,
+        poUploaded,
+        lines: clean.map((l) => ({ productId: l.productId, quantity: Number(l.quantity) })),
+      });
+      await onSaved();
+    } catch (e) {
+      setErr(e.message);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={() => !saving && onClose()}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Add Inventory</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={saving}>×</button>
+        </div>
+        <div className="modal-body">
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Opportunity</span>
+            <SearchableSelect value={opportunityId} onChange={setOpportunityId} options={oppOptions} placeholder="Pick the opportunity (or Service Stock)…" />
+          </label>
+
+          {lines.map((l, i) => (
+            <div className="req-panel-row" key={i}>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Product</span>
+                <SearchableSelect value={l.productId} onChange={(v) => updateLine(i, 'productId', v)} options={catalogOptions} placeholder="Search parts…" />
+              </label>
+              <label className="req-field">
+                <span className="req-field-label">Qty</span>
+                <input className="req-note-input" type="number" min="0" value={l.quantity} onChange={(e) => updateLine(i, 'quantity', e.target.value)} />
+              </label>
+              {lines.length > 1 && (
+                <button type="button" className="req-btn" onClick={() => removeLine(i)}>Remove</button>
+              )}
+            </div>
+          ))}
+          <button type="button" className="req-btn" onClick={addLine}>+ Add another part</button>
+
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">PO #</span>
+            <input className="req-note-input" type="text" value={poNumber} onChange={(e) => setPoNumber(e.target.value)} />
+          </label>
+          <label className="notes-job-check">
+            <input type="checkbox" checked={poUploaded} onChange={(e) => setPoUploaded(e.target.checked)} />
+            <span>PO uploaded into opportunity</span>
+          </label>
+
+          {err && <div className="modal-form-error">{err}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-save-btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+          <button className="modal-cancel-btn" onClick={onClose} disabled={saving}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Part Checkout -- Opportunity/Checked-out-by/Checkout Date/Material Request #
+// /Material Req Attached are shared across the whole submission; each
+// repeatable line carries Product + Quantity + optional Flagged for Review.
+// Save is gated on materialReqAttached being checked, per the explicit
+// requirement -- there's no Salesforce-level enforcement of this anywhere,
+// only this client-side gate plus the server's own input validation.
+function CheckoutModal({ jobs, techs, catalog, serviceStock, onClose, onSaved }) {
+  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const [opportunityId, setOpportunityId] = useState('');
+  const [checkedOutById, setCheckedOutById] = useState('');
+  const [checkoutDate, setCheckoutDate] = useState(todayIso);
+  const [truckNumber, setTruckNumber] = useState('');
+  const [materialRequestNumber, setMaterialRequestNumber] = useState('');
+  const [materialReqAttached, setMaterialReqAttached] = useState(false);
+  const [lines, setLines] = useState([{ productId: '', quantity: '', flaggedForReview: false }]);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const oppOptions = useMemo(() => buildOppOptions(jobs, serviceStock), [jobs, serviceStock]);
+  const catalogOptions = useMemo(() => catalogOptionsFor(catalog), [catalog]);
+
+  const updateLine = (i, field, value) => setLines((ls) => ls.map((l, idx) => idx === i ? { ...l, [field]: value } : l));
+  const addLine = () => setLines((ls) => [...ls, { productId: '', quantity: '', flaggedForReview: false }]);
+  const removeLine = (i) => setLines((ls) => (ls.length > 1 ? ls.filter((_, idx) => idx !== i) : ls));
+
+  const save = async () => {
+    setErr(null);
+    if (!opportunityId) { setErr('Opportunity is required'); return; }
+    if (!checkedOutById) { setErr('Checked out by is required'); return; }
+    if (!checkoutDate) { setErr('Checkout date is required'); return; }
+    if (!truckNumber.trim()) { setErr('Truck number is required'); return; }
+    if (!materialRequestNumber.trim()) { setErr('Material request # is required'); return; }
+    if (!materialReqAttached) { setErr('Material req uploaded must be checked'); return; }
+    const clean = lines.filter((l) => l.productId && Number(l.quantity) > 0);
+    if (clean.length === 0) { setErr('At least one product + quantity line is required'); return; }
+    setSaving(true);
+    try {
+      await api.checkoutParts(opportunityId, {
+        checkedOutById,
+        checkoutDate,
+        truckNumber: truckNumber.trim(),
+        materialRequestNumber: materialRequestNumber.trim(),
+        materialReqAttached,
+        lines: clean.map((l) => ({ productId: l.productId, quantity: Number(l.quantity), flaggedForReview: !!l.flaggedForReview })),
+      });
+      await onSaved();
+    } catch (e) {
+      setErr(e.message);
+      setSaving(false);
+    }
+  };
+
+  const canSave = opportunityId && checkedOutById && checkoutDate && truckNumber.trim() && materialRequestNumber.trim() && materialReqAttached
+    && lines.some((l) => l.productId && Number(l.quantity) > 0);
+
+  return (
+    <div className="modal-backdrop" onClick={() => !saving && onClose()}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Part Checkout</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={saving}>×</button>
+        </div>
+        <div className="modal-body">
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Opportunity</span>
+            <SearchableSelect value={opportunityId} onChange={setOpportunityId} options={oppOptions} placeholder="Pick the opportunity (or Service Stock)…" />
+          </label>
+
+          <div className="req-panel-row">
+            <label className="req-field">
+              <span className="req-field-label">Checked out by</span>
+              <select className="techfilter" value={checkedOutById} onChange={(e) => setCheckedOutById(e.target.value)}>
+                <option value="">Select a technician…</option>
+                {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </label>
+            <label className="req-field">
+              <span className="req-field-label">Checkout date</span>
+              <DatePicker value={checkoutDate} onChange={setCheckoutDate} placeholder="Checkout date" clearable={false} />
+            </label>
+            <label className="req-field">
+              <span className="req-field-label">Truck number</span>
+              <input className="req-note-input" type="text" value={truckNumber} onChange={(e) => setTruckNumber(e.target.value)} />
+            </label>
+          </div>
+
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Material request #</span>
+            <input className="req-note-input" type="text" value={materialRequestNumber} onChange={(e) => setMaterialRequestNumber(e.target.value)} />
+          </label>
+          <label className="notes-job-check">
+            <input type="checkbox" checked={materialReqAttached} onChange={(e) => setMaterialReqAttached(e.target.checked)} />
+            <span>Material req uploaded to opportunity</span>
+          </label>
+
+          {lines.map((l, i) => (
+            <div className="req-panel-row" key={i}>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Product</span>
+                <SearchableSelect value={l.productId} onChange={(v) => updateLine(i, 'productId', v)} options={catalogOptions} placeholder="Search parts…" />
+              </label>
+              <label className="req-field">
+                <span className="req-field-label">Qty</span>
+                <input className="req-note-input" type="number" min="0" value={l.quantity} onChange={(e) => updateLine(i, 'quantity', e.target.value)} />
+              </label>
+              <label className="notes-job-check">
+                <input type="checkbox" checked={l.flaggedForReview} onChange={(e) => updateLine(i, 'flaggedForReview', e.target.checked)} />
+                <span>Flag for review</span>
+              </label>
+              {lines.length > 1 && (
+                <button type="button" className="req-btn" onClick={() => removeLine(i)}>Remove</button>
+              )}
+            </div>
+          ))}
+          <button type="button" className="req-btn" onClick={addLine}>+ Add another part</button>
+
+          {err && <div className="modal-form-error">{err}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-save-btn" onClick={save} disabled={saving || !canSave}>{saving ? 'Saving…' : 'Check out'}</button>
+          <button className="modal-cancel-btn" onClick={onClose} disabled={saving}>Cancel</button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -57,6 +57,10 @@ export function createSalesforce(env) {
   }
 
   return {
+    async getInstanceUrl() {
+      const { instanceUrl } = await getToken();
+      return instanceUrl;
+    },
     async query(soql) {
       const res = await sfFetch(`/query?q=${encodeURIComponent(soql)}`);
       if (!res.ok) throw new Error(`SOQL failed: ${res.status} ${await res.text()}`);
@@ -94,6 +98,43 @@ export function createSalesforce(env) {
       const res = await sfFetch(path);
       if (!res.ok) throw new Error(`SF request failed: ${res.status} ${await res.text()}`);
       return res.json();
+    },
+    // Sends via Salesforce's own outbound mail (Simple Email quick action).
+    // Chosen over a third-party provider (Resend, then SendGrid) because
+    // this org's email domain is Microsoft-hosted with DMARC enforcement --
+    // any third party without full DNS-based domain authentication gets
+    // silently dropped, but Salesforce's own mail servers are already
+    // trusted infrastructure for this domain (confirmed by test send).
+    // `html`, when given, is sent as rich HTML (sendRichBody) instead of the
+    // plain-text `body` -- lets callers put an actual heading/formatting in
+    // the message rather than relying on the subject line alone.
+    // Sends as the verified Org-Wide Email Address (SF_ORG_WIDE_EMAIL, "CRS
+    // Updates") when configured, so mail appears from that identity rather
+    // than the Client Credentials integration user's own name -- falls back
+    // to senderType: CurrentUser if that var isn't set.
+    async sendEmail({ to, subject, body, html }) {
+      const orgWideEmail = env.SF_ORG_WIDE_EMAIL;
+      const res = await sfFetch('/actions/standard/emailSimple', {
+        method: 'POST',
+        body: JSON.stringify({
+          inputs: [{
+            recipientAddresses: to,
+            emailSubject: subject,
+            emailBody: html || body,
+            sendRichBody: !!html,
+            ...(orgWideEmail
+              ? { senderType: 'OrgWideEmailAddress', senderAddress: orgWideEmail }
+              : { senderType: 'CurrentUser' }),
+          }],
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      const result = data?.[0];
+      if (!res.ok || !result?.isSuccess) {
+        const msg = result?.errors?.[0]?.message || `${res.status} ${JSON.stringify(data)}`;
+        throw new Error(`Salesforce email send failed: ${msg}`);
+      }
+      return { ok: true };
     },
   };
 }

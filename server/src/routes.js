@@ -6,6 +6,7 @@ import { sfToFsStatus } from './statusMap.js';
 import { runFsSync } from './fsSync.js';
 import { createAssignment, esc, normTime, toSfTime, buildFsSchedules, getTechDirectory, invalidateTechDirectory } from './assignments.js';
 import { scheduleRequests } from './scheduleRequests.js';
+import { parts } from './parts.js';
 import { mintMagicLink } from './authLink.js';
 import { notifyTech } from './notifyBoard.js';
 import { notifyTv } from './notifyTv.js';
@@ -62,6 +63,50 @@ export function shapeJob(r) {
     fsStatus: r[f.oppFsStatus] ?? null,
     fsLastModified: r[f.oppFsLastModified] ?? null,
     opportunityType: r[f.oppType] ?? null,
+  };
+}
+
+function shapeQuote(r) {
+  return {
+    id: r.Id,
+    name: r[f.oppName],
+    opportunityType: r[f.oppType] ?? null,
+    status: r[f.oppStatus],
+    dueDate: r[f.oppBidDate] ?? null,
+    reviewDeadline: r[f.oppReviewDeadline] ?? null,
+    accountName: r[f.oppAccountRelationship]?.Name ?? null,
+    sentToCustomer: r[f.oppSentToCustomer] === true,
+    readyForReview: r[f.oppReadyForReview] === true,
+    createdDate: r.CreatedDate ?? null,
+  };
+}
+
+// Shared by the "Sent"/"Review" quote actions: send the notification email,
+// then stamp the relevant checkbox -- a failed stamp doesn't undo the send,
+// just gets surfaced separately (same no-rollback convention as the FS
+// write-through's fsError). The caller (App.jsx) is what gates the actual
+// status PATCH on this succeeding, not this helper.
+async function sendQuoteNotification(sf, id, recipients, { subject, html, stampField }) {
+  await sf.sendEmail({ to: recipients, subject, html });
+  let stamped = false;
+  let stampError = null;
+  try {
+    await sf.updateRecord('Opportunity', id, { [stampField]: true });
+    stamped = true;
+  } catch (e) {
+    stampError = e.message;
+  }
+  return { ok: true, stamped, stampError };
+}
+
+function shapeQuoteDocument(r, instanceUrl) {
+  const doc = r.ContentDocument || {};
+  const name = doc.FileExtension ? `${doc.Title}.${doc.FileExtension}` : doc.Title;
+  return {
+    id: r.ContentDocumentId,
+    name,
+    url: `${instanceUrl}/${r.ContentDocumentId}`,
+    lastModified: doc.LastModifiedDate ?? null,
   };
 }
 
@@ -137,6 +182,7 @@ export async function getTimeOffRange(env, start, end) {
 
 export const api = new Hono();
 api.route('/', scheduleRequests);
+api.route('/', parts);
 
 api.get('/jobs', async (c) => {
   try {
@@ -161,6 +207,141 @@ api.get('/jobs', async (c) => {
 
     const records = await sf.query(soql);
     return c.json(records.map(shapeJob));
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Opportunities in the pre-scheduling quoting stage. Deliberately no
+// Monitoring-type exclusion here (unlike every other Opportunity query in
+// this file) -- the Quotes tab shows every type, since Job Type is itself
+// one of the displayed columns.
+// ?view=sent switches from the default "Needs Quote" status filter to every
+// Opportunity with Sent_To_Customer__c checked, regardless of its current
+// status -- the checkbox and the status are independent signals (see
+// send-email route). ?view=review switches to the internal-review status.
+// ?view=sent requires BOTH the status and the checkbox -- status alone could
+// include an opp that was manually moved to Pending Customer Approval
+// without ever going through the Sent flow (no email, no stamp); the
+// checkbox alone could include one sent long ago whose status later moved
+// on. Both together means "sent, and still sitting in that stage."
+api.get('/jobs/quotes', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const view = c.req.query('view');
+    const whereClause =
+      view === 'sent' ? `${f.oppStatus} = '${esc(config.quotes.sentStatus)}' AND ${f.oppSentToCustomer} = true` :
+      view === 'review' ? `${f.oppStatus} = '${esc(config.quotes.reviewStatus)}'` :
+      `${f.oppStatus} = '${esc(config.quotes.status)}'`;
+    const soql = `
+      SELECT Id, ${f.oppName}, ${f.oppType}, ${f.oppStatus}, ${f.oppBidDate}, ${f.oppReviewDeadline},
+             ${f.oppAccountRelationship}.Name, ${f.oppSentToCustomer}, ${f.oppReadyForReview}, CreatedDate
+      FROM Opportunity
+      WHERE ${whereClause}
+      ORDER BY ${f.oppBidDate} ASC NULLS LAST`;
+
+    const records = await sf.query(soql);
+    return c.json(records.map(shapeQuote));
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Salesforce Files linked to a quote's Opportunity (ContentDocumentLink),
+// shown as an active-link dropdown on the Quotes tab.
+api.get('/jobs/quotes/:id/documents', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const sf = createSalesforce(c.env);
+    const soql = `
+      SELECT ContentDocumentId, ContentDocument.Title, ContentDocument.FileExtension,
+             ContentDocument.LastModifiedDate
+      FROM ContentDocumentLink
+      WHERE LinkedEntityId = '${esc(id)}'`;
+
+    const [records, instanceUrl] = await Promise.all([sf.query(soql), sf.getInstanceUrl()]);
+    return c.json(records.map((r) => shapeQuoteDocument(r, instanceUrl)));
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Active Salesforce Users, for the Quotes tab's "Sent" recipient picker.
+// Fetched once and filtered client-side, same lazy-load convention as
+// getContacts/getAccounts -- no separate ?q= search endpoint needed at this
+// org's User-table size.
+api.get('/users', async (c) => {
+  try {
+    const sf = createSalesforce(c.env);
+    const records = await sf.query('SELECT Id, Name, Email FROM User WHERE IsActive = true ORDER BY Name ASC');
+    return c.json(
+      records
+        .filter((r) => r.Email)
+        .map((r) => ({ id: r.Id, name: r.Name, email: r.Email }))
+    );
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Notifies the picked recipients that a quote was sent to the customer.
+// Status is changed separately via the normal PATCH /jobs/:id write-through
+// (same path the Jobs board uses) -- but the frontend (App.jsx's sendQuote)
+// deliberately calls THIS route first and only fires the status PATCH if it
+// succeeds, so a failed send never leaves a quote's status looking like it
+// went to the customer when it didn't. This route itself only ever touches
+// Sent_To_Customer__c, never Project_Status__c.
+api.post('/jobs/quotes/:id/send-email', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const recipients = Array.isArray(body.recipients) ? body.recipients.filter(Boolean) : [];
+    if (recipients.length === 0) return c.json({ error: 'No recipients selected' }, 400);
+
+    const sf = createSalesforce(c.env);
+    const existing = await sf.query(`SELECT ${f.oppName} FROM Opportunity WHERE Id = '${esc(id)}' LIMIT 1`);
+    const quoteName = existing?.[0]?.[f.oppName] ?? 'this opportunity';
+
+    const result = await sendQuoteNotification(sf, id, recipients, {
+      subject: `Quote sent for approval: ${quoteName}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; font-size: 14px; color: #1a1a1a;">
+          <h1 style="font-size: 22px; margin: 0 0 16px;">Quote Sent to Customer</h1>
+          <p style="margin: 0 0 8px;"><strong>${quoteName}</strong> has been sent to the customer and is now marked <strong>Pending Customer Approval</strong> in Salesforce.</p>
+        </div>`,
+      stampField: f.oppSentToCustomer,
+    });
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Same shape as send-email above, for the earlier "ready for internal
+// review" stage -- stamps Ready_For_Review__c instead, and the frontend
+// (App.jsx's reviewQuote) gates the Project_Status__c -> "Needs Quote
+// Review" PATCH on this succeeding the same way.
+api.post('/jobs/quotes/:id/send-review-email', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const recipients = Array.isArray(body.recipients) ? body.recipients.filter(Boolean) : [];
+    if (recipients.length === 0) return c.json({ error: 'No recipients selected' }, 400);
+
+    const sf = createSalesforce(c.env);
+    const existing = await sf.query(`SELECT ${f.oppName} FROM Opportunity WHERE Id = '${esc(id)}' LIMIT 1`);
+    const quoteName = existing?.[0]?.[f.oppName] ?? 'this opportunity';
+
+    const result = await sendQuoteNotification(sf, id, recipients, {
+      subject: `${quoteName} is ready for review`,
+      html: `
+        <div style="font-family: Arial, sans-serif; font-size: 14px; color: #1a1a1a;">
+          <h1 style="font-size: 22px; margin: 0 0 16px;">Ready for Review</h1>
+          <p style="margin: 0 0 8px;"><strong>${quoteName}</strong> is ready for review.</p>
+        </div>`,
+      stampField: f.oppReadyForReview,
+    });
+    return c.json(result);
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
