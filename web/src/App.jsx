@@ -297,6 +297,26 @@ const startOfWeek = (d) => { const x = startOfDay(d); x.setDate(x.getDate() - x.
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const dateOnlyISO = (iso) => iso && typeof iso === 'string' ? iso.slice(0, 10) : null;
 const initials = (name) => name ? name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase() : '?';
+
+// Base = the org's My Domain (matches SF_LOGIN_URL in wrangler.toml). Salesforce
+// resolves `${base}/${id}` to the record and redirects to Lightning. Hardcoded so
+// links are available at first render with no config fetch; swap to a /api/config
+// endpoint if the org URL ever changes.
+const SF_BASE = 'https://crsbuilding.my.salesforce.com';
+const oppUrl = (id) => `${SF_BASE}/${id}`;
+// Renders an Opportunity name as a link that opens the SF record in a new tab.
+// Falls back to plain text when there's no id (guards non-opportunity titles).
+// stopPropagation so clicking the name inside an already-clickable row/chip opens
+// Salesforce without also triggering the row's own click (modal/toggle).
+function OppLink({ id, name, className, style }) {
+  if (!id) return <span className={className} style={style}>{name}</span>;
+  return (
+    <a className={`opp-link ${className || ''}`} style={style} href={oppUrl(id)}
+       target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
+      {name}
+    </a>
+  );
+}
 const startOfYear = (d) => { const x = startOfDay(d); x.setMonth(0, 1); return x; };
 const startOfMonth = (d) => { const x = startOfDay(d); x.setDate(1); return x; };
 const startOfPreviousMonth = (d) => { const x = startOfMonth(d); x.setMonth(x.getMonth() - 1); return x; };
@@ -373,7 +393,7 @@ const JobCard = React.memo(function JobCard({
         <div className="stripe" data-status={statusClass(job.status)} />
         <div className="body">
           <div className="row1">
-            <span className="jname">{job.name}</span>
+            <OppLink className="jname" id={job.id} name={job.name} />
             {job.lid && <span className="lidtag">LID {job.lid}</span>}
             {job.fsTaskId
               ? <span className="fs-badge linked" title={`FS task: ${job.fsTaskId}`}>⬡ FS</span>
@@ -408,7 +428,7 @@ const JobCard = React.memo(function JobCard({
       <div className="stripe" data-status={statusClass(job.status)} />
       <div className="body">
         <div className="row1">
-          <span className="jname">{job.name}</span>
+          <OppLink className="jname" id={job.id} name={job.name} />
           {job.lid && <span className="lidtag">LID {job.lid}</span>}
           {job.fsTaskId
             ? <span className="fs-badge linked" title={`FS task: ${job.fsTaskId}`}>⬡ FS</span>
@@ -1726,7 +1746,18 @@ function DispatchApp({ user, onLoggedOut }) {
           <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <div className="modal-header">
               <div className="modal-title-row">
-                <span className="jname">{draftJob.name}</span>
+                <OppLink className="jname" id={draftJob.id} name={draftJob.name} />
+                {draftJob.id && (
+                  <a
+                    className="sf-open-link"
+                    href={oppUrl(draftJob.id)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Open this Opportunity in Salesforce"
+                  >
+                    ↗ Salesforce
+                  </a>
+                )}
                 {draftJob.lid && <span className="lidtag">LID {draftJob.lid}</span>}
                 {draftJob.fsTaskId
                   ? <span className="fs-badge linked" title={`FS task: ${draftJob.fsTaskId}`}>⬡ FS</span>
@@ -2163,7 +2194,7 @@ function NotesMenu({ notes, onRefresh, onNewNote, onOpenNote }) {
                   <span className="notes-pop-title-row">
                     <span className="notes-pop-title">{title}</span>
                     {note.opportunitySpecific && note.opportunityName && (
-                      <span className="notes-pop-job-tag">{note.opportunityName}</span>
+                      <OppLink className="notes-pop-job-tag" id={note.opportunityId} name={note.opportunityName} />
                     )}
                   </span>
                   {preview && <span className="notes-pop-preview">{preview}</span>}
@@ -4419,7 +4450,7 @@ function JobInvoiceRow({ job }) {
     <div className="mgmt-group">
       <button className="mgmt-group-header" onClick={() => setOpen((o) => !o)}>
         <span className="mgmt-group-chevron">{open ? '▾' : '▸'}</span>
-        <span className="mgmt-group-name" style={{ fontWeight: 400 }}>{job.name}</span>
+        <OppLink className="mgmt-group-name" style={{ fontWeight: 400 }} id={job.id} name={job.name} />
         <span className="mgmt-group-count">{job.invoices.length} {job.invoices.length === 1 ? 'invoice' : 'invoices'}</span>
       </button>
       {open && (
@@ -5537,7 +5568,7 @@ function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, 
                 <div className="stripe" data-status={statusClass(q.status)} />
                 <div className="body">
                   <div className="row1">
-                    <span className="jname">{q.name}</span>
+                    <OppLink className="jname" id={q.id} name={q.name} />
                     {q.opportunityType && <span className="quote-type">{q.opportunityType}</span>}
                     <QuoteStatusSelect status={q.status} onChange={(status) => onStatusChange(q, status)} />
                     <div className="quote-actions">
@@ -5648,7 +5679,7 @@ function QuotesMonthGrid({ quotes, anchor, onQuoteClick }) {
                 tabIndex={0}
                 onKeyDown={(e) => e.key === 'Enter' && onQuoteClick(q)}
               >
-                <span className="jn">{q.name}</span>
+                <span className="jn"><OppLink id={q.id} name={q.name} /></span>
               </div>
             ))}
           </div>
@@ -5702,7 +5733,7 @@ function QuotesWeekGrid({ quotes, anchor, onQuoteClick }) {
                 tabIndex={0}
                 onKeyDown={(e) => e.key === 'Enter' && onQuoteClick(q)}
               >
-                <span className="jn">{q.name}</span>
+                <span className="jn"><OppLink id={q.id} name={q.name} /></span>
               </div>
             ))}
           </div>
@@ -6212,7 +6243,7 @@ const InventoryGroupSection = React.memo(function InventoryGroupSection({ group,
     <div className="mgmt-group">
       <button className="mgmt-group-header" onClick={() => setOpen((o) => !o)}>
         <span className="mgmt-group-chevron">{open ? '▾' : '▸'}</span>
-        <span className="mgmt-group-name">{group.opportunityName}</span>
+        <OppLink className="mgmt-group-name" id={group.opportunityId} name={group.opportunityName} />
         {group.opportunityLid && <span className="lidtag">LID {group.opportunityLid}</span>}
         <span className="mgmt-group-count">{group.rows.length} part{group.rows.length === 1 ? '' : 's'}</span>
       </button>
