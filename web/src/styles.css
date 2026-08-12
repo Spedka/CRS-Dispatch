@@ -798,6 +798,11 @@ td.open{background:var(--open-bg);}
 .usage-kpi .k-lbl{font-size:11.5px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.4px;}
 .usage-panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px;}
 .usage-panel h3{font-family:'Space Grotesk',sans-serif;font-size:14px;font-weight:600;margin:0 0 12px;}
+.usage-panel-sub{font-size:12px;color:var(--ink-soft);margin:-6px 0 14px;}
+.usage-action-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;}
+.usage-action{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:3px;}
+.usage-action .ua-num{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;color:var(--brand);line-height:1;}
+.usage-action .ua-lbl{font-size:12px;color:var(--ink-soft);}
 .usage-cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
 @media (max-width:800px){.usage-cols{grid-template-columns:1fr;}}
 .usage-bars{display:flex;flex-direction:column;gap:5px;}
@@ -822,8 +827,12 @@ td.open{background:var(--open-bg);}
 .usage-feed-app.board{background:var(--scheduled-bg);color:var(--scheduled);}
 .usage-feed-app.dispatch{background:var(--surface-2);color:var(--ink-soft);}
 .usage-feed-actor{width:130px;flex-shrink:0;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.usage-feed-kind{width:52px;flex-shrink:0;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;border-radius:5px;padding:1px 5px;text-align:center;}
+.usage-feed-kind.action{background:rgba(14,124,112,.12);color:var(--brand);}
+.usage-feed-kind.view{background:var(--surface-2);color:var(--ink-faint);}
 .usage-feed-event{color:var(--ink);}
 .usage-feed-event em{color:var(--ink-faint);font-style:normal;}
+.usage-feed-row.is-view .usage-feed-event{color:var(--ink-soft);}
 
 /* Opportunity name → Salesforce record link. No blue/underline; inherits the
    name's normal color with a subtle light-gray highlight on hover. */

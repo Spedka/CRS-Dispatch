@@ -1083,6 +1083,7 @@ function DispatchApp({ user, onLoggedOut }) {
   }, [techs, flash, track]);
 
   const unassign = useCallback(async (job, assignmentId) => {
+    trackUsage('assignment_remove');
     const updatedAssignments = job.assignments.filter((a) => a.assignmentId !== assignmentId);
     const updatedJob = { ...job, assignments: updatedAssignments };
     const { status, scheduledDate } = deriveJobStatusFromAssignments(updatedJob);
@@ -1098,6 +1099,7 @@ function DispatchApp({ user, onLoggedOut }) {
   // their date (real history) and won't move when the job is rescheduled.
   const toggleDone = useCallback(async (job, a) => {
     const next = !a.completed;
+    trackUsage(next ? 'assignment_complete' : 'assignment_reopen');
     const updatedJob = {
       ...job,
       assignments: job.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, completed: next } : x),
@@ -1113,6 +1115,7 @@ function DispatchApp({ user, onLoggedOut }) {
 
   // Edit a single assignment's own date.
   const setAssignmentDate = useCallback(async (job, a, date) => {
+    trackUsage('assignment_reschedule');
     const updatedJob = {
       ...job,
       assignments: job.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, workDate: date || null } : x),
@@ -6690,6 +6693,44 @@ const fmtUsageDate = (ts) => (ts ? new Date(Number(ts)).toLocaleString() : '—'
 
 const fmtUsageShort = (ts) => (ts ? new Date(Number(ts)).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—');
 const USAGE_APPS = [['all', 'All'], ['board', 'Board'], ['dispatch', 'Dispatch']];
+// Friendly labels for raw event slugs. Drives the "Actions summary" panel and
+// the friendlier labels in the Top features table / recent-activity feed. Any
+// slug not listed falls back to its raw form (see eventLabel), so tracking a
+// new event never breaks — it just shows un-prettified until added here.
+const EVENT_LABELS = {
+  // dispatch (office)
+  assignment_add: 'Scheduled a tech',
+  assignment_reschedule: 'Rescheduled a tech',
+  assignment_remove: 'Removed a schedule',
+  assignment_complete: 'Marked work complete',
+  assignment_reopen: 'Reopened completed work',
+  unschedule: 'Unscheduled a job',
+  status_change: 'Changed a job status',
+  quote_sent: 'Sent a quote',
+  quote_review: 'Sent a quote for review',
+  schedule_approve: 'Approved a schedule request',
+  schedule_counter: 'Countered a schedule request',
+  schedule_deny: 'Denied a schedule request',
+  note_add: 'Added a note',
+  tech_add: 'Added a technician',
+  timeoff_add: 'Added time off',
+  part_checkout: 'Checked out parts',
+  fs_link: 'Linked a Field Squared task',
+  login: 'Logged in',
+  // board (tech app)
+  request_new: 'Requested a schedule',
+  request_accept: 'Accepted an offer',
+  request_counter: 'Countered an offer',
+  request_update: 'Updated a request',
+  request_withdraw: 'Withdrew a request',
+};
+const eventLabel = (slug) => EVENT_LABELS[slug] || slug;
+// Screen views are navigation ("opened the Jobs tab"), not actions taken inside
+// a screen — kept as a separate category everywhere in the Usage dashboard.
+const isScreenView = (slug) => slug === 'screen_view';
+// One friendly line for a feed row: "Viewed Jobs" for a screen view, the action
+// label otherwise.
+const feedLabel = (e) => (isScreenView(e.event) ? `Viewed ${e.screen || 'a screen'}` : eventLabel(e.event));
 // A horizontal bar list ([{label,c}]) scaled to the max — reused across panels.
 function UsageBars({ rows, labelKey = 'd', slice5 = true }) {
   const max = Math.max(1, ...rows.map((r) => r.c));
@@ -6737,6 +6778,21 @@ function UsageDashboard({ refreshKey = 0 }) {
     return Array.from({ length: 24 }, (_, h) => ({ d: `${String(h).padStart(2, '0')}h`, c: m.get(String(h).padStart(2, '0')) ?? 0 }));
   }, [data]);
 
+  // "Actions summary": byEvent minus screen views (those live in byScreen) and
+  // logins (already a KPI), each row given a friendly label. Sorted by count.
+  const actionRows = useMemo(
+    () => (data?.byEvent || [])
+      .filter((e) => !isScreenView(e.event) && e.event !== 'login')
+      .map((e) => ({ label: eventLabel(e.event), c: e.c })),
+    [data]
+  );
+  // Split totals: actions taken vs. screens opened (kept apart per request).
+  const actionTotal = useMemo(() => actionRows.reduce((s, a) => s + a.c, 0), [actionRows]);
+  const viewTotal = useMemo(
+    () => (data?.byEvent || []).filter((e) => isScreenView(e.event)).reduce((s, e) => s + e.c, 0),
+    [data]
+  );
+
   return (
     <section className="usage">
       <div className="view-head usage-head">
@@ -6761,13 +6817,31 @@ function UsageDashboard({ refreshKey = 0 }) {
         <>
           <div className="usage-kpis">
             <div className="usage-kpi"><span className="k-num">{data.totals.users ?? 0}</span><span className="k-lbl">Active users</span></div>
-            <div className="usage-kpi"><span className="k-num">{data.totals.events ?? 0}</span><span className="k-lbl">Events</span></div>
+            <div className="usage-kpi"><span className="k-num">{actionTotal}</span><span className="k-lbl">Actions</span></div>
+            <div className="usage-kpi"><span className="k-num">{viewTotal}</span><span className="k-lbl">Screen views</span></div>
             <div className="usage-kpi"><span className="k-num">{data.totals.logins ?? 0}</span><span className="k-lbl">Logins</span></div>
             <div className="usage-kpi"><span className="k-num">{(data.byEvent || []).find((e) => e.event === 'quote_sent')?.c ?? 0}</span><span className="k-lbl">Quotes sent</span></div>
             <div className="usage-kpi">
               <span className="k-num">{(data.byApp || []).map((a) => `${a.app}:${a.c}`).join(' · ') || '—'}</span>
               <span className="k-lbl">By app</span>
             </div>
+          </div>
+
+          <div className="usage-panel">
+            <h3>Actions summary</h3>
+            <p className="usage-panel-sub">Key things people did — scheduling, quotes, status changes, and more.</p>
+            {actionRows.length === 0 ? (
+              <p className="tech-links-hint">No actions in this range.</p>
+            ) : (
+              <div className="usage-action-grid">
+                {actionRows.map((a, i) => (
+                  <div className="usage-action" key={i}>
+                    <span className="ua-num">{a.c}</span>
+                    <span className="ua-lbl">{a.label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="usage-cols">
@@ -6795,37 +6869,28 @@ function UsageDashboard({ refreshKey = 0 }) {
               </table>
             </div>
             <div className="usage-panel">
-              <h3>Top features</h3>
+              <h3>Screen views</h3>
+              <p className="usage-panel-sub">Which screens people opened (navigation, not actions).</p>
               <table className="usage-table">
-                <thead><tr><th>Event</th><th>Count</th></tr></thead>
+                <thead><tr><th>Screen</th><th>Views</th></tr></thead>
                 <tbody>
-                  {(data.byEvent || []).map((e, i) => (<tr key={i}><td>{e.event}</td><td>{e.c}</td></tr>))}
-                  {(data.byEvent || []).length === 0 && <tr><td colSpan={2} className="tech-links-hint">No activity yet.</td></tr>}
+                  {(data.byScreen || []).map((s, i) => (<tr key={i}><td>{s.screen}</td><td>{s.c}</td></tr>))}
+                  {(data.byScreen || []).length === 0 && <tr><td colSpan={2} className="tech-links-hint">No screen views yet.</td></tr>}
                 </tbody>
               </table>
             </div>
           </div>
 
           <div className="usage-panel">
-            <h3>Most-used screens</h3>
-            <table className="usage-table">
-              <thead><tr><th>Screen</th><th>Views</th></tr></thead>
-              <tbody>
-                {(data.byScreen || []).map((s, i) => (<tr key={i}><td>{s.screen}</td><td>{s.c}</td></tr>))}
-                {(data.byScreen || []).length === 0 && <tr><td colSpan={2} className="tech-links-hint">No screen views yet.</td></tr>}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="usage-panel">
             <h3>Recent activity</h3>
             <div className="usage-feed">
               {recent.map((e, i) => (
-                <div className="usage-feed-row" key={i}>
+                <div className={`usage-feed-row ${isScreenView(e.event) ? 'is-view' : 'is-action'}`} key={i}>
                   <span className="usage-feed-time">{fmtUsageShort(e.ts)}</span>
                   <span className={`usage-feed-app ${e.app}`}>{e.app}</span>
                   <span className="usage-feed-actor">{e.actor}</span>
-                  <span className="usage-feed-event">{e.event}{e.screen ? <em> · {e.screen}</em> : null}</span>
+                  <span className={`usage-feed-kind ${isScreenView(e.event) ? 'view' : 'action'}`}>{isScreenView(e.event) ? 'View' : 'Action'}</span>
+                  <span className="usage-feed-event">{feedLabel(e)}</span>
                 </div>
               ))}
               {recent.length === 0 && <p className="tech-links-hint">No activity in this range.</p>}
@@ -6851,27 +6916,31 @@ function UsageDashboard({ refreshKey = 0 }) {
                     <UsageBars rows={detail.eventsByDay || []} />
                     <div className="usage-cols">
                       <div>
-                        <h4 className="usage-subh">Their top features</h4>
+                        <h4 className="usage-subh">Their actions</h4>
                         <table className="usage-table">
-                          <thead><tr><th>Event</th><th>Count</th></tr></thead>
-                          <tbody>{(detail.byEvent || []).map((e, i) => (<tr key={i}><td>{e.event}</td><td>{e.c}</td></tr>))}</tbody>
+                          <thead><tr><th>Action</th><th>Count</th></tr></thead>
+                          <tbody>
+                            {(detail.byEvent || []).filter((e) => !isScreenView(e.event)).map((e, i) => (<tr key={i}><td>{eventLabel(e.event)}</td><td>{e.c}</td></tr>))}
+                            {(detail.byEvent || []).filter((e) => !isScreenView(e.event)).length === 0 && <tr><td colSpan={2} className="tech-links-hint">No actions yet.</td></tr>}
+                          </tbody>
                         </table>
                       </div>
                       <div>
-                        <h4 className="usage-subh">Their screens</h4>
+                        <h4 className="usage-subh">Their screen views</h4>
                         <table className="usage-table">
                           <thead><tr><th>Screen</th><th>Views</th></tr></thead>
                           <tbody>{(detail.byScreen || []).map((s, i) => (<tr key={i}><td>{s.screen}</td><td>{s.c}</td></tr>))}</tbody>
                         </table>
                       </div>
                     </div>
-                    <h4 className="usage-subh">Recent actions</h4>
+                    <h4 className="usage-subh">Recent activity</h4>
                     <div className="usage-feed">
                       {(detail.recent || []).map((e, i) => (
-                        <div className="usage-feed-row" key={i}>
+                        <div className={`usage-feed-row ${isScreenView(e.event) ? 'is-view' : 'is-action'}`} key={i}>
                           <span className="usage-feed-time">{fmtUsageShort(e.ts)}</span>
                           <span className={`usage-feed-app ${e.app}`}>{e.app}</span>
-                          <span className="usage-feed-event">{e.event}{e.screen ? <em> · {e.screen}</em> : null}</span>
+                          <span className={`usage-feed-kind ${isScreenView(e.event) ? 'view' : 'action'}`}>{isScreenView(e.event) ? 'View' : 'Action'}</span>
+                          <span className="usage-feed-event">{feedLabel(e)}</span>
                         </div>
                       ))}
                     </div>
