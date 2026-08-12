@@ -562,14 +562,23 @@ const JobCard = React.memo(function JobCard({
   );
 });
 
+// Thin auth wrapper: the real app (DispatchApp, with all its data-loading
+// hooks) only MOUNTS once there's a session, so no API call ever fires
+// pre-login and hits the 401 gate. Logging in swaps the login screen for the
+// app cleanly; logging out unmounts it.
 export default function App() {
   const [user, setUser] = useState(() => getUser());
+  if (!user) return <DispatchLogin onLoggedIn={() => setUser(getUser())} />;
+  return <DispatchApp user={user} onLoggedOut={() => { authLogout(); setUser(null); }} />;
+}
+
+function DispatchApp({ user, onLoggedOut }) {
   const [accountOpen, setAccountOpen] = useState(false);
   const [officeUsersOpen, setOfficeUsersOpen] = useState(false);
   const [usageRefresh, setUsageRefresh] = useState(0);
   const [tab, setTab] = useState(() => loadViewState().tab ?? 'jobs');
-  // Usage analytics: record which tab (screen) is viewed, once logged in.
-  useEffect(() => { if (user) trackUsage('screen_view', null, tab); }, [tab, user]);
+  // Usage analytics: record which tab (screen) is viewed.
+  useEffect(() => { trackUsage('screen_view', null, tab); }, [tab]);
   const [jobs, setJobs] = useState([]);
   const [techs, setTechs] = useState([]);
   const [notes, setNotes] = useState([]);
@@ -1406,11 +1415,6 @@ export default function App() {
     return () => io.disconnect();
   }, [shown.length]);
 
-  // Auth gate: no session → show the office login screen. (The public /tv
-  // display renders TvBoard from main.jsx, never this component, so it's
-  // unaffected.)
-  if (!user) return <DispatchLogin onLoggedIn={() => setUser(getUser())} />;
-
   return (
     <>
       <div className="topline" />
@@ -1919,7 +1923,7 @@ export default function App() {
         <AccountMenu
           user={user}
           onClose={() => setAccountOpen(false)}
-          onLoggedOut={() => { authLogout(); setUser(null); setAccountOpen(false); }}
+          onLoggedOut={() => { setAccountOpen(false); onLoggedOut(); }}
         />
       )}
 
