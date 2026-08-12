@@ -43,14 +43,21 @@ export const FS_TO_SF = {
 // Canonical FS status to write when a dispatcher explicitly sets an SF stage
 // (dispatcher-driven writes only — see sfToFsStatus below and its callers in
 // routes.js/assignments.js). null = skip.
+// Keyed by the raw status VALUE (not by field), so it covers every record
+// type's status field at once — the value spellings don't collide across the
+// Project_Status__c / Service_Status__c / StageName picklists (a shared value
+// like 'Scheduled' or 'Completed' means the same thing on any of them).
 export const SF_TO_FS = {
   'Pending Customer Approval': 'Entered',
   'Quoted':                    'Entered',
-  'Parts Ordered':             'Entered',
+  'Parts ordered':             'Entered', // casing matches the org's picklist
   'Ready to be scheduled':     'Entered',
+  'Ready to be Scheduled':     'Entered', // Service_Status__c spelling (capital S)
+  'Unscheduled':               'Entered', // StageName (Test & Inspection)
   'Scheduled':                 'Scheduled',
   'In Progress':               'In-Progress',
   'Installation Completed':     'Completed',
+  'Completed':                 'Completed', // Service_Status__c / StageName
   'Waiting on Payment':        'Billing Completed',
   'Billing Complete':          'Billing Completed',
   'Project Complete':          'Billing Completed',
@@ -71,17 +78,18 @@ export function sfToFsStatus(sfStatus, hasAssignments) {
   return SF_TO_FS[sfStatus] ?? null;
 }
 
-// Same table as FS_STATUS_COMPATIBLE in web/src/App.jsx — kept as a
-// separate, hand-maintained copy rather than derived from FS_TO_SF above,
-// since it isn't a pure inverse of it (several early-stage SF statuses
-// like "Quoted"/"Parts Ordered" all compare compatible with FS's single
-// "Entered" status, not just the one SF stage FS_TO_SF's "Entered" entry
-// points at). Keep in sync with App.jsx's copy by hand — see "Things to
-// verify during audit" in CLAUDE.md.
-const FS_STATUS_COMPATIBLE = {
+// Per-record-type FS↔SF compatibility. Each table maps that record type's own
+// status VALUES to the set of raw FS statuses that are NOT a contradiction.
+// Same tables as in web/src/App.jsx (FS_COMPAT_BASE / FS_STATUS_COMPATIBLE_BY_TYPE)
+// — kept as a hand-maintained copy, not derived from FS_TO_SF, since it isn't a
+// pure inverse (several early-stage SF statuses all compare compatible with FS's
+// single "Entered"). Keep both copies in sync by hand — CLAUDE.md audit item #4.
+//
+// Types on Project_Status__c (null / Default / Job / Work_Order) share BASE.
+const FS_COMPAT_BASE = {
   'Pending Customer Approval': ['Entered'],
   'Quoted': ['Entered'],
-  'Parts Ordered': ['Entered'],
+  'Parts ordered': ['Entered'],
   'Ready to be scheduled': ['Entered'],
   'Scheduled': ['Scheduled', 'Assigned', 'Rescheduled'],
   'In Progress': ['In-Progress', 'En-Route', 'Return Trip'],
@@ -91,6 +99,28 @@ const FS_STATUS_COMPATIBLE = {
   'Project Complete': ['Billing Completed'],
 };
 
+const FS_STATUS_COMPATIBLE_BY_TYPE = {
+  Service_Call: { // Service_Status__c values
+    'Pending Customer Approval': ['Entered'],
+    'Ready to be Scheduled': ['Entered'],
+    'Scheduled': ['Scheduled', 'Assigned', 'Rescheduled'],
+    'In Progress': ['In-Progress', 'En-Route', 'Return Trip'],
+    'Completed': ['Completed'],
+  },
+  Test_Inspection: { // Inspection_Status__c values (no "In Progress" on that field)
+    'Pending Customer Approval': ['Entered'],
+    'Unscheduled': ['Entered'],
+    'Scheduled': ['Scheduled', 'Assigned', 'Rescheduled'],
+    'Completed': ['Completed'],
+  },
+};
+
+// Resolve the compatibility table for a record type (BASE for null/Default/
+// Job/Work_Order and anything not explicitly diverged).
+function compatTableFor(recordType) {
+  return FS_STATUS_COMPATIBLE_BY_TYPE[recordType] || FS_COMPAT_BASE;
+}
+
 // FS statuses with no SF equivalent at all (see the null entries in
 // FS_TO_SF above) — there's nothing on the SF side for these to
 // agree/disagree with, so they're treated as non-contradictory. Mirrors
@@ -98,13 +128,14 @@ const FS_STATUS_COMPATIBLE = {
 const FS_NO_EQUIVALENT = new Set(['In-review', 'Warranty']);
 
 /**
- * True if sfStatus/fsStatus look compatible per the table above (or
- * fsStatus has no SF equivalent at all). Mirrors fsDriftInfo() in
- * App.jsx exactly, so fsSync.js's drift-verification pass never flags
- * something the board's own drift badge wouldn't also flag, or vice versa.
+ * True if sfStatus/fsStatus look compatible for a job of the given record type
+ * (or fsStatus has no SF equivalent at all). `recordType` is
+ * RecordType.DeveloperName (null for legacy Opps -> BASE table). Mirrors
+ * fsDriftInfo() in App.jsx exactly, so fsSync.js's drift-verification pass never
+ * flags something the board's own drift badge wouldn't also flag, or vice versa.
  */
-export function isFsStatusCompatible(sfStatus, fsStatus) {
+export function isFsStatusCompatible(recordType, sfStatus, fsStatus) {
   if (FS_NO_EQUIVALENT.has(fsStatus)) return true;
-  const compatible = FS_STATUS_COMPATIBLE[sfStatus];
+  const compatible = compatTableFor(recordType)[sfStatus];
   return !!(compatible && compatible.includes(fsStatus));
 }

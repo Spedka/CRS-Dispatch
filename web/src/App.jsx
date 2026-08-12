@@ -1,18 +1,23 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from './api.js';
+import { getUser, login as authLogin, logout as authLogout, changePassword as authChangePassword, track as trackUsage } from './auth.js';
 
 // Map your real status strings to a color treatment. Unknown -> neutral.
 const STATUS_CLASS = {
   'Needs Quote': 'needs',             // amber — pre-scheduling quote stage, Quotes tab only
-  'Needs Quote Review': 'dispatched', // indigo — quote drafted, awaiting internal review
+  'Ready for Review': 'dispatched',   // indigo — quote drafted, awaiting internal review
+  'Needs Quote Review': 'dispatched', // legacy value (replaced by 'Ready for Review')
   'Pending Customer Approval': 'scheduled',
   'Quoted': 'scheduled',
-  'Parts Ordered': 'needs',
+  'Parts ordered': 'needs',
   'Ready to be scheduled': 'needs',   // amber — needs a tech assigned
+  'Ready to be Scheduled': 'needs',   // Service Call (Service_Status__c) spelling
+  'Unscheduled': 'needs',             // Test & Inspection (StageName)
   'Scheduled': 'scheduled',           // blue — booked
   'In Progress': 'dispatched',        // indigo — tech on site
   'Installation Completed': 'dispatched',
+  'Completed': 'dispatched',          // Service Call / Test & Inspection terminal
   'Waiting on Payment': 'emergency',  // red — done, awaiting payment
   'Billing Complete': 'scheduled',
   'Project Complete': 'scheduled',
@@ -35,9 +40,10 @@ const loadViewState = () => {
 // below (see ASSIGNABLE_STATUSES).
 const TERMINAL_STATUSES = ['Billing Complete', 'Project Complete'];
 
-// Everything that stays on the board (mirrors config.jobStatusValues).
+// Everything that stays on the board (mirrors config.jobStatusValues) — for
+// legacy / Job / Work_Order jobs on Project_Status__c.
 const BOARD_STATUSES = [
-  'Pending Customer Approval', 'Quoted', 'Parts Ordered', 'Ready to be scheduled',
+  'Pending Customer Approval', 'Quoted', 'Parts ordered', 'Ready to be scheduled',
   'Scheduled', 'In Progress', 'Installation Completed', 'Waiting on Payment',
 ];
 // A dispatcher can set any board status, plus "Project Complete" to take a job
@@ -46,25 +52,117 @@ const BOARD_STATUSES = [
 // still only happens in Field Squared. Strings must match the SF picklist EXACTLY.
 const ASSIGNABLE_STATUSES = [...BOARD_STATUSES, 'Project Complete'];
 
+// ---- Record-type-aware status handling (mirrors server config.recordTypeStatus) ----
+// New record types keep their lifecycle status in a different field with its own
+// values. Service Call -> Service_Status__c, Test & Inspection -> Inspection_Status__c.
+// Types not listed here ride Project_Status__c and use the BOARD/ASSIGNABLE lists.
+// (Quote-pipeline values like Needs Quote / Ready for Review live on the Quotes
+// tab, not this board dropdown.)
+const STATUS_VALUES_BY_TYPE = {
+  Service_Call: ['Pending Customer Approval', 'Ready to be Scheduled', 'Scheduled', 'In Progress', 'Completed'],
+  Test_Inspection: ['Pending Customer Approval', 'Unscheduled', 'Scheduled', 'Completed'],
+};
+// Dropdown options for a job of the given record type.
+const assignableStatusesFor = (recordType) =>
+  STATUS_VALUES_BY_TYPE[recordType] || ASSIGNABLE_STATUSES;
+// True if `status` keeps a job of this record type on the board (server's
+// boardStatusPredicate treats every valuesByType entry as on-board).
+const isBoardStatusFor = (recordType, status) =>
+  (STATUS_VALUES_BY_TYPE[recordType] || BOARD_STATUSES).includes(status);
+// The "Scheduled" value is identical across every type's status field.
+const SCHEDULED_STATUS = 'Scheduled';
+// The value meaning "back in the queue / not yet scheduled" per record type.
+const QUEUE_STATUS_BY_TYPE = {
+  Service_Call: 'Ready to be Scheduled',
+  Test_Inspection: 'Unscheduled',
+};
+const queueStatusFor = (recordType) =>
+  QUEUE_STATUS_BY_TYPE[recordType] || 'Ready to be scheduled';
+// Statuses that auto-advance to "Scheduled" when a date is set, per record type.
+const PRE_SCHEDULED_BY_TYPE = {
+  Service_Call: ['Pending Customer Approval', 'Ready to be Scheduled'],
+  Test_Inspection: ['Unscheduled'],
+};
+const preScheduledFor = (recordType) =>
+  PRE_SCHEDULED_BY_TYPE[recordType] || PRE_SCHEDULED;
+
+// ---- Job category facet (the "Type" filter dropdown) ----
+// Buckets every job into Job / Service Call / Test & Inspection / Other /
+// Monitoring. Only the FOUR real record types are authoritative — `Default`
+// (catch-all) and `Work_Order` (the FS artifact) are NOT semantic categories,
+// so they fall through to the explicit Opportunity_Type__c map below rather
+// than forcing "Job" (that precedence was the bug where `Service - Fire` opps
+// with a Default/Work_Order record type showed as Job). Unknown / null
+// Opportunity_Type__c values default to Job.
+const RECORD_TYPE_LABELS = {
+  Job: 'Job',
+  Service_Call: 'Service Call',
+  Test_Inspection: 'Test & Inspection',
+  Monitoring: 'Monitoring',
+};
+// Explicit — no fuzzy matching. Keep in sync with the org's Opportunity_Type__c
+// picklist (CLAUDE.md audit item #13). A new picklist value not listed here
+// falls to Job until added.
+const OPP_TYPE_CATEGORY = {
+  // --- Job (generic install / system project types) ---
+  'A/V': 'Job', 'Access': 'Job', 'CCTV': 'Job', 'Communications': 'Job',
+  'Energy Controls': 'Job', 'Fire': 'Job', 'Nurse Call - Area of Rescue': 'Job',
+  'Security': 'Job',
+  // --- Service Call (field service visits on a system) ---
+  'Service - Access': 'Service Call', 'Service - CCTV': 'Service Call',
+  'Service - Fire': 'Service Call', 'Service - Security': 'Service Call',
+  'Service/Equipment': 'Service Call', 'Service/Monitoring': 'Service Call',
+  // --- Test & Inspection ---
+  'Test & Inspection': 'Test & Inspection', 'Inspections and Fees': 'Test & Inspection',
+  // --- Monitoring (excluded from the board, categorized for completeness) ---
+  'Monitoring': 'Monitoring',
+  // --- Other (contract / revenue / misc — not a field visit) ---
+  'Service Agreement': 'Other', 'Service Revenue': 'Other',
+  'Software upgrade/ service accessory': 'Other', 'Other': 'Other',
+};
+function jobCategory(job) {
+  const rt = RECORD_TYPE_LABELS[job.recordType];
+  if (rt) return rt;                                        // real record type wins
+  return OPP_TYPE_CATEGORY[job.opportunityType] || 'Job';   // else explicit map, default Job
+}
+
+// Display label for a subtype inside the Type filter's submenu. Service Call
+// subtypes strip the redundant "Service - " / "Service/" prefix so they read
+// like the Job submenu (Fire, Access, Equipment…). Filtering always uses the
+// raw opportunityType value, never this cleaned label.
+function cleanSubLabel(category, opportunityType) {
+  if (!opportunityType) return opportunityType;
+  if (category === 'Service Call') return opportunityType.replace(/^Service\s*[-/]\s*/i, '');
+  return opportunityType;
+}
+
+// Stable left-to-right order for the Type menu's categories.
+const TYPE_CATEGORY_ORDER = ['Job', 'Service Call', 'Test & Inspection', 'Other'];
+
 // =====================================================================
 //  FS drift badge — EDIT ME
-//  Maps each dispatch status (Project_Status__c) to the set of raw FS
-//  statuses that are NOT a contradiction for it — i.e. FS is either already
-//  in agreement or in an expected transient state on the way there. Any FS
-//  status not listed for the job's current dispatch status is flagged red.
+//  Maps each dispatch status to the set of raw FS statuses that are NOT a
+//  contradiction for it — i.e. FS is either already in agreement or in an
+//  expected transient state on the way there. Any FS status not listed for the
+//  job's current status is flagged red.
 //
-//  Seeded as a guess from the write-direction tables in
-//  server/src/statusMap.js (FS_TO_SF / SF_TO_FS) — verify against real data.
-//  This map is comparison-only: it never drives a write to SF or FS.
+//  Per record type: a job's status now lives in a different field depending on
+//  its Opportunity record type, so the compatible-set is keyed by record type
+//  too. Legacy / Job / Work_Order jobs ride Project_Status__c and use BASE;
+//  Service Call uses Service_Status__c values, Test & Inspection uses StageName
+//  values. compatTableFor(job.recordType) picks the table.
+//
+//  Keep in sync BY HAND with server/src/statusMap.js (FS_COMPAT_BASE /
+//  FS_STATUS_COMPATIBLE_BY_TYPE) — CLAUDE.md audit item #4. Comparison-only:
+//  never drives a write to SF or FS.
 //
 //  Example (confirmed): dispatch status "Installation Completed" with FS
-//  status "Entered" → "Entered" isn't in the list below → red.
-//  Dispatch "Billing Complete" with FS "Completed" → same → red.
+//  status "Entered" → "Entered" isn't in BASE's list → red.
 // =====================================================================
-const FS_STATUS_COMPATIBLE = {
+const FS_COMPAT_BASE = { // Project_Status__c — null / Default / Job / Work_Order
   'Pending Customer Approval': ['Entered'],
   'Quoted': ['Entered'],
-  'Parts Ordered': ['Entered'],
+  'Parts ordered': ['Entered'],
   'Ready to be scheduled': ['Entered'],
   'Scheduled': ['Scheduled', 'Assigned', 'Rescheduled'],
   'In Progress': ['In-Progress', 'En-Route', 'Return Trip'],
@@ -73,6 +171,25 @@ const FS_STATUS_COMPATIBLE = {
   'Billing Complete': ['Billing Completed'],
   'Project Complete': ['Billing Completed'],
 };
+
+const FS_STATUS_COMPATIBLE_BY_TYPE = {
+  Service_Call: { // Service_Status__c values
+    'Pending Customer Approval': ['Entered'],
+    'Ready to be Scheduled': ['Entered'],
+    'Scheduled': ['Scheduled', 'Assigned', 'Rescheduled'],
+    'In Progress': ['In-Progress', 'En-Route', 'Return Trip'],
+    'Completed': ['Completed'],
+  },
+  Test_Inspection: { // Inspection_Status__c values (no "In Progress" on that field)
+    'Pending Customer Approval': ['Entered'],
+    'Unscheduled': ['Entered'],
+    'Scheduled': ['Scheduled', 'Assigned', 'Rescheduled'],
+    'Completed': ['Completed'],
+  },
+};
+
+const compatTableFor = (recordType) =>
+  FS_STATUS_COMPATIBLE_BY_TYPE[recordType] || FS_COMPAT_BASE;
 
 // FS statuses with no dispatch-side equivalent at all (see FS_TO_SF nulls in
 // statusMap.js). There's nothing on our side for these to agree/disagree
@@ -87,7 +204,7 @@ const FS_NO_EQUIVALENT_IS_CONTRADICTION = false;
 function fsDriftInfo(job) {
   if (!job.fsTaskId || !job.fsStatus) return null;
 
-  const compatible = FS_STATUS_COMPATIBLE[job.status];
+  const compatible = compatTableFor(job.recordType)[job.status];
   const contradicts = FS_NO_EQUIVALENT.has(job.fsStatus)
     ? FS_NO_EQUIVALENT_IS_CONTRADICTION
     : !(compatible && compatible.includes(job.fsStatus));
@@ -171,7 +288,7 @@ function highlightMatch(text, query) {
 
 // Statuses that auto-advance to "Scheduled" the moment a job is given a date.
 // (Already-advanced statuses like In Progress are left alone.)
-const PRE_SCHEDULED = ['Quoted', 'Parts Ordered', 'Ready to be scheduled'];
+const PRE_SCHEDULED = ['Quoted', 'Parts ordered', 'Ready to be scheduled'];
 
 // ---- date helpers (all local-time, no UTC drift) ----
 const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
@@ -223,10 +340,9 @@ function nextScheduledAssignmentDate(job) {
 }
 
 function deriveJobStatusFromAssignments(job) {
-  const assignments = job.assignments || [];
   const nextDate = nextScheduledAssignmentDate(job);
-  if (nextDate) return { status: 'Scheduled', scheduledDate: nextDate };
-  return { status: 'Ready to be scheduled', scheduledDate: '' };
+  if (nextDate) return { status: SCHEDULED_STATUS, scheduledDate: nextDate };
+  return { status: queueStatusFor(job.recordType), scheduledDate: '' };
 }
 
 // Ticks once a second on its own — kept out of App so the "synced Xs ago"
@@ -303,8 +419,8 @@ const JobCard = React.memo(function JobCard({
             value={job.status}
             onChange={(e) => onSetStatus(job, e.target.value)}
           >
-            {!ASSIGNABLE_STATUSES.includes(job.status) && <option value={job.status}>{job.status}</option>}
-            {ASSIGNABLE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            {!assignableStatusesFor(job.recordType).includes(job.status) && <option value={job.status}>{job.status}</option>}
+            {assignableStatusesFor(job.recordType).map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
           {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
         </div>
@@ -390,18 +506,18 @@ const JobCard = React.memo(function JobCard({
             );
           })}
           <div>
-            <select className="addtech" value="" onChange={(e) => {
-              const techId = e.target.value;
-              if (!techId) return;
-              e.target.value = '';
-              onPendingAddChange({ jobId: job.id, techId, dates: job.scheduledDate ? [job.scheduledDate] : [], time: '', endTime: '' });
-            }}>
-              <option value="">+ Add assignment</option>
-              {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-            {pendingAddForJob && (
+            <TechMultiSelect
+              techs={techs}
+              value={pendingAddForJob?.techIds || []}
+              onChange={(next) => {
+                if (next.length === 0) { onPendingAddChange({ jobId: null, techIds: [], dates: [], time: '', endTime: '' }); return; }
+                onPendingAddChange((p) => (p && p.jobId === job.id)
+                  ? { ...p, techIds: next }
+                  : { jobId: job.id, techIds: next, dates: job.scheduledDate ? [job.scheduledDate] : [], time: '', endTime: '' });
+              }}
+            />
+            {pendingAddForJob && pendingAddForJob.techIds.length > 0 && (
               <div className="inline-add">
-                <span className="pending-tech">{techs.find((t) => t.id === pendingAddForJob.techId)?.name}</span>
                 <MultiDatePicker className="dp-adate" value={pendingAddForJob.dates} onChange={(v) => onPendingAddChange((p) => ({ ...p, dates: v }))} placeholder="Date(s)" />
                 <TimePicker
                   className="atime"
@@ -422,20 +538,21 @@ const JobCard = React.memo(function JobCard({
                   disabled={!pendingAddForJob.endTime}
                   title={!pendingAddForJob.endTime ? 'Pick an end time first' : undefined}
                   onClick={async () => {
-                    const { techId, dates, time, endTime } = pendingAddForJob;
-                    onPendingAddChange({ jobId: null, techId: '', dates: [], time: '', endTime: '' });
-                    // One Job_Assignment__c per selected day, same as the "Add
-                    // assignment" modal and chalkboard's own time-off picker --
-                    // chained sequentially so each call builds on the job state
-                    // the previous call returned, rather than re-adding onto a
-                    // stale snapshot and dropping earlier days.
+                    const { techIds, dates, time, endTime } = pendingAddForJob;
+                    onPendingAddChange({ jobId: null, techIds: [], dates: [], time: '', endTime: '' });
+                    // One Job_Assignment__c per (tech × selected day) -- chained
+                    // sequentially so each call builds on the job state the
+                    // previous call returned, rather than re-adding onto a stale
+                    // snapshot and dropping earlier creates.
                     let current = job;
-                    for (const d of dates.length ? dates : ['']) {
-                      current = await onAssign(current, techId, d, time || '07:00', endTime);
+                    for (const techId of techIds) {
+                      for (const d of dates.length ? dates : ['']) {
+                        current = await onAssign(current, techId, d, time || '07:00', endTime);
+                      }
                     }
                   }}
                 >Add</button>
-                <button className="cancel-btn" onClick={() => onPendingAddChange({ jobId: null, techId: '', dates: [], time: '', endTime: '' })}>Cancel</button>
+                <button className="cancel-btn" onClick={() => onPendingAddChange({ jobId: null, techIds: [], dates: [], time: '', endTime: '' })}>Cancel</button>
               </div>
             )}
           </div>
@@ -446,7 +563,13 @@ const JobCard = React.memo(function JobCard({
 });
 
 export default function App() {
+  const [user, setUser] = useState(() => getUser());
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [officeUsersOpen, setOfficeUsersOpen] = useState(false);
+  const [usageRefresh, setUsageRefresh] = useState(0);
   const [tab, setTab] = useState(() => loadViewState().tab ?? 'jobs');
+  // Usage analytics: record which tab (screen) is viewed, once logged in.
+  useEffect(() => { if (user) trackUsage('screen_view', null, tab); }, [tab, user]);
   const [jobs, setJobs] = useState([]);
   const [techs, setTechs] = useState([]);
   const [notes, setNotes] = useState([]);
@@ -469,11 +592,11 @@ export default function App() {
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
   const [lastSync, setLastSync] = useState(null);
-  const [pendingAdd, setPendingAdd] = useState({ jobId: null, techId: '', dates: [], time: '', endTime: '' });
+  const [pendingAdd, setPendingAdd] = useState({ jobId: null, techIds: [], dates: [], time: '', endTime: '' });
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [fsLink, setFsLink] = useState({ jobId: null, query: '', searching: false, matches: null, error: null });
   const [draftJob, setDraftJob] = useState(null);
-  const [draftPendingAdd, setDraftPendingAdd] = useState({ techId: '', date: '', time: '', endTime: '' });
+  const [draftPendingAdd, setDraftPendingAdd] = useState({ techIds: [], date: '', time: '', endTime: '' });
   const [contacts, setContacts] = useState([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsLoaded, setContactsLoaded] = useState(false);
@@ -500,7 +623,6 @@ export default function App() {
   const [previousRequestsLoading, setPreviousRequestsLoading] = useState(false);
   const [previousRequestsLoaded, setPreviousRequestsLoaded] = useState(false);
   const [manageTechsOpen, setManageTechsOpen] = useState(false);
-  const [techLinksOpen, setTechLinksOpen] = useState(false);
   const [inventoryGroups, setInventoryGroups] = useState([]);
   const [inventoryLoading, setInventoryLoading] = useState(false);
   const [inventoryLoaded, setInventoryLoaded] = useState(false);
@@ -629,7 +751,7 @@ export default function App() {
       if (job) setDraftJob(JSON.parse(JSON.stringify(job)));
     } else {
       setDraftJob(null);
-      setDraftPendingAdd({ techId: '', date: '', time: '' });
+      setDraftPendingAdd({ techIds: [], date: '', time: '', endTime: '' });
     }
   }, [selectedJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -744,6 +866,7 @@ export default function App() {
     setScheduleRequests((prev) => prev.filter((r) => r.id !== req.id));
     flash(`${req.technicianName || 'Request'} approved`);
     try {
+      trackUsage('schedule_approve');
       await track(() => api.approveScheduleRequest(req.id, opportunityId));
       await load(true); // the new assignment shows up on the jobs/schedule tabs
     } catch (e) {
@@ -761,6 +884,7 @@ export default function App() {
       : r));
     flash('Countered');
     try {
+      trackUsage('schedule_counter');
       await track(() => api.counterScheduleRequest(req.id, offer));
     } catch (e) {
       flash(`Could not counter: ${e.message}`);
@@ -775,6 +899,7 @@ export default function App() {
     setScheduleRequests((prev) => prev.filter((r) => r.id !== req.id));
     flash('Request denied');
     try {
+      trackUsage('schedule_deny');
       await track(() => api.denyScheduleRequest(req.id, officeNote));
     } catch (e) {
       flash(`Could not deny: ${e.message}`);
@@ -846,6 +971,7 @@ export default function App() {
   // so a failed send never leaves a quote looking like it went to the
   // customer when it didn't.
   const sendQuote = useCallback(async (quote, recipientEmails) => {
+    trackUsage('quote_sent');
     try {
       const emailResult = await api.sendQuoteEmail(quote.id, recipientEmails);
       try {
@@ -868,10 +994,11 @@ export default function App() {
   // Same email-first/status-second/no-rollback-on-email-failure guarantee as
   // sendQuote above, for the earlier "ready for internal review" stage.
   const reviewQuote = useCallback(async (quote, recipientEmails) => {
+    trackUsage('quote_review');
     try {
       const emailResult = await api.sendQuoteReviewEmail(quote.id, recipientEmails);
       try {
-        const result = await api.updateJob(quote.id, { status: 'Needs Quote Review' });
+        const result = await api.updateJob(quote.id, { status: 'Ready for Review' });
         if (emailResult.stampError) {
           flash(`Review requested · Ready_For_Review__c not updated: ${emailResult.stampError}`);
         } else {
@@ -900,6 +1027,7 @@ export default function App() {
   // was passed in, calling this repeatedly with the same stale `job` would
   // silently drop every add but the last.
   const assign = useCallback(async (job, technicianId, workDate, startTime = '07:00', endTime = '') => {
+    trackUsage('assignment_add');
     const tech = techs.find((t) => t.id === technicianId);
     try {
       // Compute derived status before the call so the server can update the SF Opp
@@ -1002,8 +1130,8 @@ export default function App() {
   const setDate = async (job, date) => {
     // Giving an un-advanced job a date schedules it; clearing returns it to queue.
     let status = job.status;
-    if (date && PRE_SCHEDULED.includes(job.status)) status = 'Scheduled';
-    else if (!date) status = 'Ready to be scheduled';
+    if (date && preScheduledFor(job.recordType).includes(job.status)) status = SCHEDULED_STATUS;
+    else if (!date) status = queueStatusFor(job.recordType);
 
     const fields = { scheduledDate: date };
     if (status !== job.status) fields.status = status;
@@ -1023,18 +1151,21 @@ export default function App() {
   // Pull a job off the calendar and back into the queue: clear its date and
   // reset status to "Ready to be scheduled". Completed assignments stay frozen.
   const unschedule = async (job) => {
+    trackUsage('unschedule');
+    const queueStatus = queueStatusFor(job.recordType);
     setJobs((prev) => prev.map((j) => j.id === job.id
-      ? { ...j, scheduledDate: null, status: 'Ready to be scheduled',
+      ? { ...j, scheduledDate: null, status: queueStatus,
           assignments: j.assignments.map((a) => a.completed ? a : { ...a, workDate: null }) }
       : j));
     try {
-      await track(() => api.updateJob(job.id, { scheduledDate: '', status: 'Ready to be scheduled' }));
+      await track(() => api.updateJob(job.id, { scheduledDate: '', status: queueStatus }));
       flash(`${job.name} unscheduled`);
     } catch (e) { flash(`Could not unschedule: ${e.message}`); load(true); }
   };
 
   const setStatus = useCallback(async (job, status) => {
-    const offBoard = !BOARD_STATUSES.includes(status);
+    trackUsage('status_change', { status, recordType: job.recordType });
+    const offBoard = !isBoardStatusFor(job.recordType, status);
     setJobs((prev) => offBoard
       ? prev.filter((j) => j.id !== job.id)
       : prev.map((j) => j.id === job.id ? { ...j, status } : j));
@@ -1083,6 +1214,7 @@ export default function App() {
   const confirmFsLink = useCallback(async (jobId, fsTaskId, fsTaskName) => {
     closeFsLink();
     try {
+      trackUsage('fs_link');
       const result = await api.linkFsTask(jobId, fsTaskId);
       // Reload to pick up the FS status snapshot and any synced assignments
       await load(true);
@@ -1161,9 +1293,21 @@ export default function App() {
 
   const cancelModal = () => { closeFsLink(); setSelectedJobId(null); };
 
-  const oppTypes = useMemo(() =>
-    [...new Set(jobs.map((j) => j.opportunityType).filter(Boolean))].sort()
-  , [jobs]);
+  // Category -> its distinct present subtypes (raw Opportunity_Type__c values),
+  // driving the cascading Type filter. Categories with no subtypes still show
+  // (they just have no hover flyout).
+  const typeTree = useMemo(() => {
+    const map = new Map();
+    for (const j of jobs) {
+      const cat = jobCategory(j);
+      if (!map.has(cat)) map.set(cat, new Set());
+      if (j.opportunityType) map.get(cat).add(j.opportunityType);
+    }
+    const rank = (c) => { const i = TYPE_CATEGORY_ORDER.indexOf(c); return i === -1 ? 99 : i; };
+    return [...map.keys()]
+      .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+      .map((category) => ({ category, subtypes: [...map.get(category)].sort() }));
+  }, [jobs]);
 
   const fsStatuses = useMemo(() =>
     [...new Set(jobs.map((j) => j.fsStatus).filter(Boolean))].sort()
@@ -1182,7 +1326,11 @@ export default function App() {
       if (jobTech === 'unassigned' && j.assignments.length > 0) return false;
       if (jobTech !== 'all' && jobTech !== 'unassigned'
           && !j.assignments.some((a) => a.technicianId === jobTech)) return false;
-      if (jobType !== 'all' && j.opportunityType !== jobType) return false;
+      if (jobType !== 'all') {
+        const [cat, sub] = jobType.split('::');
+        if (jobCategory(j) !== cat) return false;
+        if (sub && j.opportunityType !== sub) return false;
+      }
       if (!matchesFsStatus(j, jobFsStatus)) return false;
       if (closedFrom || closedTo) {
         const cd = dateOnlyISO(j.closeDate);
@@ -1211,7 +1359,11 @@ export default function App() {
       if (jobTech === 'unassigned' && j.assignments.length > 0) return false;
       if (jobTech !== 'all' && jobTech !== 'unassigned'
           && !j.assignments.some((a) => a.technicianId === jobTech)) return false;
-      if (jobType !== 'all' && j.opportunityType !== jobType) return false;
+      if (jobType !== 'all') {
+        const [cat, sub] = jobType.split('::');
+        if (jobCategory(j) !== cat) return false;
+        if (sub && j.opportunityType !== sub) return false;
+      }
       if (!matchesFsStatus(j, jobFsStatus)) return false;
       if (closedFrom || closedTo) {
         const cd = dateOnlyISO(j.closeDate);
@@ -1254,18 +1406,23 @@ export default function App() {
     return () => io.disconnect();
   }, [shown.length]);
 
+  // Auth gate: no session → show the office login screen. (The public /tv
+  // display renders TvBoard from main.jsx, never this component, so it's
+  // unaffected.)
+  if (!user) return <DispatchLogin onLoggedIn={() => setUser(getUser())} />;
+
   return (
     <>
       <div className="topline" />
       <header className="bar">
         <div className="wordmark">
-          <div className="glyph">C</div>
-          <div><h1>CRS Dispatch</h1><span>Field Work Board</span></div>
+          <img className="wordmark-logo" src="/icon-192.png" alt="CRS" />
+          <div><h1>CRS Helper</h1></div>
         </div>
         <div className="bar-spacer" />
         <NotesMenu notes={notes} onRefresh={loadNotes} onNewNote={() => openNewNote()} onOpenNote={openNote} />
-        <button className="refresh" onClick={() => setManageTechsOpen(true)} title="Add, edit, or remove technicians">Manage Techs</button>
-        <button className="refresh" onClick={() => setTechLinksOpen(true)} title="Get a chalkboard sign-in link for a technician">Tech Links</button>
+        <button className="refresh" onClick={() => setManageTechsOpen(true)} title="Add, edit, remove technicians, or set their board password">Manage Techs</button>
+        {user.isAdmin && <button className="refresh" onClick={() => setOfficeUsersOpen(true)} title="Manage office users, passwords, and roles">Office Users</button>}
         <button
           className="refresh"
           onClick={() => {
@@ -1283,6 +1440,9 @@ export default function App() {
             if (tab === 'parts') {
               api.getPartsInventory().then(setInventoryGroups).catch((e) => flash(`Parts error: ${e.message}`));
             }
+            if (tab === 'usage') {
+              setUsageRefresh((k) => k + 1);
+            }
           }}
           title="Reload from Salesforce"
         >↻ Refresh</button>
@@ -1291,6 +1451,9 @@ export default function App() {
           <span className="lbl">Live · Salesforce</span>
           <SyncedAgo lastSync={lastSync} />
         </div>
+        <button className="acct-avatar" onClick={() => setAccountOpen(true)} title={`${user.name} — account`} aria-label="Account">
+          {initials(user.name)}
+        </button>
       </header>
 
       <nav className="tabs">
@@ -1301,6 +1464,7 @@ export default function App() {
         <button className={`tab ${tab === 'accounts' ? 'active' : ''}`} onClick={() => setTab('accounts')}>Accounts</button>
         <button className={`tab ${tab === 'quotes' ? 'active' : ''}`} onClick={() => setTab('quotes')}>Quotes</button>
         <button className={`tab ${tab === 'parts' ? 'active' : ''}`} onClick={() => setTab('parts')}>Parts</button>
+        {user.isAdmin && <button className={`tab ${tab === 'usage' ? 'active' : ''}`} onClick={() => setTab('usage')}>Usage</button>}
       </nav>
 
       <main>
@@ -1334,7 +1498,7 @@ export default function App() {
         {!loading && !error && tab === 'jobs' && (
           <section>
             <div className="view-head">
-              <div><h2>Outstanding field work</h2><p>Every job needing a tech, live from Salesforce. Changes save back instantly.</p></div>
+              <div><h2>Outstanding field work</h2></div>
             </div>
 
             <div className="searchbox">
@@ -1353,12 +1517,17 @@ export default function App() {
               <DatePicker value={closedFrom} onChange={setClosedFrom} placeholder="From" />
               <span className="dash">-</span>
               <DatePicker value={closedTo} onChange={setClosedTo} placeholder="To" />
-              <select
-                className="ctlselect datepreset"
-                defaultValue=""
-                onChange={(e) => {
-                  const value = e.target.value;
-                  e.target.value = '';
+              <FilterSelect
+                resetOnSelect
+                value=""
+                placeholder="Range preset"
+                ariaLabel="Closed date range preset"
+                options={[
+                  ['ytd', 'Year to date'],
+                  ['thisMonth', 'This month'],
+                  ['lastMonth', 'Last month'],
+                ]}
+                onChange={(value) => {
                   const today = new Date();
                   if (value === 'ytd') {
                     setClosedFrom(isoOf(startOfYear(today)));
@@ -1375,12 +1544,7 @@ export default function App() {
                     setClosedTo(isoOf(end));
                   }
                 }}
-              >
-                <option value="">Range preset</option>
-                <option value="ytd">Year to date</option>
-                <option value="thisMonth">This month</option>
-                <option value="lastMonth">Last month</option>
-              </select>
+              />
               <button
                 className="clearrange"
                 onClick={() => { setClosedFrom(''); setClosedTo(''); }}
@@ -1391,42 +1555,54 @@ export default function App() {
             <div className="datehint">Board loads opportunities by status; these dates only filter by Closed Date.</div>
 
             <div className="sortbar">
-              <label className="sortgrp">
+              <div className="sortgrp">
                 <span className="rl">Sort</span>
-                <select className="ctlselect" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
-                  <option value="scheduled">Scheduled date</option>
-                  <option value="closedNew">closed — newest</option>
-                  <option value="closedOld">closed — oldest</option>
-                  <option value="lid">LID</option>
-                  <option value="name">Job name</option>
-                  <option value="fsStatus">FS status</option>
-                </select>
-              </label>
-              <label className="sortgrp">
+                <FilterSelect
+                  value={sortBy}
+                  onChange={setSortBy}
+                  ariaLabel="Sort jobs"
+                  options={[
+                    ['scheduled', 'Scheduled date'],
+                    ['closedNew', 'closed — newest'],
+                    ['closedOld', 'closed — oldest'],
+                    ['lid', 'LID'],
+                    ['name', 'Job name'],
+                    ['fsStatus', 'FS status'],
+                  ]}
+                />
+              </div>
+              <div className="sortgrp">
                 <span className="rl">Tech</span>
-                <select className="ctlselect" value={jobTech} onChange={(e) => setJobTech(e.target.value)}>
-                  <option value="all">All</option>
-                  <option value="unassigned">Unassigned</option>
-                  {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
-              </label>
-              {oppTypes.length > 0 && (
-                <label className="sortgrp">
+                <FilterSelect
+                  value={jobTech}
+                  onChange={setJobTech}
+                  ariaLabel="Filter by tech"
+                  options={[
+                    ['all', 'All'],
+                    ['unassigned', 'Unassigned'],
+                    ...techs.map((t) => [t.id, t.name]),
+                  ]}
+                />
+              </div>
+              {typeTree.length > 0 && (
+                <div className="sortgrp">
                   <span className="rl">Type</span>
-                  <select className="ctlselect" value={jobType} onChange={(e) => setJobType(e.target.value)}>
-                    <option value="all">All</option>
-                    {oppTypes.map((t) => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                </label>
+                  <TypeFilterMenu value={jobType} tree={typeTree} onChange={setJobType} />
+                </div>
               )}
-              <label className="sortgrp">
+              <div className="sortgrp">
                 <span className="rl">FS status</span>
-                <select className="ctlselect" value={jobFsStatus} onChange={(e) => setJobFsStatus(e.target.value)}>
-                  <option value="all">All</option>
-                  <option value="unlinked">Unlinked</option>
-                  {fsStatuses.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </label>
+                <FilterSelect
+                  value={jobFsStatus}
+                  onChange={setJobFsStatus}
+                  ariaLabel="Filter by FS status"
+                  options={[
+                    ['all', 'All'],
+                    ['unlinked', 'Unlinked'],
+                    ...fsStatuses.map((s) => [s, s]),
+                  ]}
+                />
+              </div>
             </div>
 
             <div className="filters">
@@ -1536,6 +1712,7 @@ export default function App() {
             onUpdateRow={updateInventoryRow}
           />
         )}
+        {tab === 'usage' && user.isAdmin && <UsageDashboard refreshKey={usageRefresh} />}
       </main>
 
       {toast && <div className="toast">{toast}<span className="tsf">→ Salesforce</span></div>}
@@ -1557,8 +1734,8 @@ export default function App() {
                   onChange={(e) => setDraftJob((d) => ({ ...d, status: e.target.value }))}
                 >
                   {!draftJob.status && <option value="">Pick a status…</option>}
-                  {draftJob.status && !ASSIGNABLE_STATUSES.includes(draftJob.status) && <option value={draftJob.status}>{draftJob.status}</option>}
-                  {ASSIGNABLE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                  {draftJob.status && !assignableStatusesFor(draftJob.recordType).includes(draftJob.status) && <option value={draftJob.status}>{draftJob.status}</option>}
+                  {assignableStatusesFor(draftJob.recordType).map((s) => <option key={s} value={s}>{s}</option>)}
                 </select>
               </div>
               <button className="modal-close" onClick={cancelModal} aria-label="Close">×</button>
@@ -1673,16 +1850,12 @@ export default function App() {
                   );
                 })}
                 <div>
-                  <select className="addtech" value="" onChange={(e) => {
-                    const techId = e.target.value;
-                    if (!techId) return;
-                    e.target.value = '';
-                    setDraftPendingAdd({ techId, date: draftJob.scheduledDate || '', time: '', endTime: '' });
-                  }}>
-                    <option value="">+ Add assignment</option>
-                    {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                  </select>
-                  {draftPendingAdd.techId && (
+                  <TechMultiSelect
+                    techs={techs}
+                    value={draftPendingAdd.techIds}
+                    onChange={(next) => setDraftPendingAdd((p) => ({ ...p, techIds: next, date: p.date || draftJob.scheduledDate || '' }))}
+                  />
+                  {draftPendingAdd.techIds?.length > 0 && (
                     <div className="inline-add">
                       <DatePicker className="dp-adate" value={draftPendingAdd.date || ''} onChange={(v) => setDraftPendingAdd((p) => ({ ...p, date: v }))} placeholder="Date" />
                       <TimePicker
@@ -1704,25 +1877,27 @@ export default function App() {
                         disabled={!draftPendingAdd.endTime}
                         title={!draftPendingAdd.endTime ? 'Pick an end time first' : undefined}
                         onClick={() => {
-                          const { techId, date, time, endTime } = draftPendingAdd;
-                          const tech = techs.find((t) => t.id === techId);
+                          const { techIds, date, time, endTime } = draftPendingAdd;
+                          // One staged _new_ assignment per selected tech, all sharing
+                          // the same date/time -- saveModal creates each on Save.
+                          const stamp = Date.now();
                           setDraftJob((d) => ({
                             ...d,
-                            assignments: [...d.assignments, {
-                              assignmentId: `_new_${Date.now()}`,
+                            assignments: [...d.assignments, ...techIds.map((techId, i) => ({
+                              assignmentId: `_new_${stamp}_${i}`,
                               technicianId: techId,
-                              technicianName: tech?.name || '',
+                              technicianName: techs.find((t) => t.id === techId)?.name || '',
                               workDate: date || null,
                               startTime: time || '07:00',
                               endTime: endTime || null,
                               completed: false,
                               _new: true,
-                            }],
+                            }))],
                           }));
-                          setDraftPendingAdd({ techId: '', date: '', time: '', endTime: '' });
+                          setDraftPendingAdd({ techIds: [], date: '', time: '', endTime: '' });
                         }}
                       >Add</button>
-                      <button className="cancel-btn" onClick={() => setDraftPendingAdd({ techId: '', date: '', time: '', endTime: '' })}>Cancel</button>
+                      <button className="cancel-btn" onClick={() => setDraftPendingAdd({ techIds: [], date: '', time: '', endTime: '' })}>Cancel</button>
                     </div>
                   )}
                 </div>
@@ -1740,62 +1915,22 @@ export default function App() {
         <ManageTechsModal onClose={() => setManageTechsOpen(false)} onChanged={refreshTechs} />
       )}
 
-      {techLinksOpen && (
-        <TechLinksModal techs={techs} onClose={() => setTechLinksOpen(false)} />
+      {accountOpen && (
+        <AccountMenu
+          user={user}
+          onClose={() => setAccountOpen(false)}
+          onLoggedOut={() => { authLogout(); setUser(null); setAccountOpen(false); }}
+        />
+      )}
+
+      {officeUsersOpen && user.isAdmin && (
+        <OfficeUsersModal meName={user.name} onClose={() => setOfficeUsersOpen(false)} />
       )}
 
       {editingNote && (
         <NoteEditModal note={editingNote} jobs={jobs} onSaved={afterNoteChange} onDeleted={afterNoteChange} onClose={() => setEditingNote(null)} />
       )}
     </>
-  );
-}
-
-function TechLinksModal({ techs, onClose }) {
-  const [minting, setMinting] = useState(null); // technicianId currently being minted
-  const [copiedId, setCopiedId] = useState(null); // technicianId just copied, brief confirmation
-
-  const copyLink = async (tech) => {
-    setMinting(tech.id);
-    try {
-      const { link } = await api.getTechLink(tech.id);
-      await navigator.clipboard.writeText(link);
-      setCopiedId(tech.id);
-      setTimeout(() => setCopiedId((id) => (id === tech.id ? null : id)), 2000);
-    } catch (e) {
-      alert(`Could not get link: ${e.message}`);
-    } finally {
-      setMinting(null);
-    }
-  };
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
-        <div className="modal-header">
-          <div className="modal-title-row"><span className="jname">Chalkboard sign-in links</span></div>
-          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
-        </div>
-        <div className="modal-body">
-          <p className="tech-links-hint">
-            Each link is freshly minted and expires in 15 minutes. Nothing is stored, so there's nothing to revoke — copy a new one whenever a tech needs to sign in.
-          </p>
-          <div className="tech-links-list">
-            {techs.map((t) => (
-              <div className="tech-link-row" key={t.id}>
-                <span className="tech-link-name">{t.name}</span>
-                <button className="req-btn approve" onClick={() => copyLink(t)} disabled={minting === t.id}>
-                  {minting === t.id ? 'Copying…' : copiedId === t.id ? 'Copied' : 'Copy Link'}
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="modal-footer">
-          <button className="modal-cancel-btn" onClick={onClose}>Close</button>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -2064,6 +2199,7 @@ function NoteEditModal({ note, jobs, onSaved, onDeleted, onClose }) {
     setErr(null);
     try {
       if (note.isNew) {
+        trackUsage('note_add');
         await api.addNote(trimmed, opportunityId || null);
       } else {
         await api.updateNote(note.id, { text: trimmed, opportunityId: opportunityId || null });
@@ -2215,10 +2351,35 @@ function ManageTechsModal({ onClose, onChanged }) {
     }
   };
 
+  // Password modal state (explicit in-app modal, not window.prompt).
+  const [pwTech, setPwTech] = useState(null);
+  const [pwValue, setPwValue] = useState('');
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwErr, setPwErr] = useState(null);
+
+  const openPassword = (t) => { setPwTech(t); setPwValue(''); setPwErr(null); };
+
+  // Blank clears the password, so the tech falls back to the default until they
+  // set their own in the app.
+  const savePassword = async () => {
+    if (!pwTech) return;
+    setPwBusy(true);
+    setPwErr(null);
+    try {
+      await api.updateTechnician(pwTech.id, { password: pwValue.trim() });
+      setPwTech(null);
+    } catch (e) {
+      setPwErr(e.message || 'Could not set password');
+    } finally {
+      setPwBusy(false);
+    }
+  };
+
   const submitAdd = async () => {
     if (!newName.trim()) return;
     setAdding(true);
     try {
+      trackUsage('tech_add');
       await api.addTechnician(newName.trim(), newFsId || null, newColor || null);
       setNewName('');
       setNewFsId('');
@@ -2233,6 +2394,7 @@ function ManageTechsModal({ onClose, onChanged }) {
   };
 
   return (
+    <>
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal modal-manage-techs" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <div className="modal-header">
@@ -2283,6 +2445,7 @@ function ManageTechsModal({ onClose, onChanged }) {
                       <span className="mt-name">{t.name}</span>
                       {!t.active && <span className="mt-inactive-badge">Removed</span>}
                       <button className="req-btn" onClick={() => startEdit(t)} disabled={busyId === t.id}>Edit</button>
+                      <button className="req-btn" onClick={() => openPassword(t)} disabled={busyId === t.id}>Password</button>
                       <button className="req-btn deny" onClick={() => toggleActive(t)} disabled={busyId === t.id}>
                         {busyId === t.id ? '…' : t.active ? 'Remove' : 'Reactivate'}
                       </button>
@@ -2330,6 +2493,210 @@ function ManageTechsModal({ onClose, onChanged }) {
           <button className="modal-cancel-btn" onClick={onClose}>Close</button>
         </div>
       </div>
+    </div>
+
+    {pwTech && (
+      <div className="modal-backdrop" onClick={() => !pwBusy && setPwTech(null)}>
+        <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+          <div className="modal-header">
+            <div className="modal-title-row"><span className="jname">Board password — {pwTech.name}</span></div>
+            <button className="modal-close" onClick={() => setPwTech(null)} aria-label="Close" disabled={pwBusy}>×</button>
+          </div>
+          <div className="modal-body">
+            <label className="req-field req-field-wide">
+              <span className="req-field-label">New password</span>
+              <input
+                className="req-note-input"
+                type="text"
+                value={pwValue}
+                onChange={(e) => setPwValue(e.target.value)}
+                placeholder="Leave blank to reset to the default"
+                autoFocus
+                onKeyDown={(e) => { if (e.key === 'Enter') savePassword(); }}
+              />
+            </label>
+            <p className="tech-links-hint">Office-visible on purpose. Blank resets this tech to the default password until they set their own in the app.</p>
+            {pwErr && <p className="req-error">{pwErr}</p>}
+          </div>
+          <div className="modal-footer">
+            <button className="modal-save-btn" onClick={savePassword} disabled={pwBusy}>
+              {pwBusy ? 'Saving…' : (pwValue.trim() ? 'Set password' : 'Reset to default')}
+            </button>
+            <button className="modal-cancel-btn" onClick={() => setPwTech(null)} disabled={pwBusy}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
+  );
+}
+
+// Shared anchored-popover mechanics for the filter-bar dropdowns: opens a
+// position:fixed panel from the trigger's rect (flipping above when there's more
+// room below), and closes on outside-click / scroll / resize. Mirrors the idiom
+// in SearchableSelect / DatePicker so the filter dropdowns float above any
+// overflow:auto ancestor instead of being clipped.
+function useAnchoredPopover(minWidth = 180) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, bottom: null, left: 0, width: minWidth, maxHeight: 340 });
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const width = Math.max(rect.width, minWidth);
+    let left = rect.left;
+    if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8;
+    if (left < 8) left = 8;
+    const GAP = 4, EDGE = 8, CEILING = 340;
+    const below = window.innerHeight - rect.bottom - GAP - EDGE;
+    const above = rect.top - GAP - EDGE;
+    if (below >= above) setPos({ top: rect.bottom + GAP, bottom: null, left, width, maxHeight: Math.max(0, Math.min(CEILING, below)) });
+    else setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, width, maxHeight: Math.max(0, Math.min(CEILING, above)) });
+  }, [open, minWidth]);
+
+  useEffect(() => {
+    if (!open) return;
+    const down = (e) => { if (wrapRef.current?.contains(e.target) || popRef.current?.contains(e.target)) return; setOpen(false); };
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    document.addEventListener('mousedown', down);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { document.removeEventListener('mousedown', down); window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [open]);
+
+  return { open, setOpen, pos, wrapRef, popRef };
+}
+
+// Custom CSS dropdown replacing a native <select> in the filter bar. `options`
+// is [value, label][]. When `resetOnSelect` (the Range preset "action" select),
+// the trigger always shows `placeholder` and selecting fires onChange without
+// retaining a value.
+function FilterSelect({ value, onChange, options, placeholder, resetOnSelect = false, ariaLabel }) {
+  const { open, setOpen, pos, wrapRef, popRef } = useAnchoredPopover(180);
+  const current = resetOnSelect ? null : options.find(([v]) => v === value);
+  const label = current ? current[1] : (placeholder ?? '');
+  return (
+    <div className="fsel-wrap" ref={wrapRef}>
+      <button type="button" className={`fsel-trigger ${current ? '' : 'placeholder'}`} aria-label={ariaLabel} onClick={() => setOpen((o) => !o)}>
+        <span className="fsel-val">{label}</span>
+        <span className="fsel-caret" aria-hidden>▾</span>
+      </button>
+      {open && createPortal(
+        <div className="fsel-menu scroll" ref={popRef}
+          style={{ left: pos.left, minWidth: pos.width, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}>
+          {options.map(([v, l]) => (
+            <button key={v} type="button" className={`fsel-opt ${!resetOnSelect && v === value ? 'sel' : ''}`}
+              onClick={() => { onChange(v); setOpen(false); }}>{l}</button>
+          ))}
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+// Cascading Type filter. `tree` = [{ category, subtypes:[rawOppType…] }]. Value
+// is 'all', a category ('Job'), or `${category}::${rawOppType}`. Clicking a
+// category selects the WHOLE category and closes; hovering a category reveals its
+// subtypes in a flyout to the right; clicking a subtype narrows to that value.
+function TypeFilterMenu({ value, tree, onChange }) {
+  const { open, setOpen, pos, wrapRef, popRef } = useAnchoredPopover(150);
+  const [activeCat, setActiveCat] = useState(null);
+  const [flip, setFlip] = useState(false);
+
+  useEffect(() => { if (!open) setActiveCat(null); }, [open]);
+
+  let label = 'All types';
+  if (value !== 'all') {
+    const [cat, sub] = value.split('::');
+    label = sub ? `${cat} · ${cleanSubLabel(cat, sub)}` : cat;
+  }
+
+  const pick = (v) => { onChange(v); setOpen(false); };
+  const onEnterCat = (category, hasSub) => {
+    setActiveCat(hasSub ? category : null);
+    if (hasSub && popRef.current) {
+      const r = popRef.current.getBoundingClientRect();
+      setFlip(r.right + 200 > window.innerWidth - 8); // flyout would overflow → open left
+    }
+  };
+
+  return (
+    <div className="fsel-wrap" ref={wrapRef}>
+      <button type="button" className="fsel-trigger" aria-label="Type filter" onClick={() => setOpen((o) => !o)}>
+        <span className="fsel-val">{label}</span>
+        <span className="fsel-caret" aria-hidden>▾</span>
+      </button>
+      {open && createPortal(
+        <div className="fsel-menu" ref={popRef}
+          style={{ left: pos.left, minWidth: pos.width, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+          onMouseLeave={() => setActiveCat(null)}>
+          <button type="button" className={`fsel-opt ${value === 'all' ? 'sel' : ''}`}
+            onMouseEnter={() => setActiveCat(null)} onClick={() => pick('all')}>All types</button>
+          {tree.map(({ category, subtypes }) => {
+            const hasSub = subtypes.length > 0;
+            const catSelected = value === category || value.startsWith(`${category}::`);
+            return (
+              <div key={category} className="fsel-catrow" onMouseEnter={() => onEnterCat(category, hasSub)}>
+                <button type="button" className={`fsel-opt ${hasSub ? 'has-sub' : ''} ${catSelected ? 'sel' : ''}`}
+                  onClick={() => pick(category)}>{category}</button>
+                {hasSub && activeCat === category && (
+                  <div className={`fsel-sub ${flip ? 'flip-left' : ''}`}>
+                    {subtypes.map((sub) => (
+                      <button key={sub} type="button" className={`fsel-opt ${value === `${category}::${sub}` ? 'sel' : ''}`}
+                        onClick={() => pick(`${category}::${sub}`)}>{cleanSubLabel(category, sub)}</button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+// App-specific multi-select for adding assignments: pick several techs in one
+// go, each becoming its own Job_Assignment__c with the shared date/time. Unlike
+// the single-select filter menus, the menu STAYS OPEN while toggling checkboxes,
+// and the trigger always shows who's currently selected (which also fixes the
+// job/calendar modal's old bug of not showing the picked tech). `value` is a
+// techId[]; `triggerClassName` lets it wear the .addtech pill or a full field.
+function TechMultiSelect({ value, onChange, techs, placeholder = '+ Add assignment', triggerClassName = 'addtech' }) {
+  const { open, setOpen, pos, wrapRef, popRef } = useAnchoredPopover(200);
+  const selected = value || [];
+  const names = selected.map((id) => techs.find((t) => t.id === id)?.name).filter(Boolean);
+  // Collapse to a count at 2+ so the trigger stays compact and never pushes the
+  // inline date/time row onto a second line (full list is in the hover title).
+  const label = names.length === 0 ? placeholder
+    : names.length === 1 ? names[0]
+    : `${names.length} selected`;
+  const toggle = (id) => onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  return (
+    <div className="techms-wrap" ref={wrapRef}>
+      <button type="button" title={names.length ? names.join(', ') : undefined} className={`${triggerClassName} techms-trigger ${selected.length ? 'has-sel' : ''}`} onClick={() => setOpen((o) => !o)}>
+        <span className="techms-val">{label}</span>
+        <span className="techms-caret" aria-hidden>▾</span>
+      </button>
+      {open && createPortal(
+        <div className="techms-menu" ref={popRef}
+          style={{ left: pos.left, minWidth: pos.width, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}>
+          {techs.map((t) => {
+            const on = selected.includes(t.id);
+            return (
+              <button key={t.id} type="button" role="menuitemcheckbox" aria-checked={on}
+                className={`techms-opt ${on ? 'on' : ''}`} onClick={() => toggle(t.id)}>
+                <span className="techms-check" aria-hidden>{on ? '✓' : ''}</span>{t.name}
+              </button>
+            );
+          })}
+        </div>,
+        document.body
+      )}
     </div>
   );
 }
@@ -4462,7 +4829,7 @@ function rangeLabel(mode, anchor) {
   return `${s.toLocaleDateString(undefined, opt)} – ${e.toLocaleDateString(undefined, opt)}`;
 }
 
-const CLOSED_LIST_STATUSES = ['Pending Customer Approval', 'Quoted', 'Parts Ordered', 'Ready to be scheduled'];
+const CLOSED_LIST_STATUSES = ['Pending Customer Approval', 'Quoted', 'Parts ordered', 'Ready to be scheduled'];
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
 function Schedule({ jobs, techs, onJobClick, onAssign }) {
@@ -4630,7 +4997,7 @@ function Schedule({ jobs, techs, onJobClick, onAssign }) {
 
 function AddAssignmentModal({ jobs, techs, onClose, onAssign }) {
   const [opportunityId, setOpportunityId] = useState('');
-  const [technicianId, setTechnicianId] = useState('');
+  const [technicianIds, setTechnicianIds] = useState([]);
   const [dates, setDates] = useState([]);
   const [time, setTime] = useState('07:00');
   const [endTime, setEndTime] = useState('');
@@ -4648,12 +5015,16 @@ function AddAssignmentModal({ jobs, techs, onClose, onAssign }) {
   // on the previous one's result instead of re-adding onto a stale snapshot,
   // which would silently drop every day but the last.
   const save = async () => {
-    if (!opportunityId || !technicianId || dates.length === 0 || !endTime) return;
+    if (!opportunityId || technicianIds.length === 0 || dates.length === 0 || !endTime) return;
     let job = jobs.find((j) => j.id === opportunityId);
     if (!job) return;
     setSaving(true);
-    for (const d of dates) {
-      job = await onAssign(job, technicianId, d, time, endTime);
+    // One Job_Assignment__c per (tech × selected day), chained sequentially so
+    // each onAssign builds on the previous returned job state.
+    for (const technicianId of technicianIds) {
+      for (const d of dates) {
+        job = await onAssign(job, technicianId, d, time, endTime);
+      }
     }
     onClose();
   };
@@ -4671,11 +5042,14 @@ function AddAssignmentModal({ jobs, techs, onClose, onAssign }) {
             <SearchableSelect value={opportunityId} onChange={setOpportunityId} options={jobOptions} placeholder="Pick the opportunity…" />
           </label>
           <label className="req-field req-field-wide">
-            <span className="req-field-label">Technician</span>
-            <select className="techfilter" value={technicianId} onChange={(e) => setTechnicianId(e.target.value)}>
-              <option value="">Select a technician…</option>
-              {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
+            <span className="req-field-label">Technician(s)</span>
+            <TechMultiSelect
+              techs={techs}
+              value={technicianIds}
+              onChange={setTechnicianIds}
+              placeholder="Select technician(s)…"
+              triggerClassName="techms-field"
+            />
           </label>
           <label className="req-field req-field-wide">
             <span className="req-field-label">Date(s)</span>
@@ -4693,8 +5067,8 @@ function AddAssignmentModal({ jobs, techs, onClose, onAssign }) {
           </div>
         </div>
         <div className="modal-footer">
-          <button className="modal-save-btn" onClick={save} disabled={saving || !opportunityId || !technicianId || dates.length === 0 || !endTime}>
-            {saving ? 'Adding…' : dates.length > 1 ? `Add assignment (${dates.length} days)` : 'Add assignment'}
+          <button className="modal-save-btn" onClick={save} disabled={saving || !opportunityId || technicianIds.length === 0 || dates.length === 0 || !endTime}>
+            {saving ? 'Adding…' : `Add assignment${technicianIds.length > 1 ? ` (${technicianIds.length} techs)` : ''}${dates.length > 1 ? ` · ${dates.length} days` : ''}`}
           </button>
           <button className="modal-cancel-btn" onClick={onClose} disabled={saving}>Cancel</button>
         </div>
@@ -4719,6 +5093,7 @@ function AddTimeOffModal({ techs, onClose, onCreated }) {
     if (!technicianId || dates.length === 0) return;
     setSaving(true);
     setErr(null);
+    trackUsage('timeoff_add');
     const results = await Promise.allSettled(dates.map((d) => api.addTimeOff(technicianId, d, start, end)));
     const failed = results.map((r, i) => (r.status === 'rejected' ? dates[i] : null)).filter(Boolean);
 
@@ -5098,7 +5473,7 @@ function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, 
       <div className="schedbar">
         <div className="seg quote-view-seg">
           <button className={`segbtn ${quotesView === 'needs' ? 'on' : ''}`} onClick={() => onViewChange('needs')}>Needs Quote</button>
-          <button className={`segbtn ${quotesView === 'review' ? 'on' : ''}`} onClick={() => onViewChange('review')}>Needs Quote Review</button>
+          <button className={`segbtn ${quotesView === 'review' ? 'on' : ''}`} onClick={() => onViewChange('review')}>Ready for Review</button>
           <button className={`segbtn ${quotesView === 'sent' ? 'on' : ''}`} onClick={() => onViewChange('sent')}>Quote Sent</button>
         </div>
         {mode === 'calendar' && (
@@ -5164,6 +5539,7 @@ function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, 
                     <div className="quote-actions">
                       <QuoteRecipientButton quote={q} label="Ready For Review" title="Send this quote for internal review" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onReview} />
                       <QuoteRecipientButton quote={q} label="Sent" title="Send this quote for customer approval" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onSend} />
+                      <QuoteSystemsButton quote={q} />
                       <QuoteDocumentsBadge quoteId={q.id} />
                     </div>
                   </div>
@@ -5345,7 +5721,7 @@ function QuoteStatusSelect({ status, onChange }) {
       onChange={(e) => { e.stopPropagation(); onChange(e.target.value); }}
     >
       <option value="Needs Quote">Needs Quote</option>
-      <option value="Needs Quote Review">Needs Quote Review</option>
+      <option value="Ready for Review">Ready for Review</option>
       <option value="Pending Customer Approval">Pending Customer Approval</option>
     </select>
   );
@@ -5501,6 +5877,66 @@ function QuoteRecipientButton({ quote, label, title, users, usersLoaded, onLoadU
         document.body
       )}
     </div>
+  );
+}
+
+// System-type manufacturer info for a quote's account, in display order.
+// The values come pre-loaded on the quote (shapeQuote in routes.js reads them
+// off the linked Account), so this button just toggles a read-only modal --
+// no fetch needed.
+const QUOTE_SYSTEM_ROWS = [
+  { key: 'fireAlarm', label: 'Fire Alarm' },
+  { key: 'accessControl', label: 'Access Control' },
+  { key: 'cctv', label: 'CCTV' },
+  { key: 'intrusion', label: 'Intrusion' },
+];
+
+function QuoteSystemsButton({ quote }) {
+  const [open, setOpen] = useState(false);
+  const systems = quote.systems || {};
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  return (
+    <>
+      <button
+        type="button"
+        className="job-notes-badge"
+        onClick={(e) => { e.stopPropagation(); setOpen(true); }}
+        title="Installed-system manufacturers on this account"
+      >
+        System Info
+      </button>
+      {open && createPortal(
+        <div className="modal-backdrop" onClick={() => setOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+            <div className="modal-header">
+              <div className="modal-title-row">
+                <span className="jname">System Info</span>
+                {quote.accountName && <span className="quote-type">{quote.accountName}</span>}
+              </div>
+              <button className="modal-close" onClick={() => setOpen(false)} aria-label="Close">×</button>
+            </div>
+            <div className="modal-body">
+              <dl className="system-info">
+                {QUOTE_SYSTEM_ROWS.map(({ key, label }) => (
+                  <div className="system-info-row" key={key}>
+                    <dt>{label}</dt>
+                    <dd className={systems[key] ? '' : 'muted'}>{systems[key] || 'Not recorded'}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
   );
 }
 
@@ -5950,6 +6386,7 @@ function CheckoutModal({ jobs, techs, catalog, serviceStock, onClose, onSaved })
     if (clean.length === 0) { setErr('At least one product + quantity line is required'); return; }
     setSaving(true);
     try {
+      trackUsage('part_checkout');
       await api.checkoutParts(opportunityId, {
         checkedOutById,
         checkoutDate,
@@ -6037,5 +6474,360 @@ function CheckoutModal({ jobs, techs, catalog, serviceStock, onClose, onSaved })
         </div>
       </div>
     </div>
+  );
+}
+// ===================== Office auth + usage UI =====================
+
+// Office login gate (email + password). Rendered by App when there's no session.
+function DispatchLogin({ onLoggedIn }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!email.trim() || !password) return;
+    setErr(null); setBusy(true);
+    try {
+      const ok = await authLogin(email.trim(), password);
+      if (ok) { trackUsage('login'); onLoggedIn(); }
+      else setErr('Invalid email or password.');
+    } catch (e) { setErr(e.message || 'Login failed.'); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="login-screen">
+      <div className="login-card">
+        <img className="wordmark-logo" src="/icon-192.png" alt="CRS" />
+        <h1>CRS Helper</h1>
+        <p className="login-sub">Office sign in</p>
+        <input type="email" placeholder="Email" value={email} autoFocus
+          onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} />
+        <input type="password" placeholder="Password" value={password}
+          onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} />
+        {err && <p className="login-err">{err}</p>}
+        <button className="login-btn" disabled={busy || !email.trim() || !password} onClick={submit}>
+          {busy ? 'Signing in…' : 'Sign in'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Account panel opened from the header avatar: info + role + change password + log out.
+function AccountMenu({ user, onClose, onLoggedOut }) {
+  const [pw, setPw] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [err, setErr] = useState(null);
+  const save = async () => {
+    setErr(null); setMsg(null);
+    if (pw.trim().length < 3) { setErr('Password must be at least 3 characters.'); return; }
+    if (pw !== confirm) { setErr('Passwords do not match.'); return; }
+    setBusy(true);
+    try { await authChangePassword(pw.trim()); setMsg('Password changed.'); setPw(''); setConfirm(''); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header"><div className="modal-title-row"><span className="jname">Account</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">×</button></div>
+        <div className="modal-body">
+          <div className="acct-info">
+            <div className="acct-avatar lg">{initials(user.name)}</div>
+            <div>
+              <div className="acct-name">{user.name}</div>
+              <div className="acct-email">{user.email}</div>
+              <span className={`acct-role ${user.isAdmin ? 'admin' : ''}`}>{user.isAdmin ? 'Admin' : 'User'}</span>
+            </div>
+          </div>
+          <label className="req-field req-field-wide"><span className="req-field-label">Change password</span>
+            <input className="req-note-input" type="password" placeholder="New password" value={pw} onChange={(e) => setPw(e.target.value)} />
+          </label>
+          <input className="req-note-input" type="password" placeholder="Confirm new password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+          {err && <p className="req-error">{err}</p>}
+          {msg && <p className="acct-ok">{msg}</p>}
+          <button className="modal-save-btn" disabled={busy || !pw.trim()} onClick={save}>{busy ? 'Saving…' : 'Save password'}</button>
+        </div>
+        <div className="modal-footer"><button className="modal-cancel-btn" onClick={onLoggedOut}>Log out</button></div>
+      </div>
+    </div>
+  );
+}
+
+// Admin: list office users; click one to open their profile (password + role).
+function OfficeUsersModal({ meName, onClose }) {
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [sel, setSel] = useState(null);
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try { const r = await api.getOfficeUsers(); setUsers(r.users); }
+    catch (e) { alert(`Could not load office users: ${e.message}`); }
+    finally { setLoading(false); }
+  }, []);
+  useEffect(() => { reload(); }, [reload]);
+  return (
+    <>
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+          <div className="modal-header"><div className="modal-title-row"><span className="jname">Office users</span></div>
+            <button className="modal-close" onClick={onClose} aria-label="Close">×</button></div>
+          <div className="modal-body">
+            {loading ? <span className="fs-users-loading">Loading…</span> : (
+              <div className="manage-techs-list">
+                {users.map((u) => (
+                  <button key={u.id} className="office-user-row" onClick={() => setSel(u)}>
+                    <span className="mt-name">{u.name}</span>
+                    <span className="office-user-email">{u.email}</span>
+                    <span className={`acct-role ${u.isAdmin ? 'admin' : ''}`}>{u.isAdmin ? 'Admin' : 'User'}</span>
+                  </button>
+                ))}
+                {users.length === 0 && <p className="tech-links-hint">No office users yet — check <code>Dispatch_Access__c</code> on a Salesforce User.</p>}
+              </div>
+            )}
+          </div>
+          <div className="modal-footer"><button className="modal-cancel-btn" onClick={onClose}>Close</button></div>
+        </div>
+      </div>
+      {sel && <OfficeUserProfile user={sel} onClose={() => setSel(null)} onSaved={() => { setSel(null); reload(); }} />}
+    </>
+  );
+}
+
+function OfficeUserProfile({ user, onClose, onSaved }) {
+  const [pw, setPw] = useState(user.password || '');
+  const [isAdmin, setIsAdmin] = useState(user.isAdmin);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const save = async () => {
+    setErr(null); setBusy(true);
+    try { await api.updateOfficeUser(user.id, { password: pw.trim(), isAdmin }); onSaved(); }
+    catch (e) { setErr(e.message); setBusy(false); }
+  };
+  return (
+    <div className="modal-backdrop" onClick={() => !busy && onClose()}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header"><div className="modal-title-row"><span className="jname">{user.name}</span></div>
+          <button className="modal-close" onClick={onClose} disabled={busy} aria-label="Close">×</button></div>
+        <div className="modal-body">
+          <p className="tech-links-hint">{user.email}</p>
+          <label className="req-field req-field-wide"><span className="req-field-label">Password</span>
+            <input className="req-note-input" type="text" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Blank = reset to the default" />
+          </label>
+          <label className="role-toggle">
+            <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} />
+            <span>Admin — can see Usage &amp; manage office users</span>
+          </label>
+          {err && <p className="req-error">{err}</p>}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-save-btn" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save'}</button>
+          <button className="modal-cancel-btn" disabled={busy} onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const fmtUsageDate = (ts) => (ts ? new Date(Number(ts)).toLocaleString() : '—');
+
+const fmtUsageShort = (ts) => (ts ? new Date(Number(ts)).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—');
+const USAGE_APPS = [['all', 'All'], ['board', 'Board'], ['dispatch', 'Dispatch']];
+// A horizontal bar list ([{label,c}]) scaled to the max — reused across panels.
+function UsageBars({ rows, labelKey = 'd', slice5 = true }) {
+  const max = Math.max(1, ...rows.map((r) => r.c));
+  if (rows.length === 0) return <p className="tech-links-hint">No activity in this range.</p>;
+  return (
+    <div className="usage-bars">
+      {rows.map((r, i) => (
+        <div className="usage-bar-row" key={i}>
+          <span className="usage-bar-lbl">{slice5 && labelKey === 'd' ? String(r[labelKey]).slice(5) : r[labelKey]}</span>
+          <span className="usage-bar-track"><span className="usage-bar-fill" style={{ width: `${(r.c / max) * 100}%` }} /></span>
+          <span className="usage-bar-val">{r.c}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Admin usage dashboard (D1-backed): KPIs, per-day + time-of-day bars, by-screen,
+// top features, who's-using-it, a recent-activity feed, and a per-user drill-down.
+function UsageDashboard({ refreshKey = 0 }) {
+  const [days, setDays] = useState(30);
+  const [app, setApp] = useState('all');
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [recent, setRecent] = useState([]);
+  const [people, setPeople] = useState([]);
+  const [selPerson, setSelPerson] = useState('');
+  const [detail, setDetail] = useState(null);
+
+  useEffect(() => { setData(null); setErr(null); api.getUsage(days, app).then(setData).catch((e) => setErr(e.message)); }, [days, app, refreshKey]);
+  useEffect(() => { api.getUsageRecent({ days, app, limit: 120 }).then((r) => setRecent(r.events || [])).catch(() => setRecent([])); }, [days, app, refreshKey]);
+  useEffect(() => { api.getUsagePeople().then((r) => setPeople(r.people || [])).catch(() => {}); }, [refreshKey]);
+  useEffect(() => {
+    if (!selPerson) { setDetail(null); return; }
+    api.getUsageUser(selPerson, days).then(setDetail).catch(() => setDetail(null));
+  }, [selPerson, days, refreshKey]);
+
+  const peopleOptions = useMemo(
+    () => people.map((p) => [p.name, `${p.name} · ${p.kind === 'tech' ? 'Tech' : 'Office'}`]),
+    [people]
+  );
+  // Fill all 24 hours so the time-of-day chart has a stable shape.
+  const hourRows = useMemo(() => {
+    const m = new Map((data?.byHour || []).map((r) => [String(r.h), r.c]));
+    return Array.from({ length: 24 }, (_, h) => ({ d: `${String(h).padStart(2, '0')}h`, c: m.get(String(h).padStart(2, '0')) ?? 0 }));
+  }, [data]);
+
+  return (
+    <section className="usage">
+      <div className="view-head usage-head">
+        <div><h2>Usage</h2></div>
+        <div className="usage-controls">
+          <div className="usage-range">
+            {USAGE_APPS.map(([v, l]) => (
+              <button key={v} className={`chip ${app === v ? 'on' : ''}`} onClick={() => setApp(v)}>{l}</button>
+            ))}
+          </div>
+          <div className="usage-range">
+            {[7, 30, 90].map((d) => (
+              <button key={d} className={`chip ${days === d ? 'on' : ''}`} onClick={() => setDays(d)}>{d}d</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {err && <div className="empty">Couldn’t load usage: {err}</div>}
+      {!err && !data && <div className="state">Loading usage…</div>}
+      {data && (
+        <>
+          <div className="usage-kpis">
+            <div className="usage-kpi"><span className="k-num">{data.totals.users ?? 0}</span><span className="k-lbl">Active users</span></div>
+            <div className="usage-kpi"><span className="k-num">{data.totals.events ?? 0}</span><span className="k-lbl">Events</span></div>
+            <div className="usage-kpi"><span className="k-num">{data.totals.logins ?? 0}</span><span className="k-lbl">Logins</span></div>
+            <div className="usage-kpi"><span className="k-num">{(data.byEvent || []).find((e) => e.event === 'quote_sent')?.c ?? 0}</span><span className="k-lbl">Quotes sent</span></div>
+            <div className="usage-kpi">
+              <span className="k-num">{(data.byApp || []).map((a) => `${a.app}:${a.c}`).join(' · ') || '—'}</span>
+              <span className="k-lbl">By app</span>
+            </div>
+          </div>
+
+          <div className="usage-cols">
+            <div className="usage-panel">
+              <h3>Events per day</h3>
+              <UsageBars rows={data.eventsByDay || []} />
+            </div>
+            <div className="usage-panel">
+              <h3>Time of day</h3>
+              <UsageBars rows={hourRows} labelKey="d" slice5={false} />
+            </div>
+          </div>
+
+          <div className="usage-cols">
+            <div className="usage-panel">
+              <h3>Who’s using it</h3>
+              <table className="usage-table">
+                <thead><tr><th>Name</th><th>App</th><th>Events</th><th>Last seen</th></tr></thead>
+                <tbody>
+                  {(data.byUser || []).map((u, i) => (
+                    <tr key={i}><td>{u.actor}</td><td>{u.app}</td><td>{u.c}</td><td>{fmtUsageShort(u.last)}</td></tr>
+                  ))}
+                  {(data.byUser || []).length === 0 && <tr><td colSpan={4} className="tech-links-hint">No activity yet.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            <div className="usage-panel">
+              <h3>Top features</h3>
+              <table className="usage-table">
+                <thead><tr><th>Event</th><th>Count</th></tr></thead>
+                <tbody>
+                  {(data.byEvent || []).map((e, i) => (<tr key={i}><td>{e.event}</td><td>{e.c}</td></tr>))}
+                  {(data.byEvent || []).length === 0 && <tr><td colSpan={2} className="tech-links-hint">No activity yet.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="usage-panel">
+            <h3>Most-used screens</h3>
+            <table className="usage-table">
+              <thead><tr><th>Screen</th><th>Views</th></tr></thead>
+              <tbody>
+                {(data.byScreen || []).map((s, i) => (<tr key={i}><td>{s.screen}</td><td>{s.c}</td></tr>))}
+                {(data.byScreen || []).length === 0 && <tr><td colSpan={2} className="tech-links-hint">No screen views yet.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="usage-panel">
+            <h3>Recent activity</h3>
+            <div className="usage-feed">
+              {recent.map((e, i) => (
+                <div className="usage-feed-row" key={i}>
+                  <span className="usage-feed-time">{fmtUsageShort(e.ts)}</span>
+                  <span className={`usage-feed-app ${e.app}`}>{e.app}</span>
+                  <span className="usage-feed-actor">{e.actor}</span>
+                  <span className="usage-feed-event">{e.event}{e.screen ? <em> · {e.screen}</em> : null}</span>
+                </div>
+              ))}
+              {recent.length === 0 && <p className="tech-links-hint">No activity in this range.</p>}
+            </div>
+          </div>
+
+          <div className="usage-panel">
+            <h3>Check a specific person</h3>
+            <SearchableSelect value={selPerson} onChange={setSelPerson} options={peopleOptions} placeholder="Pick a tech or office user…" />
+            {selPerson && !detail && <div className="state">Loading…</div>}
+            {selPerson && detail && (
+              <div className="usage-detail">
+                <div className="usage-kpis">
+                  <div className="usage-kpi"><span className="k-num">{detail.totals.events ?? 0}</span><span className="k-lbl">Events</span></div>
+                  <div className="usage-kpi"><span className="k-num">{detail.activeDays ?? 0}</span><span className="k-lbl">Days active</span></div>
+                  <div className="usage-kpi"><span className="k-num">{fmtUsageShort(detail.totals.first)}</span><span className="k-lbl">First seen</span></div>
+                  <div className="usage-kpi"><span className="k-num">{fmtUsageShort(detail.totals.last)}</span><span className="k-lbl">Last seen</span></div>
+                </div>
+                {(detail.totals.events ?? 0) === 0 ? (
+                  <p className="tech-links-hint">No activity yet for {selPerson}.</p>
+                ) : (
+                  <>
+                    <UsageBars rows={detail.eventsByDay || []} />
+                    <div className="usage-cols">
+                      <div>
+                        <h4 className="usage-subh">Their top features</h4>
+                        <table className="usage-table">
+                          <thead><tr><th>Event</th><th>Count</th></tr></thead>
+                          <tbody>{(detail.byEvent || []).map((e, i) => (<tr key={i}><td>{e.event}</td><td>{e.c}</td></tr>))}</tbody>
+                        </table>
+                      </div>
+                      <div>
+                        <h4 className="usage-subh">Their screens</h4>
+                        <table className="usage-table">
+                          <thead><tr><th>Screen</th><th>Views</th></tr></thead>
+                          <tbody>{(detail.byScreen || []).map((s, i) => (<tr key={i}><td>{s.screen}</td><td>{s.c}</td></tr>))}</tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <h4 className="usage-subh">Recent actions</h4>
+                    <div className="usage-feed">
+                      {(detail.recent || []).map((e, i) => (
+                        <div className="usage-feed-row" key={i}>
+                          <span className="usage-feed-time">{fmtUsageShort(e.ts)}</span>
+                          <span className={`usage-feed-app ${e.app}`}>{e.app}</span>
+                          <span className="usage-feed-event">{e.event}{e.screen ? <em> · {e.screen}</em> : null}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </section>
   );
 }

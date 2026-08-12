@@ -26,12 +26,6 @@ export const api = {
       body: JSON.stringify(fields),
     }).then(j),
 
-  getTechLink: (technicianId) =>
-    fetch('/api/tech-link', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ technicianId }),
-    }).then(j),
 
   getFsUsers: () => fetch('/api/fs-users').then(j),
 
@@ -199,5 +193,28 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(fields),
     }).then(j),
+
+  // ---- Office users (admin) ----
+  getOfficeUsers: () => fetch('/api/auth/office-users').then(j),
+
+  updateOfficeUser: (id, fields) =>
+    fetch(`/api/auth/office-users/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+    }).then(j),
+
+  // ---- Usage analytics (admin) ----
+  getUsage: (days, app) =>
+    fetch(`/api/usage?days=${days}${app && app !== 'all' ? `&app=${app}` : ''}`).then(j),
+  getUsagePeople: () => fetch('/api/usage/people').then(j),
+  getUsageUser: (actor, days) =>
+    fetch(`/api/usage/user?actor=${encodeURIComponent(actor)}&days=${days}`).then(j),
+  getUsageRecent: ({ days, limit = 100, actor, app } = {}) => {
+    const p = new URLSearchParams({ days: String(days), limit: String(limit) });
+    if (actor) p.set('actor', actor);
+    if (app && app !== 'all') p.set('app', app);
+    return fetch(`/api/usage/recent?${p}`).then(j);
+  },
 
 };

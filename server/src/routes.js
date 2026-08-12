@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { config } from './config.js';
+import { config, statusFieldForType, allStatusFields, stageForQuoteStatus } from './config.js';
 import { createSalesforce } from './salesforce.js';
 import { createFs } from './fieldSquared.js';
 import { sfToFsStatus } from './statusMap.js';
@@ -7,16 +7,60 @@ import { runFsSync } from './fsSync.js';
 import { createAssignment, esc, normTime, toSfTime, buildFsSchedules, getTechDirectory, invalidateTechDirectory } from './assignments.js';
 import { scheduleRequests } from './scheduleRequests.js';
 import { parts } from './parts.js';
-import { mintMagicLink } from './authLink.js';
 import { notifyTech } from './notifyBoard.js';
 import { notifyTv } from './notifyTv.js';
+import { getAuthSecret, signDeviceToken, resolveBearer } from './auth.js';
 
 const f = config.fields;
 const o = config.objects;
 const n = config.dispatchNote;
 const acc = config.account;
 const inv = config.invoicing;
+const ou = config.officeUser;
 const FS_TASK_TYPE = 'CCTV Job/Work Order'; // only task type currently synced;
+
+// ---- Record-type-aware board query helpers ----
+// The status columns every board job query must SELECT so shapeJob can resolve
+// the right one per record type (Project_Status__c + Service_Status__c +
+// StageName + Monitoring_Status__c). Also pulls RecordType.DeveloperName.
+const JOB_STATUS_SELECT = `RecordType.DeveloperName, ${allStatusFields().join(', ')}`;
+
+// Builds the "belongs on the dispatch board" SOQL predicate. Legacy/none +
+// Default + Job + Work_Order match on Project_Status__c (jobStatusValues);
+// Service_Call matches on Service_Status__c, Test_Inspection on StageName —
+// each against its own board value list. Monitoring is excluded entirely (both
+// the record type and the legacy Opportunity_Type__c = 'Monitoring' value).
+// When `statusValue` is passed, every branch is narrowed to that single value
+// (matched against whichever status field applies to each type).
+function boardStatusPredicate(statusValue) {
+  const rt = config.recordTypeStatus;
+  const inClause = (field, values) => {
+    const list = (statusValue ? [statusValue] : values).map((s) => `'${esc(s)}'`).join(',');
+    return `${field} IN (${list})`;
+  };
+  const diverged = Object.keys(rt.fieldByType); // Service_Call, Test_Inspection, Monitoring
+  const divergedList = diverged.map((t) => `'${t}'`).join(',');
+  const baseBranch =
+    `((RecordType.DeveloperName NOT IN (${divergedList}) OR RecordType.DeveloperName = null)` +
+    ` AND (${f.oppType} != 'Monitoring' OR ${f.oppType} = null)` +
+    ` AND ${inClause(rt.fallbackField, config.jobStatusValues)})`;
+  const typedBranches = Object.entries(rt.valuesByType).map(([type, values]) =>
+    `(RecordType.DeveloperName = '${type}' AND ${inClause(rt.fieldByType[type], values)})`);
+  return `(${[baseBranch, ...typedBranches].join(' OR ')})`;
+}
+
+// Quotes-tab predicate: match a single status VALUE against each record type's
+// resolved status field. Unlike the board, this INCLUDES Monitoring (Monitoring
+// quotes belong on the Quotes tab even though Monitoring is off the board).
+function quoteStatusPredicate(statusValue) {
+  const rt = config.recordTypeStatus;
+  const v = `'${esc(statusValue)}'`;
+  const diverged = Object.keys(rt.fieldByType); // Service_Call, Test_Inspection, Monitoring
+  const divergedList = diverged.map((t) => `'${t}'`).join(',');
+  const base = `((RecordType.DeveloperName NOT IN (${divergedList}) OR RecordType.DeveloperName = null) AND ${rt.fallbackField} = ${v})`;
+  const typed = Object.entries(rt.fieldByType).map(([type, field]) => `(RecordType.DeveloperName = '${type}' AND ${field} = ${v})`);
+  return `(${[base, ...typed].join(' OR ')})`;
+}
 
 function shapeNote(r) {
   return {
@@ -45,11 +89,17 @@ export function shapeJob(r) {
       }))
     : [];
   const address = [r[f.addrStreet], r[f.addrCity], r[f.addrState], r[f.addrZip]].filter(Boolean).join(', ');
+  // Resolve the lifecycle status from whichever field this record type uses
+  // (Project_Status__c for legacy/Job/Work_Order, Service_Status__c for
+  // Service Call, StageName for Test & Inspection). `recordType` is surfaced so
+  // the frontend can pick the matching status dropdown + drift table.
+  const recordType = r.RecordType?.DeveloperName ?? null;
   return {
     id: r.Id,
     name: r[f.oppName],
     lid: r[f.oppLid] ?? null,
-    status: r[f.oppStatus],
+    status: r[statusFieldForType(recordType)] ?? null,
+    recordType,
     scheduledDate: r[f.oppScheduledDate] ?? null,
     createdDate: r.CreatedDate ?? null,
     closeDate: r.CloseDate ?? null,
@@ -67,14 +117,25 @@ export function shapeJob(r) {
 }
 
 function shapeQuote(r) {
+  const recordType = r.RecordType?.DeveloperName ?? null;
+  const account = r[f.oppAccountRelationship] ?? {};
   return {
     id: r.Id,
     name: r[f.oppName],
     opportunityType: r[f.oppType] ?? null,
-    status: r[f.oppStatus],
+    status: r[statusFieldForType(recordType)] ?? null,
+    recordType,
     dueDate: r[f.oppBidDate] ?? null,
     reviewDeadline: r[f.oppReviewDeadline] ?? null,
-    accountName: r[f.oppAccountRelationship]?.Name ?? null,
+    accountName: account.Name ?? null,
+    // Installed-system manufacturers from the linked Account, shown in the
+    // quote card's "System Info" modal. Null = not recorded on the account.
+    systems: {
+      fireAlarm: account[acc.fireAlarmMfr] ?? null,
+      accessControl: account[acc.accessControlMfr] ?? null,
+      cctv: account[acc.cctvMfr] ?? null,
+      intrusion: account[acc.intrusionMfr] ?? null,
+    },
     sentToCustomer: r[f.oppSentToCustomer] === true,
     readyForReview: r[f.oppReadyForReview] === true,
     createdDate: r.CreatedDate ?? null,
@@ -116,21 +177,17 @@ function shapeQuoteDocument(r, instanceUrl) {
 // the SOQL.
 export async function getAllJobs(env) {
   const sf = createSalesforce(env);
-  const statuses = config.jobStatusValues;
-  const inList = statuses.map((s) => `'${esc(s)}'`).join(',');
-  const excludeClause = `AND (${f.oppType} != 'Monitoring' OR ${f.oppType} = null)`;
 
   const soql = `
-    SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}, ${f.oppScheduledDate},
+    SELECT Id, ${f.oppName}, ${f.oppLid}, ${JOB_STATUS_SELECT}, ${f.oppScheduledDate},
            ${f.oppFsTaskId}, ${f.oppFsStatus}, ${f.oppFsLastModified}, ${f.oppType}, CreatedDate, CloseDate,
            ${f.addrStreet}, ${f.addrCity}, ${f.addrState}, ${f.addrZip},
            (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
                    ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}, ${o.assignmentCompleted}
             FROM ${o.assignmentChildRelationship})
     FROM Opportunity
-    WHERE ${f.oppStatus} IN (${inList})
+    WHERE ${boardStatusPredicate()}
     AND (CloseDate >= LAST_N_DAYS:365 OR CloseDate > TODAY)
-    ${excludeClause}
     ORDER BY ${f.oppScheduledDate} ASC NULLS LAST`;
 
   const records = await sf.query(soql);
@@ -184,25 +241,240 @@ export const api = new Hono();
 api.route('/', scheduleRequests);
 api.route('/', parts);
 
+// ---- Office/dispatch auth ----
+// Resolves the authenticated office user from the bearer device token (which
+// carries the SF User Id). Re-reads role/access LIVE from Salesforce so a
+// revoked admin/access takes effect immediately. Returns { id, name, isAdmin }
+// or null (unknown / inactive / access revoked).
+async function getOfficeUser(c) {
+  const id = await resolveBearer(c);
+  if (!id) return null;
+  const sf = createSalesforce(c.env);
+  const rows = await sf.query(
+    `SELECT Id, ${ou.name}, ${ou.email}, ${ou.admin}, ${ou.access} FROM ${ou.sobject} ` +
+    `WHERE Id = '${esc(id)}' AND ${ou.active} = true LIMIT 1`
+  );
+  const u = rows[0];
+  if (!u || u[ou.access] !== true) return null;
+  return { id: u.Id, name: u[ou.name], email: u[ou.email], isAdmin: u[ou.admin] === true };
+}
+
+// Login by email + app password. Blank Password__c => DEFAULT_OFFICE_PASSWORD.
+api.post('/auth/login', async (c) => {
+  try {
+    const { email, password } = await c.req.json();
+    if (!email || !password) return c.json({ error: 'Email and password required' }, 400);
+    const sf = createSalesforce(c.env);
+    const rows = await sf.query(
+      `SELECT Id, ${ou.name}, ${ou.email}, ${ou.password}, ${ou.admin} FROM ${ou.sobject} ` +
+      `WHERE ${ou.email} = '${esc(email)}' AND ${ou.access} = true AND ${ou.active} = true LIMIT 1`
+    );
+    const u = rows[0];
+    const fallback = c.env.DEFAULT_OFFICE_PASSWORD || 'crs';
+    const stored = u?.[ou.password];
+    const effective = stored && String(stored).length ? String(stored) : fallback;
+    if (!u || String(password) !== effective) return c.json({ error: 'Invalid email or password' }, 401);
+    const token = await signDeviceToken(u.Id, getAuthSecret(c.env));
+    return c.json({ token, name: u[ou.name], email: u[ou.email], isAdmin: u[ou.admin] === true });
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
+// The signed-in user changes their own password.
+api.post('/auth/change-password', async (c) => {
+  try {
+    const me = await getOfficeUser(c);
+    if (!me) return c.json({ error: 'Not authenticated' }, 401);
+    const { password } = await c.req.json();
+    if (!password || String(password).trim().length < 3) return c.json({ error: 'Password must be at least 3 characters' }, 400);
+    const sf = createSalesforce(c.env);
+    await sf.updateRecord('User', me.id, { [ou.password]: String(password) });
+    return c.json({ ok: true });
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
+// Whoami — lets the frontend refresh name/role/email on load.
+api.get('/auth/me', async (c) => {
+  const me = await getOfficeUser(c);
+  if (!me) return c.json({ error: 'Not authenticated' }, 401);
+  return c.json(me);
+});
+
+// Admin-only: list dispatch-access users for the Office Users panel. Includes
+// the (plaintext) password so an admin can read a forgotten one, matching the
+// deliberate office-visible design.
+api.get('/auth/office-users', async (c) => {
+  try {
+    const me = await getOfficeUser(c);
+    if (!me?.isAdmin) return c.json({ error: 'Admin only' }, 403);
+    const sf = createSalesforce(c.env);
+    const rows = await sf.query(
+      `SELECT Id, ${ou.name}, ${ou.email}, ${ou.admin}, ${ou.password} FROM ${ou.sobject} ` +
+      `WHERE ${ou.access} = true AND ${ou.active} = true ORDER BY ${ou.name}`
+    );
+    return c.json({ users: rows.map((u) => ({
+      id: u.Id, name: u[ou.name], email: u[ou.email],
+      isAdmin: u[ou.admin] === true, password: u[ou.password] ?? '',
+    })) });
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
+// Admin-only: set another user's password and/or role. Blank password resets to
+// the default. Demoting an admin is blocked if they'd be the last one.
+api.patch('/auth/office-users/:id', async (c) => {
+  try {
+    const me = await getOfficeUser(c);
+    if (!me?.isAdmin) return c.json({ error: 'Admin only' }, 403);
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const sf = createSalesforce(c.env);
+    const fields = {};
+    if ('password' in body) fields[ou.password] = body.password ? String(body.password) : null;
+    if ('isAdmin' in body) {
+      if (body.isAdmin === false) {
+        const admins = await sf.query(
+          `SELECT COUNT(Id) c FROM ${ou.sobject} WHERE ${ou.admin} = true AND ${ou.active} = true AND ${ou.access} = true`
+        );
+        if ((admins[0]?.c ?? 0) <= 1) return c.json({ error: 'Cannot remove the last admin' }, 400);
+      }
+      fields[ou.admin] = !!body.isAdmin;
+    }
+    if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
+    await sf.updateRecord('User', id, fields);
+    return c.json({ ok: true });
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
+// ---- Usage analytics (D1: USAGE_DB) ----
+// Best-effort event ingest from the dispatch frontend. Never breaks the UI:
+// any failure (incl. USAGE_DB unbound) returns ok:false silently.
+api.post('/track', async (c) => {
+  try {
+    const db = c.env.USAGE_DB;
+    if (!db) return c.json({ ok: false });
+    const me = await getOfficeUser(c);
+    const { event, screen, props } = await c.req.json();
+    if (!event) return c.json({ ok: false });
+    await db.prepare('INSERT INTO usage_events (ts, app, actor, event, screen, props) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(Date.now(), 'dispatch', me?.name ?? 'office', String(event), screen ? String(screen) : null, props ? JSON.stringify(props) : null)
+      .run();
+    return c.json({ ok: true });
+  } catch { return c.json({ ok: false }); }
+});
+
+const usageDays = (c) => Math.min(365, Math.max(1, parseInt(c.req.query('days') || '30', 10)));
+
+// Admin-only dashboard aggregates (board + dispatch).
+api.get('/usage', async (c) => {
+  try {
+    const me = await getOfficeUser(c);
+    if (!me?.isAdmin) return c.json({ error: 'Admin only' }, 403);
+    const db = c.env.USAGE_DB;
+    if (!db) return c.json({ error: 'Usage DB not configured' }, 500);
+    const days = usageDays(c);
+    const since = Date.now() - days * 86400000;
+    // Optional app filter (board / dispatch) applied to every aggregate.
+    const app = c.req.query('app');
+    const appClause = (app === 'board' || app === 'dispatch') ? ' AND app = ?' : '';
+    const binds = appClause ? [since, app] : [since];
+    const q = (sql) => db.prepare(sql).bind(...binds).all().then((r) => r.results ?? []);
+    const [eventsByDay, activeByDay, byEvent, byUser, byApp, byHour, byScreen, totals] = await Promise.all([
+      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(*) c FROM usage_events WHERE ts>=?${appClause} GROUP BY d ORDER BY d`),
+      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(DISTINCT actor) c FROM usage_events WHERE ts>=?${appClause} GROUP BY d ORDER BY d`),
+      q(`SELECT event, COUNT(*) c FROM usage_events WHERE ts>=?${appClause} GROUP BY event ORDER BY c DESC`),
+      q(`SELECT actor, app, COUNT(*) c, MAX(ts) last FROM usage_events WHERE ts>=?${appClause} GROUP BY actor, app ORDER BY c DESC`),
+      q(`SELECT app, COUNT(*) c FROM usage_events WHERE ts>=?${appClause} GROUP BY app`),
+      q(`SELECT strftime('%H', ts/1000, 'unixepoch') h, COUNT(*) c FROM usage_events WHERE ts>=?${appClause} GROUP BY h ORDER BY h`),
+      q(`SELECT screen, COUNT(*) c FROM usage_events WHERE ts>=?${appClause} AND screen IS NOT NULL GROUP BY screen ORDER BY c DESC`),
+      q(`SELECT COUNT(DISTINCT actor) users, COUNT(*) events, SUM(CASE WHEN event='login' THEN 1 ELSE 0 END) logins FROM usage_events WHERE ts>=?${appClause}`),
+    ]);
+    return c.json({ days, app: app || 'all', eventsByDay, activeByDay, byEvent, byUser, byApp, byHour, byScreen, totals: totals[0] ?? { users: 0, events: 0, logins: 0 } });
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
+// Chronological activity feed (admin). Newest first; optional actor/app filters.
+api.get('/usage/recent', async (c) => {
+  try {
+    const me = await getOfficeUser(c);
+    if (!me?.isAdmin) return c.json({ error: 'Admin only' }, 403);
+    const db = c.env.USAGE_DB;
+    if (!db) return c.json({ error: 'Usage DB not configured' }, 500);
+    const days = usageDays(c);
+    const since = Date.now() - days * 86400000;
+    const limit = Math.min(500, Math.max(1, parseInt(c.req.query('limit') || '100', 10)));
+    const actor = c.req.query('actor');
+    const app = c.req.query('app');
+    let where = 'ts>=?';
+    const binds = [since];
+    if (actor) { where += ' AND actor=?'; binds.push(actor); }
+    if (app === 'board' || app === 'dispatch') { where += ' AND app=?'; binds.push(app); }
+    const rows = await db.prepare(`SELECT ts, app, actor, event, screen FROM usage_events WHERE ${where} ORDER BY ts DESC LIMIT ${limit}`).bind(...binds).all().then((r) => r.results ?? []);
+    return c.json({ events: rows });
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
+// Picker list for the per-user drill-down: all active Technicians + all active
+// Users (so a zero-activity person is still selectable).
+api.get('/usage/people', async (c) => {
+  try {
+    const me = await getOfficeUser(c);
+    if (!me?.isAdmin) return c.json({ error: 'Admin only' }, 403);
+    const sf = createSalesforce(c.env);
+    const [techs, users] = await Promise.all([
+      getAllTechnicians(c.env, false),
+      sf.query(`SELECT ${ou.name} FROM ${ou.sobject} WHERE ${ou.active} = true ORDER BY ${ou.name}`),
+    ]);
+    return c.json({ people: [
+      ...techs.map((t) => ({ name: t.name, kind: 'tech' })),
+      ...users.map((u) => ({ name: u[ou.name], kind: 'office' })),
+    ] });
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
+// One person's usage (matched on actor name across both apps).
+api.get('/usage/user', async (c) => {
+  try {
+    const me = await getOfficeUser(c);
+    if (!me?.isAdmin) return c.json({ error: 'Admin only' }, 403);
+    const db = c.env.USAGE_DB;
+    if (!db) return c.json({ error: 'Usage DB not configured' }, 500);
+    const actor = c.req.query('actor');
+    if (!actor) return c.json({ error: 'actor required' }, 400);
+    const days = usageDays(c);
+    const since = Date.now() - days * 86400000;
+    const q = (sql) => db.prepare(sql).bind(actor, since).all().then((r) => r.results ?? []);
+    const [eventsByDay, byEvent, byApp, byScreen, activeDays, recent, totals] = await Promise.all([
+      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=? GROUP BY d ORDER BY d`),
+      q(`SELECT event, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=? GROUP BY event ORDER BY c DESC`),
+      q(`SELECT app, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=? GROUP BY app`),
+      q(`SELECT screen, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=? AND screen IS NOT NULL GROUP BY screen ORDER BY c DESC`),
+      q(`SELECT COUNT(DISTINCT strftime('%Y-%m-%d', ts/1000, 'unixepoch')) d FROM usage_events WHERE actor=? AND ts>=?`),
+      db.prepare(`SELECT ts, app, event, screen FROM usage_events WHERE actor=? AND ts>=? ORDER BY ts DESC LIMIT 50`).bind(actor, since).all().then((r) => r.results ?? []),
+      q(`SELECT COUNT(*) events, MIN(ts) first, MAX(ts) last FROM usage_events WHERE actor=? AND ts>=?`),
+    ]);
+    return c.json({
+      actor, days, eventsByDay, byEvent, byApp, byScreen, recent,
+      activeDays: activeDays[0]?.d ?? 0,
+      totals: totals[0] ?? { events: 0, first: null, last: null },
+    });
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
 api.get('/jobs', async (c) => {
   try {
     const statusParam = c.req.query('status');
     if (!statusParam) return c.json(await getAllJobs(c.env));
 
     const sf = createSalesforce(c.env);
-    const inList = `'${esc(statusParam)}'`;
-    const excludeClause = `AND (${f.oppType} != 'Monitoring' OR ${f.oppType} = null)`;
 
     const soql = `
-      SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}, ${f.oppScheduledDate},
+      SELECT Id, ${f.oppName}, ${f.oppLid}, ${JOB_STATUS_SELECT}, ${f.oppScheduledDate},
              ${f.oppFsTaskId}, ${f.oppFsStatus}, ${f.oppFsLastModified}, ${f.oppType}, CreatedDate, CloseDate,
              ${f.addrStreet}, ${f.addrCity}, ${f.addrState}, ${f.addrZip},
              (SELECT Id, ${o.assignmentTechLookup}, ${o.assignmentTechRelationship}.Name,
                      ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}, ${o.assignmentCompleted}
               FROM ${o.assignmentChildRelationship})
       FROM Opportunity
-      WHERE ${f.oppStatus} IN (${inList})
-      ${excludeClause}
+      WHERE ${boardStatusPredicate(statusParam)}
       ORDER BY ${f.oppScheduledDate} ASC NULLS LAST`;
 
     const records = await sf.query(soql);
@@ -229,13 +501,20 @@ api.get('/jobs/quotes', async (c) => {
   try {
     const sf = createSalesforce(c.env);
     const view = c.req.query('view');
+    // Each view matches a status VALUE against every record type's resolved
+    // status field (Project_Status__c / Service_Status__c / Inspection_Status__c
+    // / Monitoring_Status__c). Sent additionally requires the Sent_To_Customer__c
+    // checkbox, same as before.
     const whereClause =
-      view === 'sent' ? `${f.oppStatus} = '${esc(config.quotes.sentStatus)}' AND ${f.oppSentToCustomer} = true` :
-      view === 'review' ? `${f.oppStatus} = '${esc(config.quotes.reviewStatus)}'` :
-      `${f.oppStatus} = '${esc(config.quotes.status)}'`;
+      view === 'sent' ? `${quoteStatusPredicate(config.quotes.sentStatus)} AND ${f.oppSentToCustomer} = true` :
+      view === 'review' ? quoteStatusPredicate(config.quotes.reviewStatus) :
+      quoteStatusPredicate(config.quotes.status);
     const soql = `
-      SELECT Id, ${f.oppName}, ${f.oppType}, ${f.oppStatus}, ${f.oppBidDate}, ${f.oppReviewDeadline},
-             ${f.oppAccountRelationship}.Name, ${f.oppSentToCustomer}, ${f.oppReadyForReview}, CreatedDate
+      SELECT Id, ${f.oppName}, ${f.oppType}, ${JOB_STATUS_SELECT}, ${f.oppBidDate}, ${f.oppReviewDeadline},
+             ${f.oppAccountRelationship}.Name,
+             ${f.oppAccountRelationship}.${acc.fireAlarmMfr}, ${f.oppAccountRelationship}.${acc.accessControlMfr},
+             ${f.oppAccountRelationship}.${acc.cctvMfr}, ${f.oppAccountRelationship}.${acc.intrusionMfr},
+             ${f.oppSentToCustomer}, ${f.oppReadyForReview}, CreatedDate
       FROM Opportunity
       WHERE ${whereClause}
       ORDER BY ${f.oppBidDate} ASC NULLS LAST`;
@@ -401,34 +680,15 @@ api.patch('/technicians/:id', async (c) => {
     if ('fsUserId' in body) fields[o.technicianFsUserId] = body.fsUserId ? body.fsUserId.trim() : null;
     if ('color' in body) fields[o.technicianColor] = body.color || null;
     if ('active' in body) fields[o.technicianActive] = !!body.active;
+    // Chalkboard login password (plaintext by design — see config). Empty string
+    // clears it, so the tech falls back to DEFAULT_TECH_PASSWORD.
+    if ('password' in body) fields[o.technicianPassword] = body.password ? String(body.password) : null;
     if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
 
     await sf.updateRecord(o.technician, id, fields);
     invalidateTechDirectory();
     await notifyTv(c.env, 'tech-updated');
     return c.json({ ok: true });
-  } catch (e) {
-    return c.json({ error: e.message }, 500);
-  }
-});
-
-// Mints a chalkboard magic link for a technician (15 min TTL, stateless —
-// nothing is stored, so there's nothing to list/revoke; re-minting is the
-// only "management" action). Resolves the name server-side from technicianId
-// rather than trusting client-supplied text, since the name is the entire
-// identity embedded in the signed token.
-api.post('/tech-link', async (c) => {
-  try {
-    const sf = createSalesforce(c.env);
-    const { technicianId } = await c.req.json();
-    if (!technicianId) return c.json({ error: 'technicianId required' }, 400);
-
-    const rows = await sf.query(`SELECT Name FROM ${o.technician} WHERE Id = '${esc(technicianId)}' LIMIT 1`);
-    const name = rows[0]?.Name;
-    if (!name) return c.json({ error: 'Technician not found' }, 404);
-
-    const { link, expiresAt } = await mintMagicLink(c.env, name);
-    return c.json({ link, expiresAt });
   } catch (e) {
     return c.json({ error: e.message }, 500);
   }
@@ -483,35 +743,51 @@ api.patch('/jobs/:id', async (c) => {
     const body = await c.req.json();
     const suppressRelease = !!body._suppressRelease;
 
-    const allowed = { scheduledDate: f.oppScheduledDate, status: f.oppStatus };
-    const payload = {};
-    for (const [key, value] of Object.entries(body)) {
-      if (allowed[key]) payload[allowed[key]] = value === '' ? null : value;
-    }
-    if (Object.keys(payload).length === 0) {
+    // Only scheduledDate + status are writable through this route.
+    const wantsStatus = 'status' in body;
+    const wantsDate = 'scheduledDate' in body;
+    if (!wantsStatus && !wantsDate) {
       return c.json({ error: 'No writable fields in request' }, 400);
     }
 
-    // Pre-fetch current opp when we need scheduledDate crew-release check or FS write-through.
+    // Pre-fetch current opp: needed for the record-type status-field resolution,
+    // the scheduledDate crew-release check, and the FS write-through. The status
+    // field a dispatcher's change lands in depends on the record type
+    // (Project_Status__c for legacy/Job/Work_Order, Service_Status__c for
+    // Service Call, StageName for Test & Inspection).
     let previousSfStatus = null;
     let fsTaskId = null;
     let shouldReleaseCrew = false;
-
     let oppName = '';
-    if ('scheduledDate' in body || 'status' in body) {
+    let recordType = null;
+    {
       const existing = await sf.query(
-        `SELECT ${f.oppName}, ${f.oppScheduledDate}, ${f.oppStatus}, ${f.oppFsTaskId}
+        `SELECT ${f.oppName}, ${f.oppScheduledDate}, RecordType.DeveloperName,
+                ${allStatusFields().join(', ')}, ${f.oppFsTaskId}
          FROM Opportunity WHERE Id = '${esc(id)}' LIMIT 1`
       );
       const cur = existing?.[0];
       oppName = cur?.[f.oppName] ?? '';
-      if ('scheduledDate' in body) {
+      recordType = cur?.RecordType?.DeveloperName ?? null;
+      if (wantsDate) {
         const curVal = cur?.[f.oppScheduledDate] ?? null;
         const newVal = body.scheduledDate === '' ? null : body.scheduledDate;
         if (curVal !== newVal) shouldReleaseCrew = true;
       }
-      if ('status' in body) previousSfStatus = cur?.[f.oppStatus] ?? null;
+      if (wantsStatus) previousSfStatus = cur?.[statusFieldForType(recordType)] ?? null;
       fsTaskId = cur?.[f.oppFsTaskId] ?? null;
+    }
+
+    const payload = {};
+    if (wantsDate) payload[f.oppScheduledDate] = body.scheduledDate === '' ? null : body.scheduledDate;
+    if (wantsStatus) {
+      payload[statusFieldForType(recordType)] = body.status === '' ? null : body.status;
+      // Quote-lifecycle transitions co-write StageName to keep the SF sales
+      // pipeline in sync (Needs Quote→Proposal/Price Quote, Ready for Review→
+      // Ready For Review, Pending Customer Approval→Negotiation/Review). Returns
+      // null for non-quote statuses and for Service Call (stays Open Service/*).
+      const stage = stageForQuoteStatus(recordType, body.status);
+      if (stage) payload.StageName = stage;
     }
 
     await sf.updateRecord('Opportunity', id, payload);

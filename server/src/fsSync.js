@@ -1,6 +1,6 @@
 import { createFs } from './fieldSquared.js';
 import { createSalesforce } from './salesforce.js';
-import { config } from './config.js';
+import { config, statusFieldForType, allStatusFields } from './config.js';
 import { getTechDirectory } from './assignments.js';
 import { notifyTech } from './notifyBoard.js';
 import { isFsStatusCompatible } from './statusMap.js';
@@ -69,7 +69,8 @@ export async function runFsSync(env) {
   let linkedOpps;
   try {
     linkedOpps = await sf.query(
-      `SELECT Id, ${f.oppFsTaskId}, ${f.oppFsStatus}, ${f.oppStatus}
+      `SELECT Id, ${f.oppFsTaskId}, ${f.oppFsStatus}, RecordType.DeveloperName,
+              ${allStatusFields().join(', ')}
        FROM Opportunity WHERE ${f.oppFsTaskId} != null LIMIT 2000`
     );
   } catch (e) {
@@ -171,7 +172,12 @@ export async function runFsSync(env) {
   // gets one live FS re-check, and FS_Status__c/FS_Last_Modified__c are
   // corrected ONLY if that live value actually differs from what's cached.
   const suspectOpps = linkedOpps
-    .filter(o => o[f.oppFsStatus] && !isFsStatusCompatible(o[f.oppStatus], o[f.oppFsStatus]))
+    .filter(opp => {
+      if (!opp[f.oppFsStatus]) return false;
+      const rt = opp.RecordType?.DeveloperName ?? null;
+      const sfStatus = opp[statusFieldForType(rt)];
+      return !isFsStatusCompatible(rt, sfStatus, opp[f.oppFsStatus]);
+    })
     .slice(0, MAX_DRIFT_CHECK_PER_RUN);
 
   if (suspectOpps.length > 0) {

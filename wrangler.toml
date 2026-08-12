@@ -63,6 +63,14 @@ SF_ORG_WIDE_EMAIL = "adminandcustomersupport@crssafetysolutions.com"
 binding = "SF_TOKENS"
 id = "b9df8aade82f4f5c9b6f1b5c84f23eca"
 
+# Usage analytics store (shared with crs-board via the same DB — the board's
+# wrangler.toml points at this same database_id). Apply the table once with:
+# `wrangler d1 execute dispatch --remote --file=server/usage-schema.sql`
+[[d1_databases]]
+binding = "USAGE_DB"
+database_name = "dispatch"
+database_id = "1fdb3b0f-8070-432f-81e1-ee166904666c"
+
 [observability.logs]
 enabled = false
 invocation_logs = true

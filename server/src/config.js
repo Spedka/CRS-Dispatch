@@ -12,13 +12,54 @@ export const config = {
   jobStatusValues: [
     'Pending Customer Approval',
     'Quoted',
-    'Parts Ordered',
+    'Parts ordered', // NOTE: lowercase 'o' — matches the real Project_Status__c picklist in the org
     'Ready to be scheduled',
     'Scheduled',
     'In Progress',
     'Installation Completed',
     'Waiting on Payment',
   ],
+
+  // ---- Opportunity record types (2026 restructure) ----
+  // Most Opportunities have NO record type (legacy) and carry their lifecycle
+  // status in Project_Status__c — that stays the default/fallback path.
+  // The new record types diverge: each keeps its lifecycle status in a
+  // different field. `statusFieldForType()` below is the single resolver every
+  // read/write goes through.
+  recordTypeStatus: {
+    // record-type DeveloperName -> the field holding that type's board status
+    fieldByType: {
+      Service_Call: 'Service_Status__c',
+      Test_Inspection: 'Inspection_Status__c',
+      Monitoring: 'Monitoring_Status__c',
+      // Default / Job / Work_Order / null -> fallbackField below.
+      // Work_Order rides Project_Status__c on purpose: every Work_Order Opp in
+      // the org carries a real Project_Status__c; Job_Or_Work_Order_Status__c
+      // is only a coarse Active/Inactive flag, useless for scheduling.
+    },
+    fallbackField: 'Project_Status__c',
+    // Board-relevant status VALUES per record type (drives the status dropdown
+    // in App.jsx and the crs-board picker). Types not listed use jobStatusValues.
+    // The quote-pipeline values (Needs Quote / Ready for Review) are deliberately
+    // NOT here -- those live on the Quotes tab, not the outstanding board.
+    valuesByType: {
+      Service_Call: [
+        'Pending Customer Approval',
+        'Ready to be Scheduled',
+        'Scheduled',
+        'In Progress',
+        'Completed',
+      ],
+      Test_Inspection: [ // Inspection_Status__c board values (no In Progress on that field)
+        'Pending Customer Approval',
+        'Unscheduled',
+        'Scheduled',
+        'Completed',
+      ],
+    },
+    // Record types kept OFF the dispatch board entirely.
+    boardExcludedTypes: ['Monitoring'],
+  },
 
   // ---- Opportunity (the job) field API names ----
   fields: {
@@ -50,8 +91,11 @@ export const config = {
     // External ID field on Opportunity — Text(50), External ID, Unique.
     // Create in SF Setup → Object Manager → Opportunity → Fields & Relationships.
     oppFsTaskId: 'FS_Task_Id__c',
-    // WO number field — used as tertiary match fallback.
-    oppWoNumber: 'WO_Number__c',
+    // NOTE: the old 'WO_Number__c' field was removed from the org in the 2026
+    // restructure (replaced by Job__c "Job #" / Awarded_Quote__c). It was never
+    // queried by the matching code, so it's simply dropped here rather than
+    // repointed. Add it back (as 'Job__c') only if the WO-number fallback match
+    // is ever actually implemented.
     // Raw FS task status + its LastUpdated timestamp, written ONLY by the FS
     // sync path (fsSync.js + the manual fs-link endpoint) — never by the
     // dispatch-status write path. Read-only snapshot for the drift badge.
@@ -89,6 +133,10 @@ export const config = {
     // deploying. Optional: a tech with no color set falls back to the /tv
     // page's own deterministic hash-based color (see TvBoard.jsx).
     technicianColor: 'Color__c',
+    // Plaintext chalkboard login password (office-set / tech-changed). Blank =>
+    // the tech uses DEFAULT_TECH_PASSWORD until they set one. Restrict FLS to
+    // office/admin profiles in SF.
+    technicianPassword: 'Password__c',
   },
 
   // ---- Schedule_Request__c (chalkboard tech <-> office negotiation) ----
@@ -142,13 +190,36 @@ export const config = {
     apContact: 'Accounts_Payable_Contact_Name__c', // lookup -> Contact, AP contact on management/Customer accounts
     apContactLid: 'AP_Contact__c',                 // lookup -> Contact, AP contact on LID/property accounts (was AR_Contact__c)
     parent: 'ParentId',                           // self-lookup, management company
+    // Installed-system manufacturer info, read through Opportunity.Account.* and
+    // surfaced on quote cards (see shapeQuote / QuotesTab "System Info" modal).
+    // Fire Alarm and Intrusion have no literal "*_Manufacturer__c" field on
+    // Account -- they map to the Fire System / Security System manufacturers.
+    fireAlarmMfr: 'Fire_System_Manufacturer__c',
+    accessControlMfr: 'Access_Control_Manufacturer__c',
+    cctvMfr: 'CCTV_Manufacturer__c',
+    intrusionMfr: 'Security_System_Manufacturer__c',
   },
 
   // ---- Quotes tab (Opportunities in the pre-scheduling quoting stage) ----
+  // The three views filter each Opp's RESOLVED status field (statusFieldForType)
+  // by these VALUES -- uniform across record types now that Project_Status__c,
+  // Inspection_Status__c, Monitoring_Status__c and Service_Status__c all carry
+  // them. Reads use status only; writes co-write StageName too (see stageByStatus).
   quotes: {
-    status: 'Needs Quote', // Project_Status__c value that puts an Opportunity on the Quotes tab
-    reviewStatus: 'Needs Quote Review', // ...the internal-review stage
-    sentStatus: 'Pending Customer Approval', // ...the "Quote Sent" tab -- status-based, same as the other two views (the Sent_To_Customer__c checkbox is still written by the Sent button, just no longer used to decide what's displayed)
+    status: 'Needs Quote',              // default "Needs Quote" view
+    reviewStatus: 'Ready for Review',   // "Review" view (status-field spelling: lowercase 'for')
+    sentStatus: 'Pending Customer Approval', // "Sent" view (still also requires Sent_To_Customer__c)
+    // On a quote status change, co-write StageName to keep the SF sales pipeline
+    // in sync. NOTE the casing differs: the status field says "Ready for Review",
+    // StageName says "Ready For Review".
+    stageByStatus: {
+      'Needs Quote': 'Proposal/Price Quote',
+      'Ready for Review': 'Ready For Review',
+      'Pending Customer Approval': 'Negotiation/Review',
+    },
+    // Record types whose StageName must NOT be touched on a quote transition --
+    // Service Call lives in an Open Service/* stage that never changes.
+    stageWriteSkipTypes: ['Service_Call'],
   },
 
   // ---- Invoicing__c (invoice records tied to a Job/Opportunity) ----
@@ -227,4 +298,53 @@ export const config = {
     category: 'Product_Category__c',
     subCategory: 'Product_SubCategory__c',
   },
+
+  // ---- Office/dispatch users (standard Salesforce User object) ----
+  // Auth + tracking identity for the dispatch app. Password__c / Dispatch_Access__c
+  // / Dispatch_Admin__c are custom fields on User (NOT the real SF login
+  // password). Restrict Password__c FLS to admins.
+  officeUser: {
+    sobject: 'User',
+    name: 'Name',
+    email: 'Email',
+    active: 'IsActive',
+    password: 'Password__c',      // app-only login password (plaintext by design)
+    access: 'Dispatch_Access__c',  // checkbox: may log into the dispatch app
+    admin: 'Dispatch_Admin__c',    // checkbox: Admin role (else regular User)
+  },
 };
+
+// ---- Record-type status resolvers (single source of truth) ----
+// Which SF field holds the board/lifecycle status for a given Opportunity
+// record type. `devName` is RecordType.DeveloperName (null/undefined for the
+// ~47k legacy Opps with no record type -> Project_Status__c).
+export function statusFieldForType(devName) {
+  const rt = config.recordTypeStatus;
+  return rt.fieldByType[devName] || rt.fallbackField;
+}
+
+// The set of every distinct status field across all record types — used to
+// build the SOQL SELECT so shapeJob can resolve the right one per row.
+export function allStatusFields() {
+  const rt = config.recordTypeStatus;
+  return [...new Set([rt.fallbackField, ...Object.values(rt.fieldByType)])];
+}
+
+// Dropdown values a dispatcher may set for a given record type.
+export function statusValuesForType(devName) {
+  return config.recordTypeStatus.valuesByType[devName] || config.jobStatusValues;
+}
+
+// True if this record type should never appear on the dispatch board.
+export function isBoardExcludedType(devName) {
+  return config.recordTypeStatus.boardExcludedTypes.includes(devName);
+}
+
+// For a quote status transition, the StageName to co-write alongside the status
+// field (keeps the SF sales pipeline in sync) -- or null when `statusValue`
+// isn't a quote-lifecycle value, or this record type's stage must not change
+// (e.g. Service Call, which stays in its Open Service/* stage).
+export function stageForQuoteStatus(devName, statusValue) {
+  if (config.quotes.stageWriteSkipTypes.includes(devName)) return null;
+  return config.quotes.stageByStatus[statusValue] || null;
+}

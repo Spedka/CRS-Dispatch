@@ -42,8 +42,12 @@ Do this in **Setup → Object Manager**. No code.
 > "dynamic number" behavior.
 
 ### d. Confirm your status values
-Open `server/src/config.js` and set `jobStatusValues` to the **exact** Opportunity
-`StageName` (or custom status) values that mean "needs field work."
+Open `server/src/config.js` and set `jobStatusValues` to the **exact** `Project_Status__c`
+values that mean "needs field work" (the default/fallback status field). If your org uses
+Opportunity **record types** with per-type status fields, also configure
+`config.recordTypeStatus` (`fieldByType` / `valuesByType` / `boardExcludedTypes`) — see
+`CLAUDE.md` → "Opportunity record types" for how the resolver picks a status field per type.
+Strings must match the SF picklists exactly (e.g. `Parts ordered`, lowercase o).
 
 ---
 
