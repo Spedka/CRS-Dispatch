@@ -5478,6 +5478,25 @@ function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, 
     [quotes]
   );
 
+  // The calendar shows the consolidated set (all three segments) so it looks
+  // the same no matter which Needs Quote / Ready for Review / Quote Sent
+  // segment is selected. Fetched lazily the first time the calendar opens, and
+  // re-fetched whenever `quotes` changes (i.e. after any status-change refetch
+  // upstream) so the calendar stays in sync with actions taken in the list.
+  const [calQuotes, setCalQuotes] = useState([]);
+  useEffect(() => {
+    if (mode !== 'calendar') return;
+    let cancelled = false;
+    api.getQuotes('all')
+      .then((qs) => { if (!cancelled) setCalQuotes(qs); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [mode, quotes]);
+  const calSorted = useMemo(
+    () => [...calQuotes].sort((a, b) => quoteSortKey(a).localeCompare(quoteSortKey(b))),
+    [calQuotes]
+  );
+
   const shift = (dir) => {
     const d = new Date(anchor);
     if (calMode === 'week') d.setDate(d.getDate() + dir * 7);
@@ -5597,10 +5616,10 @@ function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, 
         </div>
       )}
       {!loading && mode === 'calendar' && calMode === 'month' && (
-        <QuotesMonthGrid quotes={sorted} anchor={anchor} onQuoteClick={setSelectedQuote} />
+        <QuotesMonthGrid quotes={calSorted} anchor={anchor} onQuoteClick={setSelectedQuote} />
       )}
       {!loading && mode === 'calendar' && calMode === 'week' && (
-        <QuotesWeekGrid quotes={sorted} anchor={anchor} onQuoteClick={setSelectedQuote} />
+        <QuotesWeekGrid quotes={calSorted} anchor={anchor} onQuoteClick={setSelectedQuote} />
       )}
 
       {selectedQuote && (

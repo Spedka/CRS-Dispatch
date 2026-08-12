@@ -505,10 +505,18 @@ api.get('/jobs/quotes', async (c) => {
     // status field (Project_Status__c / Service_Status__c / Inspection_Status__c
     // / Monitoring_Status__c). Sent additionally requires the Sent_To_Customer__c
     // checkbox, same as before.
+    // The sub-clause for each of the three views, reused below.
+    const needsClause = quoteStatusPredicate(config.quotes.status);
+    const reviewClause = quoteStatusPredicate(config.quotes.reviewStatus);
+    const sentClause = `(${quoteStatusPredicate(config.quotes.sentStatus)} AND ${f.oppSentToCustomer} = true)`;
     const whereClause =
-      view === 'sent' ? `${quoteStatusPredicate(config.quotes.sentStatus)} AND ${f.oppSentToCustomer} = true` :
-      view === 'review' ? quoteStatusPredicate(config.quotes.reviewStatus) :
-      quoteStatusPredicate(config.quotes.status);
+      // ?view=all is the calendar's consolidated set — the union of all three
+      // segments so the calendar shows the same quotes regardless of which
+      // Needs Quote / Ready for Review / Quote Sent segment is selected.
+      view === 'all' ? `(${needsClause} OR ${reviewClause} OR ${sentClause})` :
+      view === 'sent' ? sentClause :
+      view === 'review' ? reviewClause :
+      needsClause;
     const soql = `
       SELECT Id, ${f.oppName}, ${f.oppType}, ${JOB_STATUS_SELECT}, ${f.oppBidDate}, ${f.oppReviewDeadline},
              ${f.oppAccountRelationship}.Name,
