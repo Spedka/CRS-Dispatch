@@ -31,6 +31,13 @@ new_sqlite_classes = ["TvChannel"]
 # Client-credentials token endpoint = your My Domain (prod), NOT test.salesforce.com.
 SF_LOGIN_URL = "https://crsbuilding.my.salesforce.com"
 
+# QuickBooks Online company (realm) id — not a secret (it's just the company id, and
+# every QBO API call is scoped to it). The QBO OAuth secrets (QBO_CLIENT_ID,
+# QBO_CLIENT_SECRET, QBO_REFRESH_TOKEN) go in via `wrangler secret put` — the live
+# rotating refresh token then lives in the SF_TOKENS KV (see server/src/quickbooks.js).
+# Used by the admin billing-reconciliation route (/api/finance/reconciliation).
+QBO_REALM_ID = "9130356615147456"
+
 # Hidden sentinel Opportunities (record IDs, not secrets). TIME_OFF_OPPORTUNITY_ID
 # guards createAssignment() so approved time off can never rewrite the sentinel's
 # Project_Status__c into a real board status. NEW_WO_OPPORTUNITY_ID marks a

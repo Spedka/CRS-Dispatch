@@ -2,11 +2,15 @@ import { Hono } from 'hono';
 import { config, statusFieldForType, allStatusFields, stageForQuoteStatus } from './config.js';
 import { createSalesforce } from './salesforce.js';
 import { createFs } from './fieldSquared.js';
+import { createQbo } from './quickbooks.js';
 import { sfToFsStatus } from './statusMap.js';
 import { runFsSync } from './fsSync.js';
 import { createAssignment, esc, normTime, toSfTime, buildFsSchedules, getTechDirectory, invalidateTechDirectory } from './assignments.js';
 import { scheduleRequests } from './scheduleRequests.js';
 import { parts } from './parts.js';
+import { purchaseOrders } from './purchaseOrders.js';
+import { invoices } from './invoices.js';
+import { jobCost, isJobType, isServiceType } from './jobCost.js';
 import { notifyTech } from './notifyBoard.js';
 import { notifyTv } from './notifyTv.js';
 import { getAuthSecret, signDeviceToken, resolveBearer } from './auth.js';
@@ -27,7 +31,7 @@ const JOB_STATUS_SELECT = `RecordType.DeveloperName, ${allStatusFields().join(',
 
 // Builds the "belongs on the dispatch board" SOQL predicate. Legacy/none +
 // Default + Job + Work_Order match on Project_Status__c (jobStatusValues);
-// Service_Call matches on Service_Status__c, Test_Inspection on StageName —
+// Service_Call matches on Service_Status__c, Test_Inspection on StageName -
 // each against its own board value list. Monitoring is excluded entirely (both
 // the record type and the legacy Opportunity_Type__c = 'Monitoring' value).
 // When `statusValue` is passed, every branch is narrowed to that single value
@@ -107,7 +111,7 @@ export function shapeJob(r) {
     assignments,
     // FS integration fields
     fsTaskId: r[f.oppFsTaskId] ?? null,
-    // Raw FS status snapshot — written only by the FS sync path (fsSync.js,
+    // Raw FS status snapshot - written only by the FS sync path (fsSync.js,
     // fs-link). Never normalized, never touched by the dispatch-status write
     // path. Used purely for the drift badge, not for board filtering/logic.
     fsStatus: r[f.oppFsStatus] ?? null,
@@ -240,6 +244,9 @@ export async function getTimeOffRange(env, start, end) {
 export const api = new Hono();
 api.route('/', scheduleRequests);
 api.route('/', parts);
+api.route('/', purchaseOrders);
+api.route('/', invoices);
+api.route('/', jobCost);
 
 // ---- Office/dispatch auth ----
 // Resolves the authenticated office user from the bearer device token (which
@@ -292,7 +299,7 @@ api.post('/auth/change-password', async (c) => {
   } catch (e) { return c.json({ error: e.message }, 500); }
 });
 
-// Whoami — lets the frontend refresh name/role/email on load.
+// Whoami - lets the frontend refresh name/role/email on load.
 api.get('/auth/me', async (c) => {
   const me = await getOfficeUser(c);
   if (!me) return c.json({ error: 'Not authenticated' }, 401);
@@ -361,7 +368,22 @@ api.post('/track', async (c) => {
   } catch { return c.json({ ok: false }); }
 });
 
+// Actors hidden from the usage DASHBOARDS (still ingested to D1 - nothing is
+// dropped, so this is reversible). Keeps a heavy in-app developer/admin from
+// dominating the analytics. Matched on the exact `actor` name; add more here.
+const EXCLUDED_ACTORS = ['Leo Sokolyuk'];
+const exclusionClause = () => EXCLUDED_ACTORS.length ? ` AND actor NOT IN (${EXCLUDED_ACTORS.map(() => '?').join(',')})` : '';
+
 const usageDays = (c) => Math.min(365, Math.max(1, parseInt(c.req.query('days') || '30', 10)));
+
+// screen_view_end is a synthetic bookkeeping event (paired with screen_view,
+// carrying only a duration) -- not a real distinct action a person took, so
+// it's excluded from every general count/feed/breakdown to avoid double-
+// counting each screen view as two events. The one place it's deliberately
+// still visible is the byScreen queries below, which read it on purpose to
+// compute average time-on-screen. No bind params, so safe to splice into any
+// query string alongside appClause/exclClause without touching `binds`.
+const NO_DURATION_MARKER_CLAUSE = " AND event != 'screen_view_end'";
 
 // Admin-only dashboard aggregates (board + dispatch).
 api.get('/usage', async (c) => {
@@ -375,17 +397,26 @@ api.get('/usage', async (c) => {
     // Optional app filter (board / dispatch) applied to every aggregate.
     const app = c.req.query('app');
     const appClause = (app === 'board' || app === 'dispatch') ? ' AND app = ?' : '';
+    const exclClause = exclusionClause();
     const binds = appClause ? [since, app] : [since];
+    binds.push(...EXCLUDED_ACTORS);
     const q = (sql) => db.prepare(sql).bind(...binds).all().then((r) => r.results ?? []);
     const [eventsByDay, activeByDay, byEvent, byUser, byApp, byHour, byScreen, totals] = await Promise.all([
-      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(*) c FROM usage_events WHERE ts>=?${appClause} GROUP BY d ORDER BY d`),
-      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(DISTINCT actor) c FROM usage_events WHERE ts>=?${appClause} GROUP BY d ORDER BY d`),
-      q(`SELECT event, COUNT(*) c FROM usage_events WHERE ts>=?${appClause} GROUP BY event ORDER BY c DESC`),
-      q(`SELECT actor, app, COUNT(*) c, MAX(ts) last FROM usage_events WHERE ts>=?${appClause} GROUP BY actor, app ORDER BY c DESC`),
-      q(`SELECT app, COUNT(*) c FROM usage_events WHERE ts>=?${appClause} GROUP BY app`),
-      q(`SELECT strftime('%H', ts/1000, 'unixepoch') h, COUNT(*) c FROM usage_events WHERE ts>=?${appClause} GROUP BY h ORDER BY h`),
-      q(`SELECT screen, COUNT(*) c FROM usage_events WHERE ts>=?${appClause} AND screen IS NOT NULL GROUP BY screen ORDER BY c DESC`),
-      q(`SELECT COUNT(DISTINCT actor) users, COUNT(*) events, SUM(CASE WHEN event='login' THEN 1 ELSE 0 END) logins FROM usage_events WHERE ts>=?${appClause}`),
+      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(*) c FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY d ORDER BY d`),
+      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(DISTINCT actor) c FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY d ORDER BY d`),
+      q(`SELECT event, COUNT(*) c FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY event ORDER BY c DESC`),
+      q(`SELECT actor, app, COUNT(*) c, MAX(ts) last FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY actor, app ORDER BY c DESC`),
+      q(`SELECT app, COUNT(*) c FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY app`),
+      q(`SELECT strftime('%H', ts/1000, 'unixepoch') h, COUNT(*) c FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY h ORDER BY h`),
+      // Avg duration comes from the sibling screen_view_end events (same
+      // `screen`, `props.durationMs`) -- one query, not a second round trip.
+      // D1/SQLite's json_extract pulls the number straight out of the
+      // stored JSON props blob.
+      q(`SELECT screen,
+                SUM(CASE WHEN event='screen_view' THEN 1 ELSE 0 END) c,
+                AVG(CASE WHEN event='screen_view_end' THEN CAST(json_extract(props,'$.durationMs') AS REAL) END) avgMs
+         FROM usage_events WHERE ts>=?${appClause}${exclClause} AND screen IS NOT NULL GROUP BY screen ORDER BY c DESC`),
+      q(`SELECT COUNT(DISTINCT actor) users, COUNT(*) events, SUM(CASE WHEN event='login' THEN 1 ELSE 0 END) logins FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE}`),
     ]);
     return c.json({ days, app: app || 'all', eventsByDay, activeByDay, byEvent, byUser, byApp, byHour, byScreen, totals: totals[0] ?? { users: 0, events: 0, logins: 0 } });
   } catch (e) { return c.json({ error: e.message }, 500); }
@@ -405,9 +436,14 @@ api.get('/usage/recent', async (c) => {
     const app = c.req.query('app');
     let where = 'ts>=?';
     const binds = [since];
-    if (actor) { where += ' AND actor=?'; binds.push(actor); }
+    if (actor) { where += ' AND actor=?'; binds.push(actor); } // explicit drill-down wins - no exclusion
+    else { where += exclusionClause(); binds.push(...EXCLUDED_ACTORS); }
     if (app === 'board' || app === 'dispatch') { where += ' AND app=?'; binds.push(app); }
-    const rows = await db.prepare(`SELECT ts, app, actor, event, screen FROM usage_events WHERE ${where} ORDER BY ts DESC LIMIT ${limit}`).bind(...binds).all().then((r) => r.results ?? []);
+    // screen_view_end is deliberately NOT excluded here (unlike every other
+    // aggregate above) -- per direction 2026-08-27, it's what carries the
+    // "viewed X for Ys" duration into the recent activity feed. `props` is
+    // selected so the frontend can read durationMs back out of it.
+    const rows = await db.prepare(`SELECT ts, app, actor, event, screen, props FROM usage_events WHERE ${where} ORDER BY ts DESC LIMIT ${limit}`).bind(...binds).all().then((r) => r.results ?? []);
     return c.json({ events: rows });
   } catch (e) { return c.json({ error: e.message }, 500); }
 });
@@ -443,18 +479,381 @@ api.get('/usage/user', async (c) => {
     const since = Date.now() - days * 86400000;
     const q = (sql) => db.prepare(sql).bind(actor, since).all().then((r) => r.results ?? []);
     const [eventsByDay, byEvent, byApp, byScreen, activeDays, recent, totals] = await Promise.all([
-      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=? GROUP BY d ORDER BY d`),
-      q(`SELECT event, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=? GROUP BY event ORDER BY c DESC`),
-      q(`SELECT app, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=? GROUP BY app`),
-      q(`SELECT screen, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=? AND screen IS NOT NULL GROUP BY screen ORDER BY c DESC`),
-      q(`SELECT COUNT(DISTINCT strftime('%Y-%m-%d', ts/1000, 'unixepoch')) d FROM usage_events WHERE actor=? AND ts>=?`),
-      db.prepare(`SELECT ts, app, event, screen FROM usage_events WHERE actor=? AND ts>=? ORDER BY ts DESC LIMIT 50`).bind(actor, since).all().then((r) => r.results ?? []),
-      q(`SELECT COUNT(*) events, MIN(ts) first, MAX(ts) last FROM usage_events WHERE actor=? AND ts>=?`),
+      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=?${NO_DURATION_MARKER_CLAUSE} GROUP BY d ORDER BY d`),
+      q(`SELECT event, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=?${NO_DURATION_MARKER_CLAUSE} GROUP BY event ORDER BY c DESC`),
+      q(`SELECT app, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=?${NO_DURATION_MARKER_CLAUSE} GROUP BY app`),
+      q(`SELECT screen,
+                SUM(CASE WHEN event='screen_view' THEN 1 ELSE 0 END) c,
+                AVG(CASE WHEN event='screen_view_end' THEN CAST(json_extract(props,'$.durationMs') AS REAL) END) avgMs
+         FROM usage_events WHERE actor=? AND ts>=? AND screen IS NOT NULL GROUP BY screen ORDER BY c DESC`),
+      q(`SELECT COUNT(DISTINCT strftime('%Y-%m-%d', ts/1000, 'unixepoch')) d FROM usage_events WHERE actor=? AND ts>=?${NO_DURATION_MARKER_CLAUSE}`),
+      // screen_view_end intentionally not excluded here, same reasoning as
+      // /usage/recent above -- it's what carries duration into this feed.
+      db.prepare(`SELECT ts, app, event, screen, props FROM usage_events WHERE actor=? AND ts>=? ORDER BY ts DESC LIMIT 50`).bind(actor, since).all().then((r) => r.results ?? []),
+      q(`SELECT COUNT(*) events, MIN(ts) first, MAX(ts) last FROM usage_events WHERE actor=? AND ts>=?${NO_DURATION_MARKER_CLAUSE}`),
     ]);
     return c.json({
       actor, days, eventsByDay, byEvent, byApp, byScreen, recent,
       activeDays: activeDays[0]?.d ?? 0,
       totals: totals[0] ?? { events: 0, first: null, last: null },
+    });
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
+// ---- Billing reconciliation (QBO ↔ SF, admin-only) ----
+// Compares billed/received totals and cross-references invoice numbers between
+// Salesforce Invoicing__c and QuickBooks Online over a date range (default last
+// 90 days). QBO "billed" counts SENT invoices only (EmailStatus=EmailSent). The
+// diff anchors each side by its own invoice date, then confirms the counterpart
+// by NUMBER over a wide lookback so date skew doesn't create phantom gaps.
+const DAY_MS = 86400000;
+const ymd = (d) => new Date(d).toISOString().slice(0, 10);
+const addDays = (dateStr, n) => ymd(new Date(dateStr + 'T00:00:00Z').getTime() + n * DAY_MS);
+// Normalize an invoice number for cross-system matching: uppercase, drop a leading
+// "INVOICE " prefix (SF noise), remove spaces. Keeps the -M/-ML/-L suffix - SF and QBO
+// share it, and it distinguishes split invoices (7848834-M is NOT 7848834-ML). Requires
+// a 5+ digit run so non-invoice names don't produce a key.
+const invKey = (s) => {
+  const t = String(s ?? '').trim().toUpperCase().replace(/^INVOICE\s+/, '').replace(/\s+/g, '');
+  return /[0-9]{5,}/.test(t) ? t : null;
+};
+// Normalize an SF picklist / QBO PaymentMethod name to a shared vocabulary.
+function normMethod(name) {
+  if (!name) return null;
+  const s = String(name).toLowerCase();
+  if (s.includes('e-check') || s.includes('ach') || s.includes('auto draft') || s.includes('bank')) return 'ACH';
+  if (s.includes('check')) return 'Check';
+  if (s.includes('visa') || s.includes('master') || s.includes('amex') || s.includes('american express') || s.includes('discover') || s.includes('debit') || s.includes('credit')) return 'Credit Card';
+  if (s.includes('cash')) return 'Cash';
+  return 'Other';
+}
+
+// Computes (or reuses, KV-cached) the full QBO<->SF reconciliation dataset for a
+// date range. Shared by /finance/reconciliation (display) and
+// /finance/qbo-id-backfill (uses the same matched pairs to backfill QBO_Id__c).
+async function getReconciliationData(env, from, to, padFrom, refresh) {
+  const KV = env.SF_TOKENS;
+  // v6: added Id + qboId (QBO_Id__c) to the SF select and sfId/qboInvoiceId/
+  // currentQboId to each matched row, for the qbo-id-backfill endpoint.
+  const cacheKey = `finance_recon_v6_${from}_${to}`;
+  let data = (KV && !refresh) ? await KV.get(cacheKey, 'json') : null;
+
+  if (!data) {
+      const sf = createSalesforce(env);
+      const qbo = createQbo(env);
+      const [sfBilledAgg, sfRecvAgg, sfInvoices, qboInvoicesAll, qboPaymentsAll, pmRes, qboCustomers] = await Promise.all([
+        sf.query(`SELECT SUM(${inv.amount}) total FROM ${inv.sobject} WHERE ${inv.date} >= ${from} AND ${inv.date} <= ${to} AND ${inv.status} != 'Voided'`),
+        sf.query(`SELECT SUM(${inv.paymentReceived}) total FROM ${inv.sobject} WHERE ${inv.paymentReceivedDate} >= ${from} AND ${inv.paymentReceivedDate} <= ${to}`),
+        sf.query(`SELECT Id, Name, ${inv.amount}, ${inv.paymentReceived}, ${inv.date}, ${inv.status}, ${inv.paymentMethod}, ${inv.qboId}, Job__r.Name, Job__r.${f.oppType}, Job__r.RecordType.DeveloperName, Job__r.Account.Name, Job__r.Account.Parent.Name FROM ${inv.sobject} WHERE ${inv.date} >= ${padFrom} AND ${inv.date} <= ${to}`),
+        qbo.queryAll('Invoice', `WHERE TxnDate >= '${padFrom}'`),
+        qbo.queryAll('Payment', `WHERE TxnDate >= '${padFrom}'`),
+        qbo.query('SELECT * FROM PaymentMethod'),
+        qbo.queryAll('Customer', ''),
+      ]);
+
+      const inWindow = (d) => d && d >= from && d <= to;
+      const num = (v) => (typeof v === 'number' ? v : Number(v) || 0);
+
+      // QBO: sent invoices only for billed + the cross-reference.
+      const qboSent = qboInvoicesAll.filter((i) => i.EmailStatus === 'EmailSent');
+      const qboBilled = qboSent.filter((i) => inWindow(i.TxnDate)).reduce((s, i) => s + num(i.TotalAmt), 0);
+      const qboReceived = qboPaymentsAll.filter((p) => inWindow(p.TxnDate)).reduce((s, p) => s + num(p.TotalAmt), 0);
+
+      // Payment method by QBO invoice Id (unique) - a DocNumber can repeat, an Id can't.
+      const pmById = new Map((pmRes.PaymentMethod || []).map((m) => [m.Id, m.Name]));
+      const methodByInvId = new Map();
+      for (const p of qboPaymentsAll) {
+        const nm = normMethod(p.PaymentMethodRef ? pmById.get(p.PaymentMethodRef.value) : null);
+        if (!nm) continue;
+        for (const ln of (p.Line || [])) for (const lt of (ln.LinkedTxn || [])) {
+          if (lt.TxnType === 'Invoice') methodByInvId.set(lt.TxnId, nm);
+        }
+      }
+      // QBO customer map for account/parent grouping.
+      const custById = new Map(qboCustomers.map((cu) => [cu.Id, cu]));
+      const qboParentName = (custId) => {
+        const cu = custById.get(custId); if (!cu) return null;
+        if (cu.ParentRef) return custById.get(cu.ParentRef.value)?.DisplayName || cu.ParentRef.name || cu.DisplayName;
+        return cu.DisplayName; // top-level customer is its own parent
+      };
+
+      // Group BOTH sides by invoice number (arrays - a number can legitimately repeat;
+      // QBO reuses a DocNumber for genuinely different invoices, SF has some dupes too).
+      const sfByKey = new Map(), qboByKey = new Map();
+      for (const r of sfInvoices) { const k = invKey(r.Name); if (!k) continue; if (!sfByKey.has(k)) sfByKey.set(k, []); sfByKey.get(k).push(r); }
+      for (const i of qboSent) { const k = invKey(i.DocNumber); if (!k) continue; if (!qboByKey.has(k)) qboByKey.set(k, []); qboByKey.get(k).push(i); }
+
+      const sfAmt = (r) => num(r[inv.amount]);
+      const qbAmt = (i) => num(i.TotalAmt);
+      const sameDay = (r, i) => (r[inv.date] || '') === (i.TxnDate || '');
+      const sameCust = (r, i) => { const a = r.Job__r?.Account?.Name, b = i.CustomerRef?.name; return a && b && String(a).toLowerCase() === String(b).toLowerCase(); };
+      // Third tiebreaker, per direction 2026-08-27: how much of the real
+      // Opportunity name (Job__r.Name) shows up in the QBO invoice's own
+      // line-item text. Real signal, not a guess -- Create Invoice's own
+      // convention stamps the Opportunity's exact Name as the invoice's
+      // first (DescriptionOnly) line for every invoice this app creates
+      // (invoices.js), and qbo.queryAll('Invoice', ...)'s bulk SELECT *
+      // already returns each invoice's full Line[] (confirmed live
+      // 2026-08-27 -- no extra per-invoice fetch needed). For older
+      // invoices that predate that convention (exactly the ones this
+      // backfill exists for), the job/site name often still shows up
+      // somewhere in a manually-typed line description, just not
+      // guaranteed as line 1 -- so this checks all lines, not just the
+      // first. Word-overlap, not exact match: fraction of the Opportunity
+      // name's real words (>2 chars, skips "at"/"of"/etc.) found anywhere
+      // in the invoice's combined line text.
+      const qboLineText = (i) => (i.Line || [])
+        .map((l) => l.Description || l.SalesItemLineDetail?.ItemRef?.name || '')
+        .join(' ').toLowerCase();
+      const nameLineSimilarity = (r, i) => {
+        const oppName = r.Job__r?.Name;
+        if (!oppName) return 0;
+        const lineText = qboLineText(i);
+        if (!lineText) return 0;
+        const tokens = oppName.toLowerCase().split(/\W+/).filter((t) => t.length > 2);
+        if (tokens.length === 0) return 0;
+        const hits = tokens.filter((t) => lineText.includes(t)).length;
+        return hits / tokens.length;
+      };
+      // Pair SF↔QBO within one number by NEAREST amount (same date/customer/
+      // opp-name-in-line-text break ties). For the overwhelmingly-common
+      // 1:1 case this just pairs the two records.
+      const pairKey = (sfList, qboList) => {
+        const sfRem = [...sfList], pairs = [], qboLeft = [];
+        for (const qi of qboList) {
+          if (!sfRem.length) { qboLeft.push(qi); continue; }
+          let best = 0, bestScore = Infinity;
+          for (let j = 0; j < sfRem.length; j++) {
+            let s = Math.abs(sfAmt(sfRem[j]) - qbAmt(qi));
+            if (sameDay(sfRem[j], qi)) s -= 0.001;
+            if (sameCust(sfRem[j], qi)) s -= 0.001;
+            s -= nameLineSimilarity(sfRem[j], qi) * 0.001;
+            if (s < bestScore) { bestScore = s; best = j; }
+          }
+          pairs.push([sfRem[best], qi]); sfRem.splice(best, 1);
+        }
+        return { pairs, sfLeft: sfRem, qboLeft };
+      };
+
+      // Walk every number, pair within it, and bucket into matched / qbo-only / sf-only.
+      // Report only rows whose own record is in the requested window; a pair with a
+      // twin dated just outside the window still counts as matched (date-skew rescue).
+      const matched = [], qboOnly = [], sfOnly = [];
+      for (const k of new Set([...sfByKey.keys(), ...qboByKey.keys()])) {
+        const sfList = sfByKey.get(k) || [], qboList = qboByKey.get(k) || [];
+        const dup = sfList.length > 1 || qboList.length > 1; // number appears more than once
+        const { pairs, sfLeft, qboLeft } = pairKey(sfList, qboList);
+        for (const [sr, qi] of pairs) {
+          if (!inWindow(sr[inv.date]) && !inWindow(qi.TxnDate)) continue;
+          matched.push({
+            number: qi.DocNumber || sr.Name, dup,
+            sfAmount: sfAmt(sr), qboAmount: qbAmt(qi),
+            sfReceived: num(sr[inv.paymentReceived]), qboReceived: qbAmt(qi) - num(qi.Balance),
+            sfDate: sr[inv.date], qboDate: qi.TxnDate,
+            sfAccount: sr.Job__r?.Account?.Name || null, sfParent: sr.Job__r?.Account?.Parent?.Name || null,
+            qboAccount: qi.CustomerRef?.name || null, qboParent: qboParentName(qi.CustomerRef?.value),
+            paymentMethod: methodByInvId.get(qi.Id) || normMethod(sr[inv.paymentMethod]) || null,
+            sfId: sr.Id, qboInvoiceId: qi.Id, currentQboId: sr[inv.qboId] || null,
+            // For the qbo-id-backfill line-item-similarity relaxation --
+            // real Opportunity name/type/record-type, and how much of that
+            // name shows up in the QBO invoice's own line text.
+            oppName: sr.Job__r?.Name || null,
+            oppType: sr.Job__r?.[f.oppType] || null,
+            oppRecordType: sr.Job__r?.RecordType?.DeveloperName || null,
+            nameLineSimilarity: nameLineSimilarity(sr, qi),
+          });
+        }
+        for (const qi of qboLeft) if (inWindow(qi.TxnDate)) qboOnly.push({
+          side: 'qbo', number: qi.DocNumber, dup, date: qi.TxnDate, amount: qbAmt(qi),
+          customer: qi.CustomerRef?.name || null,
+          sfAccount: null, sfParent: null,
+          qboAccount: qi.CustomerRef?.name || null, qboParent: qboParentName(qi.CustomerRef?.value),
+          paymentMethod: methodByInvId.get(qi.Id) || null,
+        });
+        for (const sr of sfLeft) if (inWindow(sr[inv.date])) sfOnly.push({
+          side: 'sf', number: sr.Name, dup, date: sr[inv.date], amount: sfAmt(sr),
+          customer: sr.Job__r?.Account?.Name || null,
+          sfAccount: sr.Job__r?.Account?.Name || null, sfParent: sr.Job__r?.Account?.Parent?.Name || null,
+          qboAccount: null, qboParent: null,
+          paymentMethod: normMethod(sr[inv.paymentMethod]),
+        });
+      }
+      const matchedCount = matched.length;
+
+      const sfB = num(sfBilledAgg[0]?.total), sfR = num(sfRecvAgg[0]?.total);
+      data = {
+        range: { from, to },
+        sf: { billed: sfB, received: sfR },
+        qbo: { billed: qboBilled, received: qboReceived },
+        deltas: { billed: qboBilled - sfB, received: qboReceived - sfR },
+        diff: { matchedCount, matched, qboOnly, sfOnly },
+        computedAt: new Date().toISOString(),
+      };
+      if (KV) await KV.put(cacheKey, JSON.stringify(data), { expirationTtl: 1800 });
+  }
+  return data;
+}
+
+api.get('/finance/reconciliation', async (c) => {
+  try {
+    const me = await getOfficeUser(c);
+    if (!me?.isAdmin) return c.json({ error: 'Admin only' }, 403);
+
+    const to = c.req.query('to') || ymd(Date.now());
+    const days = Math.min(730, Math.max(1, parseInt(c.req.query('days') || '90', 10)));
+    const from = c.req.query('from') || addDays(to, -days);
+    const padFrom = addDays(from, -365); // wide lookback so a differently-dated twin is still found
+    const methodFilter = c.req.query('paymentMethod') || null; // groupBy is applied client-side
+
+    let data = await getReconciliationData(c.env, from, to, padFrom, c.req.query('refresh') === '1');
+    data = { ...data, range: { ...data.range, days } };
+
+    // Payment-method filter (post-cache, so switching filters doesn't recompute).
+    if (methodFilter) {
+      data = { ...data, diff: {
+        ...data.diff,
+        matched: data.diff.matched.filter((r) => r.paymentMethod === methodFilter),
+        qboOnly: data.diff.qboOnly.filter((r) => r.paymentMethod === methodFilter),
+        sfOnly: data.diff.sfOnly.filter((r) => r.paymentMethod === methodFilter),
+      } };
+    }
+    return c.json(data);
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
+// ---- QBO_Id__c backfill (admin-only, dry-run unless ?apply=1) ----
+// One-off catch-up: stamps QBO_Id__c onto already-linked Invoicing__c records that
+// predate the field, reusing the exact matched pairs computed above (same invKey
+// grouping + nearest-amount pairing within a reused DocNumber). A pair is
+// "super confident" enough to write when sfAmount === qboAmount EXACTLY -- number
+// (DocNumber) alone isn't trusted since QBO reuses it across genuinely different
+// invoices (see invKey/pairKey comments), and the amount-nearest pairing used for
+// display purposes above is a heuristic, not a guarantee, for those reused-number
+// groups. Never overwrites an existing QBO_Id__c that disagrees with the computed
+// match -- that's surfaced as a conflict for a human to look at, not auto-resolved.
+const amountsEqual = (a, b) => Math.abs((a || 0) - (b || 0)) < 0.005;
+
+// Second, weaker-evidence tier, per direction 2026-08-27: an amount
+// mismatch alone doesn't mean the pairing is wrong (a partial credit,
+// adjustment, or rounding on one side is real and common) -- if the QBO
+// invoice's own line-item text closely matches the real Opportunity name
+// (nameLineSimilarity, computed above), that's real, independent evidence
+// the pairing is right even though the dollar amount isn't.
+// **Restricted to Job/Service Opportunities only** -- explicitly per
+// direction, T&I and Monitoring jobs at the same physical site very often
+// share naming with an unrelated Job/Service Opportunity there (same
+// building address embedded in both names), so a name-similarity match is a
+// much weaker, riskier signal for those types -- a real invoice for the
+// wrong job type at the same site could pass a loose name check. Job/Service
+// Opportunities don't have that same recurring-name risk pattern, so the
+// relaxation only applies there; T&I/Monitoring mismatches stay in
+// amountMismatch for a human to review, same as before this tier existed.
+//
+// **Also requires the amounts to be within a relative tolerance, not
+// unlimited** -- found live 2026-08-27 sampling real candidates before
+// applying anything: name similarity alone doesn't distinguish "the right
+// invoice for this job" from "any of several real invoices for this job" --
+// a job billed in multiple real installments (e.g. "Truist 2nd and 3rd" had
+// 5+ separate real invoices, each legitimately mentioning the same
+// Opportunity name) produced sim=1.00 pairs with $2,850-$5,340 dollar gaps
+// on a $380-$8,140 base -- clearly the WRONG specific invoice for that SF
+// record, just a real invoice for the same underlying job. A real credit/
+// rounding/tax adjustment is a small fraction of the invoice, not multiples
+// of it -- 20% relative tolerance keeps the legitimate small-variance cases
+// (confirmed live: real examples at 0.6%-10% look like genuine adjustments)
+// while excluding the multi-invoice-confusion cases (confirmed live: the
+// wrong pairings were all 270%+ off).
+const LINE_MATCH_THRESHOLD = 0.75;
+const LINE_MATCH_MAX_REL_DIFF = 0.20;
+
+api.get('/finance/qbo-id-backfill', async (c) => {
+  try {
+    const me = await getOfficeUser(c);
+    if (!me?.isAdmin) return c.json({ error: 'Admin only' }, 403);
+
+    const to = c.req.query('to') || ymd(Date.now());
+    const days = Math.min(730, Math.max(1, parseInt(c.req.query('days') || '60', 10)));
+    const from = c.req.query('from') || addDays(to, -days);
+    const padFrom = addDays(from, -365);
+    const apply = c.req.query('apply') === '1';
+
+    // apply=1 always forces a fresh read, never the cache -- found live
+    // 2026-08-27: the 30-min KV cache means currentQboId (used to decide
+    // alreadySet/candidates) never reflected writes a PRIOR apply call had
+    // just made, so every subsequent call in a batched loop kept re-
+    // selecting and re-writing the exact same first `writeLimit` records
+    // instead of ever progressing -- remaining stayed stuck for 20+ calls
+    // before this was caught. Harmless (writing the same real QBO_Id__c
+    // value twice is a no-op, not data corruption), but wasted real API
+    // calls and never finished. Dry runs (apply=0) still respect
+    // ?refresh=1 same as before -- only an actual write forces it.
+    const data = await getReconciliationData(c.env, from, to, padFrom, apply || c.req.query('refresh') === '1');
+
+    const candidates = [], lineMatchCandidates = [], alreadySet = [], conflicts = [], amountMismatch = [];
+    for (const m of data.diff.matched) {
+      if (!m.sfId || !m.qboInvoiceId) continue; // shouldn't happen - guard anyway
+      const exact = amountsEqual(m.sfAmount, m.qboAmount);
+      const isJobOrService = isJobType(m.oppRecordType, m.oppType) || isServiceType(m.oppRecordType, m.oppType);
+      // Explicit belt-and-suspenders exclusion, found live 2026-08-27:
+      // isServiceType's own "starts with 'service'" check (built for a
+      // different purpose -- Expense Tracking's list inclusion) let
+      // 'Service/Monitoring' through, since it starts with "service" even
+      // though it's a real hybrid Monitoring category -- exactly the
+      // mislinking risk flagged per direction. Belt-and-suspenders: exclude
+      // on the raw oppType/oppRecordType text containing "monitoring" or
+      // "inspection" anywhere, regardless of what isJobType/isServiceType
+      // otherwise say.
+      const oppTypeLower = (m.oppType || '').toLowerCase();
+      const isMonitoringOrInspection = oppTypeLower.includes('monitoring') || oppTypeLower.includes('inspection')
+        || m.oppRecordType === 'Monitoring' || m.oppRecordType === 'Test_Inspection';
+      const relDiff = Math.abs(m.sfAmount - m.qboAmount) / Math.max(Math.abs(m.sfAmount), Math.abs(m.qboAmount), 1);
+      const viaLineMatch = !exact && isJobOrService && !isMonitoringOrInspection && m.nameLineSimilarity >= LINE_MATCH_THRESHOLD && relDiff <= LINE_MATCH_MAX_REL_DIFF;
+      if (!exact && !viaLineMatch) { amountMismatch.push(m); continue; }
+      if (m.currentQboId === m.qboInvoiceId) { alreadySet.push(m); continue; }
+      if (m.currentQboId) { conflicts.push(m); continue; } // already set to something ELSE - don't touch
+      (viaLineMatch ? lineMatchCandidates : candidates).push(m);
+    }
+
+    // Batched, not one giant sequential loop -- found live 2026-08-27: a
+    // single apply=1 call against the full ~3,000-candidate backlog hit a
+    // real Cloudflare Workers platform ceiling ("Too many subrequests by
+    // single Worker invocation") partway through, since every write is its
+    // own outbound subrequest within one invocation. Nothing was corrupted
+    // by that -- each write is independently try/caught, so it just stopped
+    // cleanly with a real count of what succeeded before the limit hit.
+    // writeLimit caps how many writes THIS call attempts (default 30, well
+    // under any plausible per-invocation cap); the reconciliation data
+    // itself is KV-cached for 30 min (getReconciliationData), so repeated
+    // calls in the same window reuse it instead of re-querying SF/QBO --
+    // only the actual writes spend fresh subrequest budget. `remaining`
+    // tells the caller whether to call again.
+    const writeLimit = Math.min(200, Math.max(1, parseInt(c.req.query('writeLimit') || '30', 10)));
+    let applied = null;
+    if (apply) {
+      const sf = createSalesforce(c.env);
+      const toWrite = [...candidates, ...lineMatchCandidates].slice(0, writeLimit);
+      applied = { succeeded: 0, failed: [], attempted: toWrite.length, remaining: Math.max(0, (candidates.length + lineMatchCandidates.length) - toWrite.length) };
+      for (const m of toWrite) {
+        try {
+          await sf.updateRecord(inv.sobject, m.sfId, { [inv.qboId]: m.qboInvoiceId });
+          applied.succeeded++;
+        } catch (e) {
+          applied.failed.push({ sfId: m.sfId, number: m.number, error: e.message });
+        }
+      }
+    }
+
+    return c.json({
+      range: { from, to, days },
+      counts: {
+        candidates: candidates.length,
+        lineMatchCandidates: lineMatchCandidates.length,
+        alreadySet: alreadySet.length,
+        conflicts: conflicts.length,
+        amountMismatch: amountMismatch.length,
+      },
+      candidates, lineMatchCandidates, conflicts, amountMismatch,
+      applied,
     });
   } catch (e) { return c.json({ error: e.message }, 500); }
 });
@@ -510,7 +909,7 @@ api.get('/jobs/quotes', async (c) => {
     const reviewClause = quoteStatusPredicate(config.quotes.reviewStatus);
     const sentClause = `(${quoteStatusPredicate(config.quotes.sentStatus)} AND ${f.oppSentToCustomer} = true)`;
     const whereClause =
-      // ?view=all is the calendar's consolidated set — the union of all three
+      // ?view=all is the calendar's consolidated set - the union of all three
       // segments so the calendar shows the same quotes regardless of which
       // Needs Quote / Ready for Review / Quote Sent segment is selected.
       view === 'all' ? `(${needsClause} OR ${reviewClause} OR ${sentClause})` :
@@ -643,7 +1042,7 @@ api.get('/technicians', async (c) => {
   }
 });
 
-// Add a technician from the board UI — Name is required, FS user ID and
+// Add a technician from the board UI - Name is required, FS user ID and
 // color are optional (a tech with no FS ID just doesn't sync to Field
 // Squared; a tech with no color falls back to /tv's hash-based color).
 api.post('/technicians', async (c) => {
@@ -688,7 +1087,7 @@ api.patch('/technicians/:id', async (c) => {
     if ('fsUserId' in body) fields[o.technicianFsUserId] = body.fsUserId ? body.fsUserId.trim() : null;
     if ('color' in body) fields[o.technicianColor] = body.color || null;
     if ('active' in body) fields[o.technicianActive] = !!body.active;
-    // Chalkboard login password (plaintext by design — see config). Empty string
+    // Chalkboard login password (plaintext by design - see config). Empty string
     // clears it, so the tech falls back to DEFAULT_TECH_PASSWORD.
     if ('password' in body) fields[o.technicianPassword] = body.password ? String(body.password) : null;
     if (Object.keys(fields).length === 0) return c.json({ error: 'Nothing to update' }, 400);
@@ -703,7 +1102,7 @@ api.patch('/technicians/:id', async (c) => {
 });
 
 // Approved time off lives as Job_Assignment__c rows against the hidden
-// TIME_OFF_OPPORTUNITY_ID sentinel — invisible to GET /jobs (that query filters
+// TIME_OFF_OPPORTUNITY_ID sentinel - invisible to GET /jobs (that query filters
 // Opportunity by Project_Status__c and pulls assignments as a child subquery, so
 // the sentinel itself is never selected). This overlays those rows for the board.
 api.get('/time-off', async (c) => {
@@ -711,7 +1110,7 @@ api.get('/time-off', async (c) => {
     const start = c.req.query('start');
     const end = c.req.query('end');
     const isoDate = /^\d{4}-\d{2}-\d{2}$/;
-    // Work_Date__c is a Date field — SOQL date literals are unquoted, so esc()'s
+    // Work_Date__c is a Date field - SOQL date literals are unquoted, so esc()'s
     // quote-escaping doesn't apply here. Validate the shape instead of quoting.
     if (!start || !end || !isoDate.test(start) || !isoDate.test(end)) {
       return c.json({ error: 'start and end are required, as YYYY-MM-DD' }, 400);
@@ -725,7 +1124,7 @@ api.get('/time-off', async (c) => {
 
 // The office adding time off directly (not via a technician's schedule
 // request). A dedicated route rather than reusing POST /jobs/:oppId/assignments
-// — TIME_OFF_OPPORTUNITY_ID is a server-only env var, deliberately never sent
+// - TIME_OFF_OPPORTUNITY_ID is a server-only env var, deliberately never sent
 // to the client, so the client can't name it as a path param either way.
 api.post('/time-off', async (c) => {
   try {
@@ -837,7 +1236,7 @@ api.patch('/jobs/:id', async (c) => {
         }
 
         if (!hasDateChange && fsStatus) {
-          // Status-only: light /api/task endpoint — no 27KB getTask round-trip needed.
+          // Status-only: light /api/task endpoint - no 27KB getTask round-trip needed.
           await fs.updateStatus(fsTaskId, oppName, FS_TASK_TYPE, fsStatus);
           fsUpdated = true;
         } else if (hasDateChange) {
@@ -905,7 +1304,7 @@ api.post('/jobs/:oppId/assignments', async (c) => {
     if (!technicianId) return c.json({ error: 'technicianId required' }, 400);
     // Required for real job assignments (unlike time off / schedule-request
     // approvals, which call createAssignment directly and keep endTime
-    // optional) — an end time is what lets the FS Schedule sync below carry
+    // optional) - an end time is what lets the FS Schedule sync below carry
     // a real duration instead of the old hardcoded start+1hr placeholder.
     if (!endTime) return c.json({ error: 'endTime required' }, 400);
 
@@ -981,7 +1380,7 @@ api.patch('/assignments/:id', async (c) => {
           if (workDateForFs) {
             sched = buildFsSchedules(task, workDateForFs, startTimeForFs, endTimeForFs);
           } else {
-            // workDate was cleared — SF update already committed (null date), so just
+            // workDate was cleared - SF update already committed (null date), so just
             // query all assignments; the date filter below drops this one naturally.
             const remaining = await sf.query(
               `SELECT ${o.assignmentDate}, ${o.assignmentStartTime}, ${o.assignmentEndTime}, ${o.assignmentCompleted}
@@ -1075,7 +1474,7 @@ api.delete('/assignments/:id', async (c) => {
             const time = normTime(next[o.assignmentStartTime]) || '08:00';
             patch.Schedules = buildFsSchedules(task, next[o.assignmentDate], time, normTime(next[o.assignmentEndTime]));
           } else {
-            patch.Schedules = [];   // no dated assignments remain — clear FS schedule
+            patch.Schedules = [];   // no dated assignments remain - clear FS schedule
           }
           await fs.patchTask(fsTaskId, task, patch);
         }
@@ -1090,7 +1489,7 @@ api.delete('/assignments/:id', async (c) => {
   }
 });
 
-// Search FS tasks by name fragment — used by the manual-link UI on the board.
+// Search FS tasks by name fragment - used by the manual-link UI on the board.
 api.get('/fs-search', async (c) => {
   try {
     const q = c.req.query('q')?.trim();
@@ -1126,7 +1525,7 @@ api.get('/fs-search', async (c) => {
 
     let matches = filterTasks(tasks);
 
-    // No matches from cache — could be a brand-new task. Fetch just today's tasks and retry.
+    // No matches from cache - could be a brand-new task. Fetch just today's tasks and retry.
     if (matches.length === 0 && fromCache) {
       const todaySince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const recent = await fs.listModified(todaySince);
@@ -1139,14 +1538,14 @@ api.get('/fs-search', async (c) => {
   }
 });
 
-// FS's active user roster — feeds the "Add Tech" picklist so the office picks
+// FS's active user roster - feeds the "Add Tech" picklist so the office picks
 // the FS account instead of hand-typing an opaque ObjectId.
 api.get('/fs-users', async (c) => {
   try {
     const fs = createFs(c.env);
     const KV = c.env.SF_TOKENS;
     const CACHE_KEY = 'fs_user_list_v1';
-    const CACHE_TTL = 1800; // 30 minutes — the user roster barely changes
+    const CACHE_TTL = 1800; // 30 minutes - the user roster barely changes
     const since = new Date(Date.now() - 10 * 365 * 24 * 60 * 60 * 1000).toISOString();
 
     let users = KV ? await KV.get(CACHE_KEY, 'json') : null;
@@ -1269,7 +1668,7 @@ api.get('/accounts', async (c) => {
                        ${acc.parent}, Parent.Name, RecordType.DeveloperName, LastModifiedDate
                 FROM Account ORDER BY Name`),
       sf.query(`SELECT Id, Name FROM Contact`),
-      sf.query(`SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}
+      sf.query(`SELECT Id, ${f.oppName}, ${f.oppLid}, ${f.oppStatus}, ${f.oppFsTaskId}, ${f.oppType}, RecordType.DeveloperName
                 FROM Opportunity
                 WHERE ${f.oppStatus} IN ('Waiting on Payment', 'Installation Completed')
                 AND ${f.oppLid} != null
@@ -1280,7 +1679,7 @@ api.get('/accounts', async (c) => {
     const contactNameById = new Map(contactRecords.map((r) => [r.Id, r.Name]));
 
     // Invoice records live on Invoicing__c (Job__c looks up to the
-    // Opportunity) — a Job can have more than one, so keep the full set per
+    // Opportunity) - a Job can have more than one, so keep the full set per
     // Job (not just the latest) for the Overdue / Ready to Bill popups.
     const billingJobIds = billingRecords.map((r) => r.Id);
     const invoicesByOppId = new Map();
@@ -1313,13 +1712,20 @@ api.get('/accounts', async (c) => {
       for (const list of invoicesByOppId.values()) list.sort((x, y) => (y.date ?? '').localeCompare(x.date ?? ''));
     }
 
-    // LID -> { unpaid: [{id,name,invoices}], readyToBill: [...] } — LID__c,
+    // LID -> { unpaid: [{id,name,invoices}], readyToBill: [...] } - LID__c,
     // not AccountId, is the join key between Opportunity and Account in this org.
     const billingByLid = new Map();
     for (const r of billingRecords) {
       const lid = r[f.oppLid];
       const entry = billingByLid.get(lid) ?? { unpaid: [], readyToBill: [] };
-      const job = { id: r.Id, name: r[f.oppName], invoices: invoicesByOppId.get(r.Id) ?? [] };
+      const job = {
+        id: r.Id,
+        name: r[f.oppName],
+        invoices: invoicesByOppId.get(r.Id) ?? [],
+        fsTaskId: r[f.oppFsTaskId] ?? null,
+        opportunityType: r[f.oppType] ?? null,
+        recordType: r.RecordType?.DeveloperName ?? null,
+      };
       if (r[f.oppStatus] === 'Waiting on Payment') entry.unpaid.push(job);
       else entry.readyToBill.push(job);
       billingByLid.set(lid, entry);
@@ -1327,11 +1733,11 @@ api.get('/accounts', async (c) => {
 
     return c.json(accountRecords.map((r) => {
       const billing = billingByLid.get(r[acc.lid]) ?? { unpaid: [], readyToBill: [] };
-      // Two SF fields represent the same concept (AP contact — who invoices go
+      // Two SF fields represent the same concept (AP contact - who invoices go
       // to), split by which kind of account they live on: apContact for
       // management/Customer accounts, apContactLid for LID/property accounts.
       // Prefer whichever matches this account's own RecordType, but fall back
-      // to the other field if that one is empty — a handful of accounts only
+      // to the other field if that one is empty - a handful of accounts only
       // have the "other" field populated (leftover from before AP_Contact__c
       // replaced AR_Contact__c), and hiding real data isn't the goal here.
       const isLidAccount = r.RecordType?.DeveloperName === 'LID_Account';
@@ -1397,7 +1803,7 @@ api.get('/contacts', async (c) => {
     const sf = createSalesforce(c.env);
 
     // Pull contacts and accounts that name a property contact in parallel.
-    // Property_Contact_Name__c on Account is a Contact lookup — one person can be
+    // Property_Contact_Name__c on Account is a Contact lookup - one person can be
     // the property contact for many buildings, so we group accounts by that field.
     const [contactRecords, accountRecords] = await Promise.all([
       sf.query(`SELECT Id, FirstName, LastName, Name, Email, Phone, Title,
@@ -1434,7 +1840,7 @@ api.get('/contacts', async (c) => {
   }
 });
 
-// Shared team notes (Dispatch_Note__c) — no per-user auth in this app, so these
+// Shared team notes (Dispatch_Note__c) - no per-user auth in this app, so these
 // are visible/editable by anyone with board access. Optionally linked to an
 // Opportunity via the lookup; Opportunity_Specific__c mirrors whether that
 // lookup is set (the client drives both fields together, never independently).
@@ -1504,7 +1910,7 @@ api.delete('/notes/:id', async (c) => {
 
 // Manually stamp an FS task ID onto a SF opportunity, then sync user
 // assignments and a status snapshot from the FS task so the board reflects
-// reality (status is display-only — see comment below, no write to either side).
+// reality (status is display-only - see comment below, no write to either side).
 api.post('/jobs/:id/fs-link', async (c) => {
   try {
     const sf = createSalesforce(c.env);
@@ -1513,7 +1919,7 @@ api.post('/jobs/:id/fs-link', async (c) => {
     const { fsTaskId } = await c.req.json();
     if (!fsTaskId) return c.json({ error: 'fsTaskId required' }, 400);
 
-    // Stamp the link first — if anything below fails, the link is still saved.
+    // Stamp the link first - if anything below fails, the link is still saved.
     await sf.updateRecord('Opportunity', id, { [f.oppFsTaskId]: fsTaskId });
 
     const result = { assignmentsAdded: 0 };
@@ -1533,7 +1939,7 @@ api.post('/jobs/:id/fs-link', async (c) => {
       const sfOpp = oppRows[0];
       if (!sfOpp) throw new Error('Opp not found');
 
-      // Sync users: FS → SF — find techs in FS not yet in SF.
+      // Sync users: FS → SF - find techs in FS not yet in SF.
       const syncableUserIds = (Array.isArray(fullTask.Users) ? fullTask.Users : [])
         .filter(uid => uid in techDir.byFsId);
 
@@ -1543,7 +1949,7 @@ api.post('/jobs/:id/fs-link', async (c) => {
       // "has assignments" = existing SF assignments + any we're about to add from FS
       const willHaveAssignments = existingAssignments.length > 0 || syncableUserIds.length > 0;
 
-      // Status is display-only now — linking no longer writes Project_Status__c
+      // Status is display-only now - linking no longer writes Project_Status__c
       // or pushes a recency-based status to FS. The snapshot stamped above is
       // what the board's drift badge compares against; a person decides what,
       // if anything, to do about a mismatch.
@@ -1606,15 +2012,15 @@ api.post('/jobs/:id/fs-link', async (c) => {
 });
 
 // ============================================================================
-// TEMPORARY — Field Squared Documents API exploration. REMOVE THIS ROUTE
+// TEMPORARY - Field Squared Documents API exploration. REMOVE THIS ROUTE
 // once the investigation is done. No persistence, no SF writes, no UI wiring.
-// Uses createFs(c.env) / getToken() from fieldSquared.js — never calls
+// Uses createFs(c.env) / getToken() from fieldSquared.js - never calls
 // /Authentication directly.
 //
 // Usage:
-//   GET /api/debug/documents                     — step 1: enumerate types
-//   GET /api/debug/documents?externalId=<id>      — also runs step 2 for that doc
-//   GET /api/debug/documents?raw=<query string>   — passthrough for experimenting
+//   GET /api/debug/documents                     - step 1: enumerate types
+//   GET /api/debug/documents?externalId=<id>      - also runs step 2 for that doc
+//   GET /api/debug/documents?raw=<query string>   - passthrough for experimenting
 //                                                    with /api/document filter params
 //                                                    without redeploying, e.g.
 //                                                    ?raw=modifiedsince%3D2026-01-01
@@ -1631,12 +2037,12 @@ api.get('/debug/documents', async (c) => {
       return { status: r.status, ok: r.ok, errHeader: r.errHeader ?? null, body };
     };
 
-    // Raw passthrough mode — skip steps 1/2 entirely.
+    // Raw passthrough mode - skip steps 1/2 entirely.
     if (raw !== undefined) {
       return c.json({ raw: asJson(await fs.rawDocumentQuery(raw)) });
     }
 
-    // Step 1 — enumerate document types. Try no filter plus each of the
+    // Step 1 - enumerate document types. Try no filter plus each of the
     // four CRS-configured types; raw error bodies are returned as-is if FS
     // rejects a type name/casing.
     const candidateTypes = [null, 'Service Acknowledgement', 'Work Order', 'Test & Inspection', 'Work Order Email - 1'];
@@ -1647,7 +2053,7 @@ api.get('/debug/documents', async (c) => {
 
     const result = { types };
 
-    // Step 2 — pull a known document's full record, if provided.
+    // Step 2 - pull a known document's full record, if provided.
     if (externalId) {
       result.document = asJson(await fs.getDocument(externalId));
     }

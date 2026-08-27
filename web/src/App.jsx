@@ -1,24 +1,24 @@
-import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from './api.js';
 import { getUser, login as authLogin, logout as authLogout, changePassword as authChangePassword, track as trackUsage } from './auth.js';
 
 // Map your real status strings to a color treatment. Unknown -> neutral.
 const STATUS_CLASS = {
-  'Needs Quote': 'needs',             // amber — pre-scheduling quote stage, Quotes tab only
-  'Ready for Review': 'dispatched',   // indigo — quote drafted, awaiting internal review
+  'Needs Quote': 'needs',             // amber - pre-scheduling quote stage, Quotes tab only
+  'Ready for Review': 'dispatched',   // indigo - quote drafted, awaiting internal review
   'Needs Quote Review': 'dispatched', // legacy value (replaced by 'Ready for Review')
   'Pending Customer Approval': 'scheduled',
   'Quoted': 'scheduled',
   'Parts ordered': 'needs',
-  'Ready to be scheduled': 'needs',   // amber — needs a tech assigned
+  'Ready to be scheduled': 'needs',   // amber - needs a tech assigned
   'Ready to be Scheduled': 'needs',   // Service Call (Service_Status__c) spelling
   'Unscheduled': 'needs',             // Test & Inspection (StageName)
-  'Scheduled': 'scheduled',           // blue — booked
-  'In Progress': 'dispatched',        // indigo — tech on site
+  'Scheduled': 'scheduled',           // blue - booked
+  'In Progress': 'dispatched',        // indigo - tech on site
   'Installation Completed': 'dispatched',
   'Completed': 'dispatched',          // Service Call / Test & Inspection terminal
-  'Waiting on Payment': 'emergency',  // red — done, awaiting payment
+  'Waiting on Payment': 'emergency',  // red - done, awaiting payment
   'Billing Complete': 'scheduled',
   'Project Complete': 'scheduled',
 };
@@ -40,24 +40,29 @@ const loadViewState = () => {
 // below (see ASSIGNABLE_STATUSES).
 const TERMINAL_STATUSES = ['Billing Complete', 'Project Complete'];
 
-// Everything that stays on the board (mirrors config.jobStatusValues) — for
+// Everything that stays on the board (mirrors config.jobStatusValues) - for
 // legacy / Job / Work_Order jobs on Project_Status__c.
+// 'Needs Quote' added 2026-08-25: a pre-quote site visit is a real reason to
+// dispatch a tech before quoting is done, so it has to be board-visible too -
+// see config.js's jobStatusValues comment for the real case that prompted this.
 const BOARD_STATUSES = [
-  'Pending Customer Approval', 'Quoted', 'Parts ordered', 'Ready to be scheduled',
+  'Needs Quote', 'Pending Customer Approval', 'Quoted', 'Parts ordered', 'Ready to be scheduled',
   'Scheduled', 'In Progress', 'Installation Completed', 'Waiting on Payment',
 ];
 // A dispatcher can set any board status, plus "Project Complete" to take a job
 // off the board manually (it's a real picklist value, just not in jobStatusValues,
-// so the board query is unaffected). "Billing Complete" stays excluded — that one
+// so the board query is unaffected). "Billing Complete" stays excluded - that one
 // still only happens in Field Squared. Strings must match the SF picklist EXACTLY.
 const ASSIGNABLE_STATUSES = [...BOARD_STATUSES, 'Project Complete'];
 
 // ---- Record-type-aware status handling (mirrors server config.recordTypeStatus) ----
 // New record types keep their lifecycle status in a different field with its own
 // values. Service Call -> Service_Status__c, Test & Inspection -> Inspection_Status__c.
-// Types not listed here ride Project_Status__c and use the BOARD/ASSIGNABLE lists.
-// (Quote-pipeline values like Needs Quote / Ready for Review live on the Quotes
-// tab, not this board dropdown.)
+// Types not listed here ride Project_Status__c and use the BOARD/ASSIGNABLE lists,
+// which as of 2026-08-25 include 'Needs Quote' (see BOARD_STATUSES above).
+// Service_Call/Test_Inspection below still deliberately exclude the
+// quote-pipeline values -- only extend those too if the same
+// site-visit-before-quote need comes up for those record types.
 const STATUS_VALUES_BY_TYPE = {
   Service_Call: ['Pending Customer Approval', 'Ready to be Scheduled', 'Scheduled', 'In Progress', 'Completed'],
   Test_Inspection: ['Pending Customer Approval', 'Unscheduled', 'Scheduled', 'Completed'],
@@ -88,7 +93,7 @@ const preScheduledFor = (recordType) =>
 
 // ---- Job category facet (the "Type" filter dropdown) ----
 // Buckets every job into Job / Service Call / Test & Inspection / Other /
-// Monitoring. Only the FOUR real record types are authoritative — `Default`
+// Monitoring. Only the FOUR real record types are authoritative - `Default`
 // (catch-all) and `Work_Order` (the FS artifact) are NOT semantic categories,
 // so they fall through to the explicit Opportunity_Type__c map below rather
 // than forcing "Job" (that precedence was the bug where `Service - Fire` opps
@@ -100,7 +105,7 @@ const RECORD_TYPE_LABELS = {
   Test_Inspection: 'Test & Inspection',
   Monitoring: 'Monitoring',
 };
-// Explicit — no fuzzy matching. Keep in sync with the org's Opportunity_Type__c
+// Explicit - no fuzzy matching. Keep in sync with the org's Opportunity_Type__c
 // picklist (CLAUDE.md audit item #13). A new picklist value not listed here
 // falls to Job until added.
 const OPP_TYPE_CATEGORY = {
@@ -116,7 +121,7 @@ const OPP_TYPE_CATEGORY = {
   'Test & Inspection': 'Test & Inspection', 'Inspections and Fees': 'Test & Inspection',
   // --- Monitoring (excluded from the board, categorized for completeness) ---
   'Monitoring': 'Monitoring',
-  // --- Other (contract / revenue / misc — not a field visit) ---
+  // --- Other (contract / revenue / misc - not a field visit) ---
   'Service Agreement': 'Other', 'Service Revenue': 'Other',
   'Software upgrade/ service accessory': 'Other', 'Other': 'Other',
 };
@@ -140,9 +145,9 @@ function cleanSubLabel(category, opportunityType) {
 const TYPE_CATEGORY_ORDER = ['Job', 'Service Call', 'Test & Inspection', 'Other'];
 
 // =====================================================================
-//  FS drift badge — EDIT ME
+//  FS drift badge - EDIT ME
 //  Maps each dispatch status to the set of raw FS statuses that are NOT a
-//  contradiction for it — i.e. FS is either already in agreement or in an
+//  contradiction for it - i.e. FS is either already in agreement or in an
 //  expected transient state on the way there. Any FS status not listed for the
 //  job's current status is flagged red.
 //
@@ -153,13 +158,13 @@ const TYPE_CATEGORY_ORDER = ['Job', 'Service Call', 'Test & Inspection', 'Other'
 //  values. compatTableFor(job.recordType) picks the table.
 //
 //  Keep in sync BY HAND with server/src/statusMap.js (FS_COMPAT_BASE /
-//  FS_STATUS_COMPATIBLE_BY_TYPE) — CLAUDE.md audit item #4. Comparison-only:
+//  FS_STATUS_COMPATIBLE_BY_TYPE) - CLAUDE.md audit item #4. Comparison-only:
 //  never drives a write to SF or FS.
 //
 //  Example (confirmed): dispatch status "Installation Completed" with FS
 //  status "Entered" → "Entered" isn't in BASE's list → red.
 // =====================================================================
-const FS_COMPAT_BASE = { // Project_Status__c — null / Default / Job / Work_Order
+const FS_COMPAT_BASE = { // Project_Status__c - null / Default / Job / Work_Order
   'Pending Customer Approval': ['Entered'],
   'Quoted': ['Entered'],
   'Parts ordered': ['Entered'],
@@ -312,9 +317,24 @@ function OppLink({ id, name, className, style }) {
   if (!id) return <span className={className} style={style}>{name}</span>;
   return (
     <a className={`opp-link ${className || ''}`} style={style} href={oppUrl(id)}
-       target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
+       target="_blank" rel="noopener noreferrer"
+       onClick={(e) => { e.stopPropagation(); trackUsage('opp_link_click', { oppId: id }); }}>
       {name}
     </a>
+  );
+}
+
+// Shared loading indicator -- three bouncing dots, optionally with a label.
+// Used app-wide in place of plain "Loading…" text (see styles.css's
+// .loading-dots-* rules). `inline` drops the block padding/centering so it
+// can sit inside a button or a tight row (e.g. a modal's "Next" button while
+// its data loads) instead of standing alone as a full loading state.
+function LoadingDots({ label, inline }) {
+  return (
+    <span className={`loading-dots-wrap ${inline ? 'loading-dots-inline' : 'loading-dots-block'}`}>
+      {label && <span className="loading-dots-label">{label}</span>}
+      <span className="loading-dots" aria-hidden="true"><span /><span /><span /></span>
+    </span>
   );
 }
 const startOfYear = (d) => { const x = startOfDay(d); x.setMonth(0, 1); return x; };
@@ -351,6 +371,20 @@ function fmtAgo(ms) {
   return `synced ${Math.floor(s / 60)}m ago`;
 }
 
+// Average time-on-screen, ms -> "45s" / "2m 14s" / "1h 05m". null/NaN (no
+// screen_view_end data yet for that screen) renders as "-", not "0s" -- an
+// absence of data isn't the same as an instant view.
+function fmtDuration(ms) {
+  if (ms == null || Number.isNaN(ms)) return null;
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
 function nextScheduledAssignmentDate(job) {
   const dates = (job.assignments || [])
     .filter((a) => a.workDate && !a.completed)
@@ -365,7 +399,7 @@ function deriveJobStatusFromAssignments(job) {
   return { status: queueStatusFor(job.recordType), scheduledDate: '' };
 }
 
-// Ticks once a second on its own — kept out of App so the "synced Xs ago"
+// Ticks once a second on its own - kept out of App so the "synced Xs ago"
 // display doesn't force a full-tree re-render of every job card every second.
 function SyncedAgo({ lastSync }) {
   const [now, setNow] = useState(Date.now());
@@ -377,7 +411,7 @@ function SyncedAgo({ lastSync }) {
 }
 
 // Wrapped in React.memo so typing/ticking elsewhere in App doesn't re-render
-// every job card — only the ones whose own props actually changed. That only
+// every job card - only the ones whose own props actually changed. That only
 // works because every handler prop below is stabilized with useCallback in
 // App, and fsLinkForJob/pendingAddForJob collapse to `null` for every row
 // except the one with a panel open (see the .map() call site in App).
@@ -387,6 +421,31 @@ const JobCard = React.memo(function JobCard({
   onSetStatus, onOpenFsLink, onCloseFsLink, onFsLinkChange, onPendingAddChange,
   onSearchFs, onConfirmFsLink,
 }) {
+  // Local, self-contained state -- this modal's visibility never needs to
+  // coordinate with sibling JobCards the way the FS-attach panel does, so it
+  // doesn't need to live in the parent's prop-drilled state. Declared before
+  // the readOnly early return so the hook order stays consistent across both
+  // branches below.
+  const [showInvoiceModal, setShowInvoiceModal] = useState(false);
+  // Local, bottom-fixed warning (same .toast styling used app-wide) instead
+  // of a native alert() -- the default browser dialog interrupts at the top
+  // of the page and needs a manual dismiss; this matches how every other
+  // transient message in this app already behaves.
+  const [invoiceWarn, setInvoiceWarn] = useState(null);
+  const flashInvoiceWarn = (msg) => { setInvoiceWarn(msg); setTimeout(() => setInvoiceWarn(null), 2600); };
+  const invoiceBtn = (
+    <button
+      type="button"
+      className={`fs-badge inv-badge${job.fsTaskId ? '' : ' inv-badge-nofs'}`}
+      title={job.fsTaskId ? 'Draft an invoice from Field Squared completion data' : 'Field Squared must be attached to this job before an invoice can be drafted'}
+      onClick={() => job.fsTaskId ? setShowInvoiceModal(true) : flashInvoiceWarn('Field Squared must be attached to this job before an invoice can be drafted.')}
+    >+ Invoice</button>
+  );
+  const invoiceModal = showInvoiceModal && (
+    <CreateInvoiceModal job={job} onClose={() => setShowInvoiceModal(false)} />
+  );
+  const invoiceWarnToast = invoiceWarn && <div className="toast">{invoiceWarn}</div>;
+
   if (readOnly) {
     return (
       <div className="job ro">
@@ -400,6 +459,7 @@ const JobCard = React.memo(function JobCard({
               : <span className="fs-badge unlinked" title="No Field Squared task linked">⬡ FS</span>}
             <FsDriftBadge job={job} />
             <span className={`badge ${statusClass(job.status)}`}>{job.status}</span>
+            {invoiceBtn}
             {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
           </div>
           <div className="meta">
@@ -417,6 +477,8 @@ const JobCard = React.memo(function JobCard({
             </div>
           )}
         </div>
+        {invoiceModal}
+        {invoiceWarnToast}
       </div>
     );
   }
@@ -434,14 +496,17 @@ const JobCard = React.memo(function JobCard({
             ? <span className="fs-badge linked" title={`FS task: ${job.fsTaskId}`}>⬡ FS</span>
             : <button className="fs-badge unlinked fs-attach-btn" title="Attach Field Squared job" onClick={() => fsOpen ? onCloseFsLink() : onOpenFsLink(job.id)}>⬡ Attach FS</button>}
           <FsDriftBadge job={job} />
-          <select
-            className={`statussel ${statusClass(job.status)}`}
+          <FilterSelect
             value={job.status}
-            onChange={(e) => onSetStatus(job, e.target.value)}
-          >
-            {!assignableStatusesFor(job.recordType).includes(job.status) && <option value={job.status}>{job.status}</option>}
-            {assignableStatusesFor(job.recordType).map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
+            onChange={(v) => onSetStatus(job, v)}
+            options={[
+              ...(!assignableStatusesFor(job.recordType).includes(job.status) ? [[job.status, job.status]] : []),
+              ...assignableStatusesFor(job.recordType).map((s) => [s, s]),
+            ]}
+            triggerClassName={`statussel-pill ${statusClass(job.status)}`}
+            ariaLabel="Job status"
+          />
+          {invoiceBtn}
           {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
         </div>
         {fsOpen && (
@@ -484,7 +549,7 @@ const JobCard = React.memo(function JobCard({
           {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}
           <span className="nextlabel">Next scheduled</span>
           <span className="dateinput ro" title="Next scheduled assignment date">
-            {nextScheduledAssignmentDate(job) ? fmtDate(nextScheduledAssignmentDate(job)) : '—'}
+            {nextScheduledAssignmentDate(job) ? fmtDate(nextScheduledAssignmentDate(job)) : '-'}
           </span>
           {nextScheduledAssignmentDate(job)
             ? <span className="created">Scheduled {fmtDate(nextScheduledAssignmentDate(job))}</span>
@@ -499,7 +564,7 @@ const JobCard = React.memo(function JobCard({
                 <button
                   className="check"
                   onClick={() => onToggleDone(job, a)}
-                  title={a.completed ? 'Worked this day — click to reopen' : 'Mark as worked (freezes the date)'}
+                  title={a.completed ? 'Worked this day - click to reopen' : 'Mark as worked (freezes the date)'}
                   aria-label="Toggle done"
                 >{a.completed ? '✓' : '○'}</button>
                 <span className="aname">{a.technicianName || 'Tech'}</span>
@@ -578,6 +643,8 @@ const JobCard = React.memo(function JobCard({
           </div>
         </div>
       </div>
+      {invoiceModal}
+      {invoiceWarnToast}
     </div>
   );
 });
@@ -597,8 +664,86 @@ function DispatchApp({ user, onLoggedOut }) {
   const [officeUsersOpen, setOfficeUsersOpen] = useState(false);
   const [usageRefresh, setUsageRefresh] = useState(0);
   const [tab, setTab] = useState(() => loadViewState().tab ?? 'jobs');
-  // Usage analytics: record which tab (screen) is viewed.
-  useEffect(() => { trackUsage('screen_view', null, tab); }, [tab]);
+  // Usage analytics: record which tab (screen) is viewed, plus how long it
+  // was actually visible before switching to a different in-app tab or
+  // navigating/backgrounding away from the browser tab entirely -- per
+  // direction 2026-08-27. "Visible" specifically, not wall-clock: if the
+  // browser tab is backgrounded and later refocused on the same in-app
+  // screen, that starts a fresh viewing stretch rather than resuming the
+  // old one, so a stretch's duration never counts time the screen genuinely
+  // wasn't on screen. screen_view_end carries durationMs; screen_view itself
+  // is untouched so existing view-count analytics don't shift.
+  //
+  // Idle timeout added 2026-08-27 -- found live: a real "Viewed quotes for
+  // 19m 57s" that the person watching it never actually spent 20 minutes
+  // on. Root cause: the Page Visibility API only knows the browser TAB lost
+  // focus, not that the person stopped paying attention -- if that tab just
+  // sits frontmost while they're away from the keyboard (a call, stepped
+  // away, alt-tabbed to something that didn't actually background the
+  // browser), visibilitychange never fires and the clock just keeps
+  // running. Real interaction (mouse move/click, keypress, scroll, touch)
+  // now resets an activity timestamp; if IDLE_TIMEOUT_MS passes with none,
+  // the stretch is flushed at the LAST real interaction, not "whenever we
+  // happened to notice" -- so an idle gap never gets counted as viewing
+  // time, however long it runs on before something else (a tab switch,
+  // visibilitychange) would otherwise have closed it out.
+  const IDLE_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes with no interaction = "stepped away"
+  const screenViewStartRef = useRef(null);
+  const lastActivityRef = useRef(Date.now());
+  useEffect(() => {
+    const now = Date.now();
+    trackUsage('screen_view', null, tab);
+    screenViewStartRef.current = now;
+    lastActivityRef.current = now;
+
+    // endTime defaults to "right now" for tab-switch/hidden/unload closes,
+    // where the moment we're flushing IS the moment it ended. The idle
+    // check below is the one caller that passes something else -- the
+    // timestamp of the last real interaction, since by the time the idle
+    // check notices, real time has already moved past when it actually
+    // ended.
+    const flushDuration = (endTime = Date.now()) => {
+      if (screenViewStartRef.current == null) return;
+      const durationMs = Math.max(0, endTime - screenViewStartRef.current);
+      trackUsage('screen_view_end', { durationMs }, tab);
+      screenViewStartRef.current = null;
+    };
+    // Never passed directly as a raw DOM event listener (a PageTransitionEvent
+    // as `endTime` would silently NaN the duration) -- always wrapped in a
+    // no-arg arrow below.
+    const onPageHide = () => flushDuration();
+    const onVisibility = () => {
+      if (document.hidden) flushDuration();
+      else { screenViewStartRef.current = Date.now(); lastActivityRef.current = Date.now(); }
+    };
+    const onActivity = () => {
+      lastActivityRef.current = Date.now();
+      // Resuming after an idle-timeout flush (still visible the whole
+      // time, just inactive) -- start a fresh stretch rather than staying
+      // permanently closed out until the next tab/visibility change.
+      if (screenViewStartRef.current == null && !document.hidden) screenViewStartRef.current = Date.now();
+    };
+    const idleCheck = setInterval(() => {
+      if (screenViewStartRef.current != null && Date.now() - lastActivityRef.current >= IDLE_TIMEOUT_MS) {
+        flushDuration(lastActivityRef.current);
+      }
+    }, 30 * 1000);
+
+    const activityEvents = ['mousemove', 'mousedown', 'keydown', 'touchstart'];
+    activityEvents.forEach((ev) => window.addEventListener(ev, onActivity, { passive: true }));
+    window.addEventListener('scroll', onActivity, { passive: true, capture: true });
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onPageHide);
+
+    return () => {
+      flushDuration();
+      clearInterval(idleCheck);
+      activityEvents.forEach((ev) => window.removeEventListener(ev, onActivity));
+      window.removeEventListener('scroll', onActivity, { capture: true });
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', onPageHide);
+    };
+  }, [tab]);
   const [jobs, setJobs] = useState([]);
   const [techs, setTechs] = useState([]);
   const [notes, setNotes] = useState([]);
@@ -611,7 +756,7 @@ function DispatchApp({ user, onLoggedOut }) {
   const [jobTech, setJobTech] = useState(() => loadViewState().jobTech ?? 'all');
   const [jobType, setJobType] = useState(() => loadViewState().jobType ?? 'all');
   const [jobFsStatus, setJobFsStatus] = useState(() => loadViewState().jobFsStatus ?? 'all');
-  // Infinite scroll on the jobs list — only the first `visibleCount` of `shown`
+  // Infinite scroll on the jobs list - only the first `visibleCount` of `shown`
   // are ever mounted. Everything's already loaded client-side (no server paging),
   // so "loading more" just raises this cap; no extra fetch involved.
   const [visibleCount, setVisibleCount] = useState(50);
@@ -670,7 +815,7 @@ function DispatchApp({ user, onLoggedOut }) {
   // refresh can't overwrite a change you just made but that hasn't saved yet.
   const pending = useRef(0);
 
-  // Infinite-scroll sentinel ref — the observer effect lives further down,
+  // Infinite-scroll sentinel ref - the observer effect lives further down,
   // after `shown` is computed (it needs shown.length to know when to re-attach).
   const scrollSentinelRef = useRef(null);
 
@@ -745,7 +890,7 @@ function DispatchApp({ user, onLoggedOut }) {
     }
   }, [closedFrom, closedTo]);
 
-  // A new search/filter is a new list — start from the top rather than keeping
+  // A new search/filter is a new list - start from the top rather than keeping
   // whatever scroll depth was reached under the previous one.
   useEffect(() => {
     setVisibleCount(50);
@@ -777,7 +922,15 @@ function DispatchApp({ user, onLoggedOut }) {
   useEffect(() => {
     if (selectedJobId) {
       const job = jobs.find((j) => j.id === selectedJobId);
-      if (job) setDraftJob(JSON.parse(JSON.stringify(job)));
+      if (job) {
+        setDraftJob(JSON.parse(JSON.stringify(job)));
+        // Fires once per open (this effect only re-runs when selectedJobId
+        // itself changes, not on every background `jobs` refresh) -- per
+        // direction 2026-08-27: this is the one place a job gets expanded
+        // to view from the calendar, so it's the single insertion point
+        // that covers every real "opened this job" click app-wide.
+        trackUsage('job_detail_open', { jobId: job.id, recordType: job.recordType ?? null });
+      }
     } else {
       setDraftJob(null);
       setDraftPendingAdd({ techIds: [], date: '', time: '', endTime: '' });
@@ -785,7 +938,7 @@ function DispatchApp({ user, onLoggedOut }) {
   }, [selectedJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    // Also loaded for the Accounts tab, not just Contacts — its "Change
+    // Also loaded for the Accounts tab, not just Contacts - its "Change
     // contact" picker needs the same contact directory ContactsTab uses.
     if ((tab !== 'contacts' && tab !== 'accounts') || contactsLoaded) return;
     setContactsLoading(true);
@@ -854,7 +1007,7 @@ function DispatchApp({ user, onLoggedOut }) {
       .finally(() => setQuotesLoading(false));
   }, [tab, quotesView, quotesLoadedView]);
 
-  // Re-fetched on every visit (not cached like contacts) — a stale queue defeats
+  // Re-fetched on every visit (not cached like contacts) - a stale queue defeats
   // the point of a negotiation panel where the office and tech take turns.
   const loadRequests = useCallback(async () => {
     setRequestsLoading(true);
@@ -962,7 +1115,7 @@ function DispatchApp({ user, onLoggedOut }) {
     return () => { cancelled = true; };
   }, [filter]);
 
-  // Stabilized with useCallback (empty deps — they only touch state setters and
+  // Stabilized with useCallback (empty deps - they only touch state setters and
   // the pending ref, both stable) so JobCard's React.memo below actually works:
   // an unstable handler prop defeats memoization for every row, not just one.
   const flash = useCallback((msg) => { setToast(msg); setTimeout(() => setToast(null), 2200); }, []);
@@ -1051,7 +1204,7 @@ function DispatchApp({ user, onLoggedOut }) {
 
   // Returns the updated job (or the original on failure) so callers adding
   // several assignments in one go (multi-day pick) can thread the result of
-  // one call into the next instead of reusing a stale `job` snapshot — since
+  // one call into the next instead of reusing a stale `job` snapshot - since
   // `updated` below is built by appending onto whatever `job.assignments`
   // was passed in, calling this repeatedly with the same stale `job` would
   // silently drop every add but the last.
@@ -1060,7 +1213,7 @@ function DispatchApp({ user, onLoggedOut }) {
     const tech = techs.find((t) => t.id === technicianId);
     try {
       // Compute derived status before the call so the server can update the SF Opp
-      // in the same request — eliminating the separate updateJob round-trip.
+      // in the same request - eliminating the separate updateJob round-trip.
       const tentative = { ...job, assignments: [...job.assignments, { workDate, completed: false }] };
       const derived = deriveJobStatusFromAssignments(tentative);
       const resp = await track(() => api.addAssignment(job.id, technicianId, workDate, startTime, endTime, derived.status, derived.scheduledDate));
@@ -1144,7 +1297,7 @@ function DispatchApp({ user, onLoggedOut }) {
   }, [flash, track, load]);
 
   // End time is required when *creating* a job assignment (see addAssignment
-  // routes), but existing rows may still predate that requirement — so
+  // routes), but existing rows may still predate that requirement - so
   // editing stays nullable/clearable here rather than forcing a value in.
   const setAssignmentEndTime = useCallback(async (job, a, time) => {
     const t = time || null;
@@ -1176,7 +1329,7 @@ function DispatchApp({ user, onLoggedOut }) {
       : j));
     try {
       await track(() => api.updateJob(job.id, fields));
-      flash(date ? 'Next date set — planned crew released' : 'Returned to queue');
+      flash(date ? 'Next date set - planned crew released' : 'Returned to queue');
     } catch (e) { flash(`Could not save date: ${e.message}`); load(true); }
   };
 
@@ -1227,7 +1380,7 @@ function DispatchApp({ user, onLoggedOut }) {
   const openFsLink = useCallback((jobId) => setFsLink({ jobId, query: '', searching: false, matches: null, error: null }), []);
   const closeFsLink = useCallback(() => setFsLink({ jobId: null, query: '', searching: false, matches: null, error: null }), []);
 
-  // Takes the query explicitly rather than reading fsLink.query via closure —
+  // Takes the query explicitly rather than reading fsLink.query via closure -
   // this and confirmFsLink below are passed to every JobCard, so if either
   // read fsLink from closure their reference would change on every keystroke
   // in the FS-search box, silently defeating React.memo for ALL job cards,
@@ -1424,7 +1577,7 @@ function DispatchApp({ user, onLoggedOut }) {
     return [...filtered].sort(sorters[sortBy] || sorters.scheduled);
   }, [jobs, extraJobs, viewingTerminal, filter, query, jobTech, jobType, jobFsStatus, closedFrom, closedTo, sortBy]);
 
-  // Re-attaches on every shown.length change (not just mount) — the sentinel
+  // Re-attaches on every shown.length change (not just mount) - the sentinel
   // <div> only exists in the DOM once shown.length > visibleCount, so a plain
   // mount-only effect could miss it entirely if the list started out short and
   // only grew past the cap later.
@@ -1478,7 +1631,7 @@ function DispatchApp({ user, onLoggedOut }) {
           <span className="lbl">Live · Salesforce</span>
           <SyncedAgo lastSync={lastSync} />
         </div>
-        <button className="acct-avatar" onClick={() => setAccountOpen(true)} title={`${user.name} — account`} aria-label="Account">
+        <button className="acct-avatar" onClick={() => setAccountOpen(true)} title={`${user.name} - account`} aria-label="Account">
           {initials(user.name)}
         </button>
       </header>
@@ -1491,6 +1644,8 @@ function DispatchApp({ user, onLoggedOut }) {
         <button className={`tab ${tab === 'accounts' ? 'active' : ''}`} onClick={() => setTab('accounts')}>Accounts</button>
         <button className={`tab ${tab === 'quotes' ? 'active' : ''}`} onClick={() => setTab('quotes')}>Quotes</button>
         <button className={`tab ${tab === 'parts' ? 'active' : ''}`} onClick={() => setTab('parts')}>Parts</button>
+        {user.isAdmin && <button className={`tab ${tab === 'billing' ? 'active' : ''}`} onClick={() => setTab('billing')}>Billing</button>}
+        {user.isAdmin && <button className={`tab ${tab === 'expense' ? 'active' : ''}`} onClick={() => setTab('expense')}>Expense Tracking</button>}
         {user.isAdmin && <button className={`tab ${tab === 'usage' ? 'active' : ''}`} onClick={() => setTab('usage')}>Usage</button>}
       </nav>
 
@@ -1590,8 +1745,8 @@ function DispatchApp({ user, onLoggedOut }) {
                   ariaLabel="Sort jobs"
                   options={[
                     ['scheduled', 'Scheduled date'],
-                    ['closedNew', 'closed — newest'],
-                    ['closedOld', 'closed — oldest'],
+                    ['closedNew', 'closed - newest'],
+                    ['closedOld', 'closed - oldest'],
                     ['lid', 'LID'],
                     ['name', 'Job name'],
                     ['fsStatus', 'FS status'],
@@ -1640,14 +1795,14 @@ function DispatchApp({ user, onLoggedOut }) {
               ))}
               <span className="chipdiv" />
               {TERMINAL_STATUSES.map((s) => (
-                <button key={s} className={`chip term ${filter === s ? 'on' : ''}`} onClick={() => setFilter(s)} title="Completed in Field Squared — view only">
+                <button key={s} className={`chip term ${filter === s ? 'on' : ''}`} onClick={() => setFilter(s)} title="Completed in Field Squared - view only">
                   {s}{filter === s && !extraLoading && <span className="ct">{shown.length}</span>}
                 </button>
               ))}
             </div>
 
             <div className="jobs">
-              {viewingTerminal && extraLoading && <div className="state">Loading completed jobs…</div>}
+              {viewingTerminal && extraLoading && <LoadingDots label="Loading completed jobs…" />}
               {!extraLoading && shown.length === 0 && <div className="empty">{query.trim() ? 'No jobs match that search.' : 'Nothing here.'}</div>}
               {!extraLoading && shown.slice(0, visibleCount).map((job) => (
                 <JobCard
@@ -1739,6 +1894,8 @@ function DispatchApp({ user, onLoggedOut }) {
             onUpdateRow={updateInventoryRow}
           />
         )}
+        {tab === 'billing' && user.isAdmin && <BillingReconciliation />}
+        {tab === 'expense' && user.isAdmin && <ExpenseTrackingTab />}
         {tab === 'usage' && user.isAdmin && <UsageDashboard refreshKey={usageRefresh} />}
       </main>
 
@@ -1766,15 +1923,17 @@ function DispatchApp({ user, onLoggedOut }) {
                   ? <span className="fs-badge linked" title={`FS task: ${draftJob.fsTaskId}`}>⬡ FS</span>
                   : <button className="fs-badge unlinked fs-attach-btn" title="Attach Field Squared job" onClick={() => fsLink.jobId === draftJob.id ? closeFsLink() : openFsLink(draftJob.id)}>⬡ Attach FS</button>}
                 <FsDriftBadge job={draftJob} />
-                <select
-                  className={`statussel ${draftJob.status ? statusClass(draftJob.status) : 'unset'}`}
+                <FilterSelect
                   value={draftJob.status}
-                  onChange={(e) => setDraftJob((d) => ({ ...d, status: e.target.value }))}
-                >
-                  {!draftJob.status && <option value="">Pick a status…</option>}
-                  {draftJob.status && !assignableStatusesFor(draftJob.recordType).includes(draftJob.status) && <option value={draftJob.status}>{draftJob.status}</option>}
-                  {assignableStatusesFor(draftJob.recordType).map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
+                  onChange={(v) => setDraftJob((d) => ({ ...d, status: v }))}
+                  options={[
+                    ...(draftJob.status && !assignableStatusesFor(draftJob.recordType).includes(draftJob.status) ? [[draftJob.status, draftJob.status]] : []),
+                    ...assignableStatusesFor(draftJob.recordType).map((s) => [s, s]),
+                  ]}
+                  placeholder="Pick a status…"
+                  triggerClassName={`statussel-pill ${draftJob.status ? statusClass(draftJob.status) : 'unset'}`}
+                  ariaLabel="Job status"
+                />
               </div>
               <button className="modal-close" onClick={cancelModal} aria-label="Close">×</button>
             </div>
@@ -1819,7 +1978,7 @@ function DispatchApp({ user, onLoggedOut }) {
                 {draftJob.closeDate && <span className="created">Close Date {fmtDate(draftJob.closeDate)}</span>}
                 <span className="nextlabel">Next scheduled</span>
                 <span className="dateinput ro" title="Next scheduled assignment date">
-                  {nextScheduledAssignmentDate(draftJob) ? fmtDate(nextScheduledAssignmentDate(draftJob)) : '—'}
+                  {nextScheduledAssignmentDate(draftJob) ? fmtDate(nextScheduledAssignmentDate(draftJob)) : '-'}
                 </span>
                 {nextScheduledAssignmentDate(draftJob)
                   ? <span className="created">Scheduled {fmtDate(nextScheduledAssignmentDate(draftJob))}</span>
@@ -1845,7 +2004,7 @@ function DispatchApp({ user, onLoggedOut }) {
                             assignments: d.assignments.map((x) => x.assignmentId === a.assignmentId ? { ...x, completed: nowCompleted } : x),
                           };
                         })}
-                        title={a.completed ? 'Worked this day — click to reopen' : 'Mark as worked (freezes the date)'}
+                        title={a.completed ? 'Worked this day - click to reopen' : 'Mark as worked (freezes the date)'}
                         aria-label="Toggle done"
                       >{a.completed ? '✓' : '○'}</button>
                       <span className="aname">{a.technicianName || 'Tech'}</span>
@@ -1974,7 +2133,7 @@ function DispatchApp({ user, onLoggedOut }) {
 
 // First non-blank line is the title shown in the notes list; the rest (if any)
 // is a short preview snippet. Mirrors how Claude Code titles a chat from its
-// first message — no separate title field to keep in sync.
+// first message - no separate title field to keep in sync.
 function noteTitleAndPreview(text) {
   const lines = (text || '').split('\n').map((l) => l.trim()).filter(Boolean);
   const title = lines[0] || 'Untitled note';
@@ -2158,7 +2317,7 @@ function NotesMenu({ notes, onRefresh, onNewNote, onOpenNote }) {
 
   return (
     <div className="notes-menu-wrap" ref={wrapRef}>
-      <button className="refresh" onClick={() => setOpen((o) => !o)} title="Shared team notes — visible to everyone on the board">
+      <button className="refresh" onClick={() => setOpen((o) => !o)} title="Shared team notes - visible to everyone on the board">
         Notes{notes.length > 0 ? ` (${notes.length})` : ''}
       </button>
       {open && createPortal(
@@ -2185,7 +2344,7 @@ function NotesMenu({ notes, onRefresh, onNewNote, onOpenNote }) {
           )}
           <div className="notes-pop-list">
             {notes.length === 0 && (
-              <div className="notes-pop-empty">No notes yet — click "+ New note" to add one.</div>
+              <div className="notes-pop-empty">No notes yet - click "+ New note" to add one.</div>
             )}
             {notes.length > 0 && filtered.length === 0 && (
               <div className="notes-pop-empty">No notes match "{query}".</div>
@@ -2223,7 +2382,7 @@ function NoteEditModal({ note, jobs, onSaved, onDeleted, onClose }) {
   // linked to a job that's fallen off that list (closed, etc.), append it
   // synthetically from the note's own record so the picker still shows it.
   const jobOptions = useMemo(() => {
-    const base = jobs.map((j) => [j.id, j.lid ? `${j.name} — LID ${j.lid}` : j.name]);
+    const base = jobs.map((j) => [j.id, j.lid ? `${j.name} - LID ${j.lid}` : j.name]);
     if (note.opportunityId && !base.some(([id]) => id === note.opportunityId)) {
       base.push([note.opportunityId, note.opportunityName || 'Linked opportunity']);
     }
@@ -2279,7 +2438,7 @@ function NoteEditModal({ note, jobs, onSaved, onDeleted, onClose }) {
             autoFocus
           />
           <div className="notes-job-link">
-            {/* Checkbox is purely derived from whether an opportunity is picked below — it's never toggled directly. */}
+            {/* Checkbox is purely derived from whether an opportunity is picked below - it's never toggled directly. */}
             <label className="notes-job-check">
               <input type="checkbox" checked={!!opportunityId} disabled readOnly />
               <span>Belongs to a specific opportunity</span>
@@ -2311,11 +2470,11 @@ function NoteEditModal({ note, jobs, onSaved, onDeleted, onClose }) {
 }
 
 // Add/edit/remove technicians, including a hand-picked hex color per tech
-// (shown on the /tv warehouse calendar — a tech with no color set there
+// (shown on the /tv warehouse calendar - a tech with no color set there
 // falls back to a deterministic auto-generated one). "Remove" is a soft
 // delete (Active__c = false via PATCH /technicians/:id) rather than an SF
 // record delete, since Job_Assignment__c/Schedule_Request__c both hold
-// lookups to Technician__c — removed techs stay listed here (with a
+// lookups to Technician__c - removed techs stay listed here (with a
 // "Removed" badge) so they can be reactivated.
 function ManageTechsModal({ onClose, onChanged }) {
   const [techs, setTechs] = useState([]);
@@ -2353,7 +2512,7 @@ function ManageTechsModal({ onClose, onChanged }) {
   }, []);
 
   const fsUserOptions = useMemo(() =>
-    fsUsers.map((u) => [u.externalId, u.userType ? `${u.name} — ${u.userType}` : u.name])
+    fsUsers.map((u) => [u.externalId, u.userType ? `${u.name} - ${u.userType}` : u.name])
   , [fsUsers]);
 
   const startEdit = (t) => {
@@ -2441,7 +2600,7 @@ function ManageTechsModal({ onClose, onChanged }) {
         </div>
         <div className="modal-body">
           {loading ? (
-            <span className="fs-users-loading">Loading technicians…</span>
+            <LoadingDots label="Loading technicians…" inline />
           ) : (
             <div className="manage-techs-list">
               {techs.map((t) => (
@@ -2463,7 +2622,7 @@ function ManageTechsModal({ onClose, onChanged }) {
                         autoFocus
                       />
                       {fsUsersLoading ? (
-                        <span className="fs-users-loading">Loading FS roster…</span>
+                        <LoadingDots label="Loading FS roster…" inline />
                       ) : (
                         <SearchableSelect
                           value={draft.fsUserId}
@@ -2512,7 +2671,7 @@ function ManageTechsModal({ onClose, onChanged }) {
                 placeholder="Full name, matching Salesforce"
               />
               {fsUsersLoading ? (
-                <span className="fs-users-loading">Loading FS roster…</span>
+                <LoadingDots label="Loading FS roster…" inline />
               ) : (
                 <SearchableSelect
                   value={newFsId}
@@ -2537,7 +2696,7 @@ function ManageTechsModal({ onClose, onChanged }) {
       <div className="modal-backdrop" onClick={() => !pwBusy && setPwTech(null)}>
         <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
           <div className="modal-header">
-            <div className="modal-title-row"><span className="jname">Board password — {pwTech.name}</span></div>
+            <div className="modal-title-row"><span className="jname">Board password - {pwTech.name}</span></div>
             <button className="modal-close" onClick={() => setPwTech(null)} aria-label="Close" disabled={pwBusy}>×</button>
           </div>
           <div className="modal-body">
@@ -2611,13 +2770,13 @@ function useAnchoredPopover(minWidth = 180) {
 // is [value, label][]. When `resetOnSelect` (the Range preset "action" select),
 // the trigger always shows `placeholder` and selecting fires onChange without
 // retaining a value.
-function FilterSelect({ value, onChange, options, placeholder, resetOnSelect = false, ariaLabel }) {
+function FilterSelect({ value, onChange, options, placeholder, resetOnSelect = false, ariaLabel, triggerClassName = '' }) {
   const { open, setOpen, pos, wrapRef, popRef } = useAnchoredPopover(180);
   const current = resetOnSelect ? null : options.find(([v]) => v === value);
   const label = current ? current[1] : (placeholder ?? '');
   return (
     <div className="fsel-wrap" ref={wrapRef}>
-      <button type="button" className={`fsel-trigger ${current ? '' : 'placeholder'}`} aria-label={ariaLabel} onClick={() => setOpen((o) => !o)}>
+      <button type="button" className={`fsel-trigger ${current ? '' : 'placeholder'} ${triggerClassName}`.trim()} aria-label={ariaLabel} onClick={() => setOpen((o) => !o)}>
         <span className="fsel-val">{label}</span>
         <span className="fsel-caret" aria-hidden>▾</span>
       </button>
@@ -2758,7 +2917,19 @@ const SearchableSelect = React.memo(function SearchableSelect({ value, onChange,
   useEffect(() => {
     if (!open) return;
     const rect = wrapRef.current.getBoundingClientRect();
-    const POP_WIDTH = Math.max(rect.width, 340);
+    // Floor lowered from 340 to 230 -- per direction 2026-08-27, a second,
+    // real cause behind "inputs extend across almost the whole modal" on
+    // top of the .req-field stretch bug fixed separately: .ss-input is only
+    // 180px wide, but this floor forced the dropdown panel itself to render
+    // at least 340px wide regardless -- nearly double the trigger, and
+    // close to the FULL WIDTH of a .modal-sm (max-width 420px). That's not
+    // an invisible-hitbox illusion, it's the panel genuinely rendering that
+    // wide with its own visible background. 230px still gives real room
+    // over the 180px input for longer option labels (which already ellipsis
+    // via .ss-option's text-overflow, so some truncation on long names was
+    // already the accepted baseline, not a new tradeoff) without dominating
+    // a small modal.
+    const POP_WIDTH = Math.max(rect.width, 230);
     let left = rect.left;
     if (left + POP_WIDTH > window.innerWidth - 8) left = window.innerWidth - POP_WIDTH - 8;
     if (left < 8) left = 8;
@@ -2794,7 +2965,16 @@ const SearchableSelect = React.memo(function SearchableSelect({ value, onChange,
     // scrollable list sitting next to this component, like ManageTechs' or
     // Contacts') scrolling underneath it should close it -- the body-scroll
     // lock below already rules out plain page scroll as a cause.
-    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    // ALSO ignore wrapRef -- confirmed live 2026-08-24, the real bug behind
+    // an "exact match doesn't show" report: once typed/pasted text exceeds
+    // the visible width of `.ss-input`, the browser auto-scrolls the text
+    // box to keep the caret visible, which fires a genuine native `scroll`
+    // event ON THE INPUT ITSELF. Capture-phase listeners on window still see
+    // it even though 'scroll' doesn't bubble, so without this guard, typing
+    // or pasting anything wide enough to overflow the box closed the
+    // dropdown instantly -- nothing to do with an ancestor container
+    // scrolling at all.
+    const close = (e) => { if (popRef.current?.contains(e.target) || wrapRef.current?.contains(e.target)) return; setOpen(false); };
     window.addEventListener('scroll', close, true);
     window.addEventListener('resize', close);
     return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
@@ -2890,10 +3070,81 @@ const SearchableSelect = React.memo(function SearchableSelect({ value, onChange,
   );
 });
 
+// Searchable multi-select - merges SearchableSelect's search-as-you-type
+// filtering (App.jsx:2744) with TechMultiSelect's chip/toggle multi-select UX
+// (App.jsx:2709), via the same useAnchoredPopover hook both already use.
+// Neither existing component covers "searchable + multi" on its own; built
+// for the Create PO opportunity picker, which can legitimately span several
+// jobs at once.
+function OppMultiSelect({ value, onChange, options, placeholder = 'Search & select opportunities…' }) {
+  const { open, setOpen, pos, wrapRef, popRef } = useAnchoredPopover(340);
+  const [query, setQuery] = useState('');
+  const [visibleCount, setVisibleCount] = useState(40);
+  const selected = value || [];
+  const toggle = (id) => onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  const matches = useMemo(
+    () => options.filter(([, label]) => label.toLowerCase().includes(query.toLowerCase())),
+    [options, query]
+  );
+  useEffect(() => { setVisibleCount(40); }, [open, query]);
+  const selectedLabels = selected.map((id) => [id, options.find(([oid]) => oid === id)?.[1]]).filter(([, l]) => l);
+
+  return (
+    <div className="oppms-wrap" ref={wrapRef}>
+      <button type="button" className={`oppms-trigger ${selected.length ? 'has-sel' : ''}`} onClick={() => setOpen((o) => !o)}>
+        <span className="oppms-val">
+          {selected.length === 0 ? placeholder : selected.length === 1 ? selectedLabels[0]?.[1] : `${selected.length} opportunities selected`}
+        </span>
+        <span className="oppms-caret" aria-hidden>▾</span>
+      </button>
+      {selected.length > 0 && (
+        <div className="oppms-chips">
+          {selectedLabels.map(([id, label]) => (
+            <span className="oppms-chip" key={id}>
+              {label}
+              <button type="button" onClick={() => toggle(id)} aria-label={`Remove ${label}`}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      {open && createPortal(
+        <div className="oppms-menu" ref={popRef}
+          style={{ left: pos.left, width: pos.width, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}>
+          <input
+            className="oppms-search"
+            type="text"
+            autoFocus
+            placeholder="Search opportunities…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <div className="oppms-list">
+            {matches.length === 0
+              ? <div className="ss-empty">No matches</div>
+              : matches.slice(0, visibleCount).map(([id, label]) => {
+                  const on = selected.includes(id);
+                  return (
+                    <button key={id} type="button" role="menuitemcheckbox" aria-checked={on}
+                      className={`oppms-opt ${on ? 'on' : ''}`} onClick={() => toggle(id)}>
+                      <span className="oppms-check" aria-hidden>{on ? '✓' : ''}</span>{label}
+                    </button>
+                  );
+                })}
+            {visibleCount < matches.length && (
+              <button type="button" className="oppms-more" onClick={() => setVisibleCount((c) => c + 40)}>Show more…</button>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
 const WEEKDAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
 // Custom calendar dropdown replacing native <input type="date"> everywhere in the
-// app — the native picker can't be restyled to match the rest of the site, so
+// app - the native picker can't be restyled to match the rest of the site, so
 // this renders its own month grid instead. `value`/`onChange` are ISO date
 // strings ('YYYY-MM-DD' or '' for empty), same contract as a date input.
 const DatePicker = React.memo(function DatePicker({ value, onChange, placeholder = 'Select date', className = '', clearable = true }) {
@@ -2907,7 +3158,7 @@ const DatePicker = React.memo(function DatePicker({ value, onChange, placeholder
   const popRef = useRef(null);
 
   // Popup is portaled to <body> and fixed-positioned from the trigger's own
-  // coordinates — cards like .job use overflow:hidden for their rounded status
+  // coordinates - cards like .job use overflow:hidden for their rounded status
   // stripe, which would otherwise clip an absolutely-positioned dropdown. Flips
   // above the trigger (anchored with `bottom` instead of `top`) when there's
   // more room there than below, and caps `maxHeight` to whichever side it
@@ -3427,7 +3678,7 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
 
   const hasFilter = search || parentFilter || accountFilter || lidFilter;
 
-  // A new search/filter is a new list — start from the top, same as the
+  // A new search/filter is a new list - start from the top, same as the
   // jobs list does.
   useEffect(() => {
     setVisibleCount(50);
@@ -3446,7 +3697,7 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
   return (
     <section>
       <div className="view-head">
-        <div><h2>Contacts</h2><p>{loading ? 'Loading…' : `${contacts.length} contacts from Salesforce`}</p></div>
+        <div><h2>Contacts</h2><p>{loading ? <LoadingDots label="Loading…" inline /> : `${contacts.length} contacts from Salesforce`}</p></div>
       </div>
 
       <div className="contacts-toolbar">
@@ -3537,7 +3788,7 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
                   </td>
                   <td>
                     {c.accounts.length === 0
-                      ? <span className="na">—</span>
+                      ? <span className="na">-</span>
                       : <div className="contact-buildings">
                           <button className="buildings-toggle" onClick={() => toggle(c.id)}>
                             <span className="buildings-chevron">{expanded.has(c.id) ? '▾' : '▸'}</span>
@@ -3603,7 +3854,7 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
                           <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
                         </div>
                       : <span className="contact-editable" onClick={() => startEdit(c.id, 'phone', formatPhone(c.phone))}>
-                          {c.phone ? <a href={`tel:${c.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(c.phone)}</a> : <span className="na">—</span>}
+                          {c.phone ? <a href={`tel:${c.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(c.phone)}</a> : <span className="na">-</span>}
                         </span>}
                   </td>
                   <td>
@@ -3616,7 +3867,7 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
                           <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
                         </div>
                       : <span className="contact-editable" onClick={() => startEdit(c.id, 'email', c.email)}>
-                          {c.email ? <a href={`mailto:${c.email}`} className="contact-link" onClick={(e) => e.preventDefault()}>{c.email}</a> : <span className="na">—</span>}
+                          {c.email ? <a href={`mailto:${c.email}`} className="contact-link" onClick={(e) => e.preventDefault()}>{c.email}</a> : <span className="na">-</span>}
                         </span>}
                   </td>
                 </tr>
@@ -3632,7 +3883,7 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
 
 // Lists every contact whose standard AccountId lookup points at this account
 // (plus the legacy Property_Contact_Name__c contact, tagged, if it's not
-// already in that set) — modeled directly on NotesMenu's portaled-popup
+// already in that set) - modeled directly on NotesMenu's portaled-popup
 // pattern (position/click-outside/scroll-lock effects, .notes-pop* CSS).
 function AccountContactsMenu({ accountId, contacts, contactDirectory, propertyContactId, propertyContactName, onOpenContact, onLinkContact }) {
   const [open, setOpen] = useState(false);
@@ -3650,7 +3901,7 @@ function AccountContactsMenu({ accountId, contacts, contactDirectory, propertyCo
     return contacts;
   }, [contacts, propertyContactId, propertyContactName]);
 
-  // Only offer contacts not already shown in this account's own list — picking
+  // Only offer contacts not already shown in this account's own list - picking
   // an already-linked one would just be a same-value no-op.
   const linkedIds = useMemo(() => new Set(allContacts.map((c) => c.id)), [allContacts]);
   const contactOptions = useMemo(() =>
@@ -3795,12 +4046,12 @@ function AccountContactsMenu({ accountId, contacts, contactDirectory, propertyCo
   );
 }
 
-// AP contact — a single-value Contact lookup living directly on the Account,
+// AP contact - a single-value Contact lookup living directly on the Account,
 // but backed by one of two different SF fields depending on the account's own
 // kind: Accounts_Payable_Contact_Name__c for management/Customer accounts,
 // AP_Contact__c for LID/property accounts (a LID account's AP contact can
 // genuinely differ from its parent management company's, so this never
-// inherits/copies from the parent — each account reads and writes its own
+// inherits/copies from the parent - each account reads and writes its own
 // field). Unlike AccountContactsMenu, this menu also owns the reassignment
 // picker (same inline search-and-pick UI the old Property Contact block used
 // to have).
@@ -3813,7 +4064,7 @@ function PaymentContactMenu({ account, contacts, onOpenContact, onChangeAccountC
   const wrapRef = useRef(null);
   const popRef = useRef(null);
 
-  // Which literal SF field this account's AP contact writes to — the backend
+  // Which literal SF field this account's AP contact writes to - the backend
   // (GET /accounts) already resolved apContactId/apContactName using the same
   // RecordType check, so this just has to agree with that for writes.
   const apField = account.recordType === 'LID_Account' ? 'apLid' : 'apManagement';
@@ -3895,7 +4146,7 @@ function PaymentContactMenu({ account, contacts, onOpenContact, onChangeAccountC
       <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         {contactName
           ? <button className="linklike" onClick={() => { setOpen(false); onOpenContact(contactId); }}>{contactName}</button>
-          : <span className="na">—</span>}
+          : <span className="na">-</span>}
         <button
           className="change-contact-btn"
           onClick={() => {
@@ -3969,18 +4220,18 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [lidFilter, setLidFilter] = useState('');
-  // Filters which management-company dropdowns show — unlike the other
+  // Filters which management-company dropdowns show - unlike the other
   // filters above, it never narrows the accounts *inside* a matching group.
   const [companyFilter, setCompanyFilter] = useState('');
   const [showOverdue, setShowOverdue] = useState(false);
   const [showReadyToBill, setShowReadyToBill] = useState(false);
   const [expanded, setExpanded] = useState(new Set());
   const [editing, setEditing] = useState(null); // { accountId, field, value }
-  // Id only, not a snapshot — so if the contact is edited (in this popup or
+  // Id only, not a snapshot - so if the contact is edited (in this popup or
   // elsewhere) while it's open, the popup re-derives the latest record from
   // `contactsById` on every render instead of showing stale data.
   const [viewingContactId, setViewingContactId] = useState(null);
-  // { accountId, kind: 'unpaid' | 'readyToBill' } | null — id-based for the
+  // { accountId, kind: 'unpaid' | 'readyToBill' } | null - id-based for the
   // same reason as viewingContactId above.
   const [viewingBilling, setViewingBilling] = useState(null);
 
@@ -4069,14 +4320,14 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   // the search just found.
   const searchNarrowed = search.trim().length > 0 && filtered.length > 0 && filtered.length <= 5;
 
-  // A management company is just an Account like any other — it can carry
+  // A management company is just an Account like any other - it can carry
   // its own unpaidJobs/readyToBillJobs (billed directly to the company, not
   // to one of its buildings). Grouping purely by `a.parentId` would only
   // ever place an account as a *child*; it'd never recognize that an
   // account's own id might *be* a group key, burying the company's own
   // billing data under "No Management Company." managementCompanyIds is
   // built from the full `accounts` list (not `filtered`) purely to *identify*
-  // which accounts are companies — whether one actually shows as its own
+  // which accounts are companies - whether one actually shows as its own
   // group's anchor still depends on it passing the current filter, same as
   // any other account (an account that doesn't match the filter shouldn't
   // linger at the top of a group just because one of its children did).
@@ -4106,7 +4357,7 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
     return list;
   }, [filtered, managementCompanyIds]);
 
-  // Picks which dropdowns show, at the group level only — a matching
+  // Picks which dropdowns show, at the group level only - a matching
   // group's accounts are never narrowed by this, unlike the filters above.
   const visibleGroups = useMemo(() => {
     if (!companyFilter.trim()) return groups;
@@ -4114,7 +4365,7 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
     return groups.filter((g) => g.name.toLowerCase().includes(q));
   }, [groups, companyFilter]);
 
-  // Windowed rendering of the group list itself — mirrors the Jobs list /
+  // Windowed rendering of the group list itself - mirrors the Jobs list /
   // Contacts tab / SearchableSelect pattern so typing a broad query doesn't
   // force every management-company header (and its badge-count math) to
   // mount at once.
@@ -4169,7 +4420,7 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
     }
     return (
       <span className="contact-editable" onClick={() => startEdit(a.id, field, value)}>
-        {value ? value : <span className="na">—</span>}
+        {value ? value : <span className="na">-</span>}
       </span>
     );
   }, [editing, onEditKey, commitEdit, startEdit]);
@@ -4202,9 +4453,9 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
             />
           </div>
         </td>
-        <td>{a.type ?? <span className="na">—</span>}</td>
-        <td>{a.lid ? <span className="lidtag">LID {a.lid}</span> : <span className="na">—</span>}</td>
-        <td>{addressLine(a) ? (search.trim() ? highlightMatch(addressLine(a), search) : addressLine(a)) : <span className="na">—</span>}</td>
+        <td>{a.type ?? <span className="na">-</span>}</td>
+        <td>{a.lid ? <span className="lidtag">LID {a.lid}</span> : <span className="na">-</span>}</td>
+        <td>{addressLine(a) ? (search.trim() ? highlightMatch(addressLine(a), search) : addressLine(a)) : <span className="na">-</span>}</td>
         <td>
           {editing?.accountId === a.id && editing?.field === 'phone'
             ? <div className="contact-edit-row">
@@ -4215,7 +4466,7 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
                 <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
               </div>
             : <span className="contact-editable" onClick={() => startEdit(a.id, 'phone', formatPhone(a.phone))}>
-                {a.phone ? <a href={`tel:${a.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(a.phone)}</a> : <span className="na">—</span>}
+                {a.phone ? <a href={`tel:${a.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(a.phone)}</a> : <span className="na">-</span>}
               </span>}
         </td>
         <td>
@@ -4243,7 +4494,7 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
               <span>Zip: {editableCell(a, 'zip', a.zip)}</span>
               <span>Website: {editableCell(a, 'website', a.website)}</span>
               <span>Industry: {editableCell(a, 'industry', a.industry)}</span>
-              <span>Management company: {a.parentName ?? <span className="na">—</span>}</span>
+              <span>Management company: {a.parentName ?? <span className="na">-</span>}</span>
             </div>
           </td>
         </tr>
@@ -4254,7 +4505,7 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   return (
     <section>
       <div className="view-head">
-        <div><h2>Accounts</h2><p>{loading ? 'Loading…' : `${accounts.length} accounts from Salesforce`}</p></div>
+        <div><h2>Accounts</h2><p>{loading ? <LoadingDots label="Loading…" inline /> : `${accounts.length} accounts from Salesforce`}</p></div>
       </div>
 
       <div className="contacts-toolbar">
@@ -4360,20 +4611,20 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
 
 const AccountGroupSection = React.memo(function AccountGroupSection({ name, accounts, renderRow, forceOpen }) {
   const [open, setOpen] = useState(false);
-  // Own visibleCount/sentinel, scoped to this group only — "No Management
+  // Own visibleCount/sentinel, scoped to this group only - "No Management
   // Company" alone can hold thousands of accounts, while most groups are
   // small enough to just render in full once opened.
   const [visibleCount, setVisibleCount] = useState(50);
   const sentinelRef = useRef(null);
 
   // A narrowed search (see searchNarrowed in AccountsTab) flips this true so
-  // the group holding the match(es) opens itself — doesn't fight a manual
+  // the group holding the match(es) opens itself - doesn't fight a manual
   // collapse afterward since it only fires on the false->true transition.
   useEffect(() => {
     if (forceOpen) setOpen(true);
   }, [forceOpen]);
 
-  // Total overdue/ready-to-bill *jobs* across the group — counting invoices
+  // Total overdue/ready-to-bill *jobs* across the group - counting invoices
   // instead used to make the badge vanish entirely for jobs that don't have
   // an Invoicing__c record on file yet, even though they still need billing.
   // Memoized because "No Management Company" can hold thousands of accounts
@@ -4432,7 +4683,7 @@ function BillingJobsModal({ account, kind, onClose }) {
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <div className="modal-header">
-          <div className="modal-title-row"><span className="jname">{title} — {account.name}</span></div>
+          <div className="modal-title-row"><span className="jname">{title} - {account.name}</span></div>
           <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
         </div>
         <div className="modal-body">
@@ -4449,20 +4700,31 @@ function BillingJobsModal({ account, kind, onClose }) {
 
 function JobInvoiceRow({ job }) {
   const [open, setOpen] = useState(false);
+  const [showInvoiceModal, setShowInvoiceModal] = useState(false);
+  const [invoiceWarn, setInvoiceWarn] = useState(null);
+  const flashInvoiceWarn = (msg) => { setInvoiceWarn(msg); setTimeout(() => setInvoiceWarn(null), 2600); };
   return (
     <div className="mgmt-group">
       <button className="mgmt-group-header" onClick={() => setOpen((o) => !o)}>
         <span className="mgmt-group-chevron">{open ? '▾' : '▸'}</span>
-        <OppLink className="mgmt-group-name" style={{ fontWeight: 400 }} id={job.id} name={job.name} />
+        <span className="mgmt-group-name" style={{ fontWeight: 400 }}><OppLink id={job.id} name={job.name} /></span>
         <span className="mgmt-group-count">{job.invoices.length} {job.invoices.length === 1 ? 'invoice' : 'invoices'}</span>
       </button>
       {open && (
         <div style={{ padding: '10px 14px' }}>
+          <button
+            type="button"
+            className={`fs-badge inv-badge${job.fsTaskId ? '' : ' inv-badge-nofs'}`}
+            title={job.fsTaskId ? 'Draft an invoice from Field Squared completion data' : 'Field Squared must be attached to this job before an invoice can be drafted'}
+            onClick={() => job.fsTaskId ? setShowInvoiceModal(true) : flashInvoiceWarn('Field Squared must be attached to this job before an invoice can be drafted.')}
+          >+ Create Invoice</button>
           {job.invoices.length === 0
             ? <div className="na">No invoice on file</div>
             : job.invoices.map((inv) => <InvoiceDetail key={inv.id} invoice={inv} />)}
         </div>
       )}
+      {showInvoiceModal && <CreateInvoiceModal job={job} onClose={() => setShowInvoiceModal(false)} />}
+      {invoiceWarn && <div className="toast">{invoiceWarn}</div>}
     </div>
   );
 }
@@ -4485,7 +4747,7 @@ function InvoiceDetail({ invoice }) {
       {fields.map(([label, value]) => (
         <div key={label} className="invoice-detail-row">
           <span className="invoice-detail-label">{label}</span>
-          <span className="invoice-detail-value">{value ?? <span className="na">—</span>}</span>
+          <span className="invoice-detail-value">{value ?? <span className="na">-</span>}</span>
         </div>
       ))}
     </div>
@@ -4512,7 +4774,7 @@ function ContactInfoModal({ contact, accounts, onUpdateContact, onClose }) {
     }
   };
 
-  // Escape here is "cancel this field's edit," not "close the popup" — stop
+  // Escape here is "cancel this field's edit," not "close the popup" - stop
   // it from also reaching the parent's close-on-Escape listener.
   const onEditKey = (e) => {
     if (e.key === 'Enter') commitEdit();
@@ -4538,7 +4800,7 @@ function ContactInfoModal({ contact, accounts, onUpdateContact, onClose }) {
     }
     return (
       <span className="contact-editable" onClick={() => startEdit(field, value)}>
-        {value ? value : <span className="na">{opts?.placeholder ?? '—'}</span>}
+        {value ? value : <span className="na">{opts?.placeholder ?? '-'}</span>}
       </span>
     );
   };
@@ -4640,7 +4902,7 @@ function RequestRow({ req, jobs, onApprove, onCounter, onDeny }) {
     catch { setBusy(false); }
   };
 
-  const jobLabel = req.isTimeOff ? 'Time off' : req.isNewWo ? 'New WO Required' : (req.jobName || '—');
+  const jobLabel = req.isTimeOff ? 'Time off' : req.isNewWo ? 'New WO Required' : (req.jobName || '-');
   const jobLabelCls = req.isTimeOff ? 'timeoff' : req.isNewWo ? 'newwo' : '';
 
   return (
@@ -4748,7 +5010,7 @@ function RequestRow({ req, jobs, onApprove, onCounter, onDeny }) {
 
 function requestJobLabel(req) {
   return {
-    label: req.isTimeOff ? 'Time off' : req.isNewWo ? 'New WO Required' : (req.jobName || '—'),
+    label: req.isTimeOff ? 'Time off' : req.isNewWo ? 'New WO Required' : (req.jobName || '-'),
     cls: req.isTimeOff ? 'timeoff' : req.isNewWo ? 'newwo' : '',
   };
 }
@@ -4777,7 +5039,7 @@ function PreviousRequestRow({ req }) {
 }
 
 function RequestsTab({ requests, jobs, loading, onApprove, onCounter, onDeny, previousRequests, previousLoading, previousLoaded, onLoadPrevious }) {
-  // Oldest first — age is the pressure that keeps the approve/counter/deny loop moving.
+  // Oldest first - age is the pressure that keeps the approve/counter/deny loop moving.
   const sorted = useMemo(() => [...requests].sort((a, b) => (b.ageHours || 0) - (a.ageHours || 0)), [requests]);
   const [activeOpen, setActiveOpen] = useState(true);
   // Previous requests are deliberately not part of the default view -- start
@@ -4844,7 +5106,7 @@ function RequestsTab({ requests, jobs, loading, onApprove, onCounter, onDeny, pr
         </button>
         {previousOpen && (
           <>
-            {previousLoading && <div className="state">Loading previous requests…</div>}
+            {previousLoading && <LoadingDots label="Loading previous requests…" />}
             {!previousLoading && previousLoaded && previousRequests.length === 0 && (
               <div className="empty">No resolved requests yet.</div>
             )}
@@ -4878,8 +5140,8 @@ function Schedule({ jobs, techs, onJobClick, onAssign }) {
   const [expandedMonths, setExpandedMonths] = useState(() => Array(12).fill(false));
 
   // Approved time off is invisible to the jobs API (the sentinel opp isn't in
-  // jobStatusValues), so it's fetched separately here — once, shared by both
-  // Week and Month views — for whichever range is currently in view.
+  // jobStatusValues), so it's fetched separately here - once, shared by both
+  // Week and Month views - for whichever range is currently in view.
   const [timeOff, setTimeOff] = useState([]);
   const [editingOff, setEditingOff] = useState(null);
   const [addingOff, setAddingOff] = useState(false);
@@ -4957,10 +5219,12 @@ function Schedule({ jobs, techs, onJobClick, onAssign }) {
           <button className="navbtn" onClick={() => shift(1)} aria-label="Next">›</button>
         </div>
         <div className="rangelabel">{rangeLabel(mode, anchor)}</div>
-        <select className="techfilter" value={techFilter} onChange={(e) => setTechFilter(e.target.value)}>
-          <option value="all">All technicians</option>
-          {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-        </select>
+        <FilterSelect
+          value={techFilter}
+          onChange={setTechFilter}
+          options={[['all', 'All technicians'], ...techs.map((t) => [t.id, t.name])]}
+          ariaLabel="Technician filter"
+        />
         <div className="seg">
           <button className={`segbtn ${mode === 'week' ? 'on' : ''}`} onClick={() => setMode('week')}>Week</button>
           <button className={`segbtn ${mode === 'month' ? 'on' : ''}`} onClick={() => setMode('month')}>Month</button>
@@ -5141,7 +5405,7 @@ function AddTimeOffModal({ techs, onClose, onCreated }) {
       return;
     }
     if (failed.length > 0) {
-      setErr(`Saved ${dates.length - failed.length} of ${dates.length} day(s) — failed: ${failed.join(', ')}.`);
+      setErr(`Saved ${dates.length - failed.length} of ${dates.length} day(s) - failed: ${failed.join(', ')}.`);
       setSaving(false);
       await onCreated();
       return;
@@ -5160,10 +5424,13 @@ function AddTimeOffModal({ techs, onClose, onCreated }) {
         <div className="modal-body">
           <label className="req-field req-field-wide">
             <span className="req-field-label">Technician</span>
-            <select className="techfilter" value={technicianId} onChange={(e) => setTechnicianId(e.target.value)}>
-              <option value="">Select a technician…</option>
-              {techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
+            <FilterSelect
+              value={technicianId}
+              onChange={setTechnicianId}
+              options={techs.map((t) => [t.id, t.name])}
+              placeholder="Select a technician…"
+              ariaLabel="Technician"
+            />
           </label>
           <label className="req-field req-field-wide">
             <span className="req-field-label">Date(s)</span>
@@ -5280,7 +5547,7 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
   const grid = useMemo(() => {
     const m = {};
     jobs.forEach((job) => job.assignments.forEach((a) => {
-      if (!a.workDate) return; // unscheduled assignment — not on the calendar
+      if (!a.workDate) return; // unscheduled assignment - not on the calendar
       ((m[a.technicianId] ||= {})[a.workDate] ||= []).push({ name: job.name, startTime: a.startTime || '07:00', jobId: job.id, completed: !!a.completed });
     }));
     // sort each cell by start time
@@ -5292,7 +5559,7 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
 
   // techId -> iso -> time-off entry, overlaid on the calendar below. Indexed
   // from the `timeOff` prop (fetched once by the parent Schedule component
-  // for whatever range — week or month — is currently in view).
+  // for whatever range - week or month - is currently in view).
   const timeOffByTechDate = useMemo(() => {
     const m = {};
     timeOff.forEach((r) => {
@@ -5330,7 +5597,7 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
                 return (
                   <td key={iso} className={cls}>
                     {off && (
-                      <div className="offchip" title="Approved time off — click to edit" onClick={() => onEditOff(off)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onEditOff(off)}>
+                      <div className="offchip" title="Approved time off - click to edit" onClick={() => onEditOff(off)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onEditOff(off)}>
                         Off
                       </div>
                     )}
@@ -5432,7 +5699,7 @@ function MonthGrid({ jobs, anchor, techFilter, onJobClick, timeOff, onEditOff })
           <div className={`daycell ${out ? 'out' : ''} ${iso === todayIso ? 'today' : ''}`} key={iso}>
             <div className="daynum">{d.getDate()}</div>
             {offItems.map((r) => (
-              <div className="dayoff" key={r.id} title={`${r.technicianName} — time off, click to edit`} onClick={() => onEditOff(r)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onEditOff(r)}>
+              <div className="dayoff" key={r.id} title={`${r.technicianName} - time off, click to edit`} onClick={() => onEditOff(r)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onEditOff(r)}>
                 <span className="jn">{r.technicianName}</span>
               </div>
             ))}
@@ -5466,7 +5733,7 @@ function MonthGrid({ jobs, anchor, techFilter, onJobClick, timeOff, onEditOff })
   );
 }
 
-// Quotes with no due date sort after every dated quote, list-view only —
+// Quotes with no due date sort after every dated quote, list-view only -
 // the calendar view can't place them at all, so they're simply omitted there.
 const quoteSortKey = (q) => q.dueDate || '9999-99-99';
 
@@ -5770,17 +6037,23 @@ function QuotesWeekGrid({ quotes, anchor, onQuoteClick }) {
 // A changed value flows through routes.js's normal PATCH /jobs/:id
 // write-through, so an FS-linked opportunity gets pushed to FS too.
 function QuoteStatusSelect({ status, onChange }) {
+  // The wrapping stopPropagation still works for the portaled option menu --
+  // createPortal content bubbles through the React tree (this component),
+  // not the DOM tree, so a card row's own onClick below it never sees these.
   return (
-    <select
-      className={`statussel ${statusClass(status)}`}
-      value={status}
-      onClick={(e) => e.stopPropagation()}
-      onChange={(e) => { e.stopPropagation(); onChange(e.target.value); }}
-    >
-      <option value="Needs Quote">Needs Quote</option>
-      <option value="Ready for Review">Ready for Review</option>
-      <option value="Pending Customer Approval">Pending Customer Approval</option>
-    </select>
+    <div onClick={(e) => e.stopPropagation()}>
+      <FilterSelect
+        value={status}
+        onChange={onChange}
+        options={[
+          ['Needs Quote', 'Needs Quote'],
+          ['Ready for Review', 'Ready for Review'],
+          ['Pending Customer Approval', 'Pending Customer Approval'],
+        ]}
+        triggerClassName={`statussel-pill ${statusClass(status)}`}
+        ariaLabel="Quote status"
+      />
+    </div>
   );
 }
 
@@ -5910,7 +6183,7 @@ function QuoteRecipientButton({ quote, label, title, users, usersLoaded, onLoadU
               </div>
             )}
             <div className="icp-list">
-              {!usersLoaded && <div className="notes-pop-empty">Loading…</div>}
+              {!usersLoaded && <div className="notes-pop-empty"><LoadingDots inline /></div>}
               {usersLoaded && filtered.map((u) => (
                 <button key={u.id} type="button" className="icp-option" onClick={(e) => { e.stopPropagation(); toggleUser(u); }}>
                   <span className="icp-name">{u.name}</span>
@@ -6107,7 +6380,7 @@ function QuoteDocumentsBadge({ quoteId }) {
         >
           <div className="notes-pop-list">
             {loadError && <div className="notes-pop-err">{loadError}</div>}
-            {!loadError && !loaded && <div className="notes-pop-empty">Loading…</div>}
+            {!loadError && !loaded && <div className="notes-pop-empty"><LoadingDots inline /></div>}
             {!loadError && loaded && docs.length === 0 && <div className="notes-pop-empty">No documents</div>}
             {!loadError && docs.map((doc) => (
               <div className="notes-pop-row" key={doc.id}>
@@ -6131,23 +6404,24 @@ function QuoteDocumentsBadge({ quoteId }) {
   );
 }
 
-// Shared by AddInventoryModal/CheckoutModal — Service Stock unshifted onto
+// Shared by AddInventoryModal/CheckoutModal - Service Stock unshifted onto
 // the front (not pushed) so it sorts first in SearchableSelect's own
 // order-preserving filter, mirroring how NoteEditModal prepends the
 // currently-linked opportunity when it's missing from `jobs`.
 function buildOppOptions(jobs, serviceStock) {
-  const base = jobs.map((j) => [j.id, j.lid ? `${j.name} — LID ${j.lid}` : j.name]);
+  const base = jobs.map((j) => [j.id, j.lid ? `${j.name} - LID ${j.lid}` : j.name]);
   if (serviceStock && !base.some(([id]) => id === serviceStock.id)) base.unshift([serviceStock.id, serviceStock.name]);
   return base;
 }
 
 function catalogOptionsFor(catalog) {
-  return catalog.map((p) => [p.id, p.code ? `${p.code} — ${p.name}` : p.name]);
+  return catalog.map((p) => [p.id, p.code ? `${p.code} - ${p.name}` : p.name]);
 }
 
 function PartsTab({ groups, loading, jobs, techs, catalog, serviceStock, onRefresh, onUpdateRow }) {
   const [addingInventory, setAddingInventory] = useState(false);
   const [checkingOut, setCheckingOut] = useState(false);
+  const [creatingPO, setCreatingPO] = useState(false);
   const [search, setSearch] = useState('');
 
   // Filters each group's own rows down to matches on part # or name, then
@@ -6174,7 +6448,7 @@ function PartsTab({ groups, loading, jobs, techs, catalog, serviceStock, onRefre
       <div className="view-head">
         <div>
           <h2>Parts</h2>
-          <p>{loading ? 'Loading…' : `${groups.length} location${groups.length === 1 ? '' : 's'} with inventory on file`}</p>
+          <p>{loading ? <LoadingDots label="Loading…" inline /> : `${groups.length} location${groups.length === 1 ? '' : 's'} with inventory on file`}</p>
         </div>
         <div className="view-head-actions">
           <div className="searchbox" style={{ marginBottom: 0 }}>
@@ -6187,6 +6461,7 @@ function PartsTab({ groups, loading, jobs, techs, catalog, serviceStock, onRefre
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
+          <button className="refresh" onClick={() => setCreatingPO(true)}>+ Create PO</button>
           <button className="refresh" onClick={() => setAddingInventory(true)}>+ Add Inventory</button>
           <button className="refresh" onClick={() => setCheckingOut(true)}>+ Part Checkout</button>
         </div>
@@ -6218,6 +6493,13 @@ function PartsTab({ groups, loading, jobs, techs, catalog, serviceStock, onRefre
           serviceStock={serviceStock}
           onClose={() => setCheckingOut(false)}
           onSaved={async () => { setCheckingOut(false); await onRefresh(); }}
+        />
+      )}
+      {creatingPO && (
+        <CreatePOModal
+          jobs={jobs}
+          serviceStock={serviceStock}
+          onClose={() => setCreatingPO(false)}
         />
       )}
     </section>
@@ -6265,7 +6547,7 @@ const InventoryGroupSection = React.memo(function InventoryGroupSection({ group,
     <div className="mgmt-group">
       <button className="mgmt-group-header" onClick={() => setOpen((o) => !o)}>
         <span className="mgmt-group-chevron">{open ? '▾' : '▸'}</span>
-        <OppLink className="mgmt-group-name" id={group.opportunityId} name={group.opportunityName} />
+        <span className="mgmt-group-name"><OppLink id={group.opportunityId} name={group.opportunityName} /></span>
         {group.opportunityLid && <span className="lidtag">LID {group.opportunityLid}</span>}
         <span className="mgmt-group-count">{group.rows.length} part{group.rows.length === 1 ? '' : 's'}</span>
       </button>
@@ -6285,7 +6567,7 @@ const InventoryGroupSection = React.memo(function InventoryGroupSection({ group,
             <tbody>
               {group.rows.map((r) => (
                 <tr key={r.id}>
-                  <td>{r.productCode || '—'}</td>
+                  <td>{r.productCode || '-'}</td>
                   <td>{r.productName}</td>
                   <td>
                     {editing?.rowId === r.id
@@ -6303,8 +6585,8 @@ const InventoryGroupSection = React.memo(function InventoryGroupSection({ group,
                         </div>
                       : <span className="contact-editable" onClick={() => startEdit(r)}>{r.quantity}</span>}
                   </td>
-                  <td>{r.price != null ? `$${Number(r.price).toFixed(2)}` : '—'}</td>
-                  <td>{r.poNumber || '—'}</td>
+                  <td>{r.price != null ? `$${Number(r.price).toFixed(2)}` : '-'}</td>
+                  <td>{r.poNumber || '-'}</td>
                   <td>{r.poUploaded ? 'Yes' : 'No'}</td>
                 </tr>
               ))}
@@ -6533,6 +6815,879 @@ function CheckoutModal({ jobs, techs, catalog, serviceStock, onClose, onSaved })
     </div>
   );
 }
+
+// ===================== Create PO (QBO purchasing) =====================
+
+// Cheap case-insensitive substring match used for "suggest, never auto-commit"
+// vendor/project hints (see the purchase-order plan: QBO Vendor/Project names
+// don't reliably string-match SF's) -- this only ever produces a clickable
+// suggestion, never a preselected value.
+function suggestMatch(needle, list, getLabel) {
+  if (!needle) return null;
+  const n = needle.toLowerCase();
+  return list.find((item) => getLabel(item).toLowerCase().includes(n)) || null;
+}
+
+// One selected Opportunity's quote-pick row, for CreatePOModal's "quotes"
+// step. Always shows every quote as an explicit choice -- even when there's
+// only one -- per direction: no silent "most recent" auto-pick, since
+// Awarded_Quote__c can't be trusted to identify the right one (confirmed
+// live: it's a display string, not a working lookup).
+function OppQuotePicker({ opp, value, onChange }) {
+  return (
+    <div className="po-opp-block">
+      <div className="po-opp-head">
+        <span className="po-opp-name">{opp.name}</span>
+        {opp.lid && <span className="lidtag">LID {opp.lid}</span>}
+      </div>
+      {opp.quotes.length === 0 && (
+        <div className="po-opp-noquote">No Salesforce quote found for this job - lines will be entered manually.</div>
+      )}
+      <div className="po-quote-list">
+        {opp.quotes.map((q) => (
+          <button key={q.id} type="button" className={`po-quote-opt ${value === q.id ? 'on' : ''}`} onClick={() => onChange(q.id)}>
+            <span className="po-quote-check" aria-hidden>{value === q.id ? '✓' : ''}</span>
+            <span className="po-quote-main">
+              <span className="po-quote-num">#{q.quoteNumber || q.name}</span>
+              <span className="po-quote-date">{q.createdDate ? q.createdDate.slice(0, 10) : ''}</span>
+              <span className="po-quote-total">${Number(q.grandTotal || 0).toFixed(2)}</span>
+            </span>
+            {q.vendors.length > 0 && <span className="po-quote-vendors">{q.vendors.join(', ')}</span>}
+          </button>
+        ))}
+        <button type="button" className={`po-quote-opt po-quote-manual ${value === 'manual' ? 'on' : ''}`} onClick={() => onChange('manual')}>
+          <span className="po-quote-check" aria-hidden>{value === 'manual' ? '✓' : ''}</span>
+          Enter lines manually for this job
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// One opportunity's Project resolution, for CreatePOModal's "projects" step.
+// If the Opportunity already carries a stored QBO_Project_Id__c (po-source's
+// `qboProjectId`), that's used with no prompt -- it's the crosswalk the first
+// PO against a job writes back, so every later one is instant. Only
+// opportunities with no stored crosswalk reach the picker below.
+// Runs before line/cost entry (see CreatePOModal's step order) -- resolving
+// or creating the Project for every selected Opportunity up front, so the
+// only thing left by the time the user reaches costs is the rate itself.
+// Auto-loads silently when a crosswalk already exists (opp.qboProjectId);
+// otherwise leads with a "doesn't exist yet, create it?" prompt (per
+// direction), not a neutral existing-vs-new toggle -- "use an existing
+// project instead" is offered as a secondary, collapsed escape hatch for the
+// rarer case a real Project already exists in QBO but was never crosswalked.
+function ProjectPickForOpp({ opp, projectsData, value, onChange }) {
+  const [showExisting, setShowExisting] = useState(false);
+
+  const existingName = useMemo(() => {
+    if (!opp.qboProjectId) return null;
+    return projectsData.projects.find((p) => p.id === opp.qboProjectId)?.name || opp.qboProjectId;
+  }, [opp.qboProjectId, projectsData]);
+
+  const projectOptions = useMemo(() => projectsData.projects.map((p) => [p.id, p.fullyQualifiedName]), [projectsData]);
+  const parentOptions = useMemo(() => projectsData.parents.map((p) => [p.id, p.name]), [projectsData]);
+  const suggestedParent = useMemo(
+    () => (opp.accountName ? suggestMatch(opp.accountName, projectsData.parents, (p) => p.name) : null),
+    [opp.accountName, projectsData]
+  );
+
+  // First render for an unresolved Opportunity: default straight into "new",
+  // pre-filled with a sensible name/parent guess -- still fully editable,
+  // and creation only actually happens once the user reaches Preview/Create.
+  useEffect(() => {
+    if (!existingName && !value) {
+      onChange({ mode: 'new', displayName: opp.address?.street || opp.name, parentCustomerId: suggestedParent?.id || '' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [existingName, opp.id]);
+
+  if (existingName) {
+    return (
+      <div className="po-opp-block">
+        <div className="po-opp-head"><span className="po-opp-name">{opp.name}</span></div>
+        <div className="po-project-existing">✓ Project loaded automatically: <strong>{existingName}</strong></div>
+      </div>
+    );
+  }
+
+  const mode = value?.mode || 'new';
+
+  return (
+    <div className="po-opp-block">
+      <div className="po-opp-head"><span className="po-opp-name">{opp.name}</span></div>
+      <div className="po-project-prompt">No QBO project found for this job yet - create it?</div>
+
+      {mode === 'new' && (
+        <div className="po-newproject">
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">New project name</span>
+            <input className="req-note-input" type="text" value={value?.displayName ?? ''} onChange={(e) => onChange({ mode: 'new', displayName: e.target.value, parentCustomerId: value?.parentCustomerId || '' })} />
+          </label>
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Under QBO customer</span>
+            <SearchableSelect value={value?.parentCustomerId || ''} onChange={(v) => onChange({ mode: 'new', displayName: value?.displayName ?? '', parentCustomerId: v })} options={parentOptions} placeholder="Search QBO customers…" />
+          </label>
+          {suggestedParent && !value?.parentCustomerId && (
+            <button type="button" className="po-suggest" onClick={() => onChange({ mode: 'new', displayName: value?.displayName ?? '', parentCustomerId: suggestedParent.id })}>
+              Suggested: {suggestedParent.name} · Use
+            </button>
+          )}
+        </div>
+      )}
+
+      {!showExisting ? (
+        <button type="button" className="po-suggest" onClick={() => { setShowExisting(true); onChange({ mode: 'existing', projectId: '' }); }}>
+          Project already exists in QBO? Search for it instead
+        </button>
+      ) : (
+        <>
+          <SearchableSelect value={mode === 'existing' ? (value?.projectId || '') : ''} onChange={(v) => onChange({ mode: 'existing', projectId: v })} options={projectOptions} placeholder="Search QBO projects…" />
+          <button type="button" className="po-suggest" onClick={() => { setShowExisting(false); onChange({ mode: 'new', displayName: opp.address?.street || opp.name, parentCustomerId: suggestedParent?.id || '' }); }}>
+            Back to creating a new project
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+const PO_STEP_ORDER = ['opps', 'quotes', 'projects', 'lines', 'preview'];
+
+// "+ Create PO" -- multi-opportunity -> per-opp quote pick -> per-opp Project
+// resolution -> auto-populated, vendor-grouped line pool -> preview -> create.
+// Project resolution happens BEFORE line/cost entry (per direction) so the
+// only manual work left on the lines screen is the rate itself -- SKU, item,
+// and description all come prefilled from the quote. The largest modal in
+// this cluster because a QBO PurchaseOrder is single-vendor but may
+// legitimately draw lines from several jobs at once, each needing its own
+// Project (QBO's per-job sub-Customer) stamped on its own lines -- see the
+// purchase-order plan for the full design rationale.
+function CreatePOModal({ jobs, serviceStock, onClose }) {
+  const [step, setStep] = useState('opps');
+  const [oppIds, setOppIds] = useState([]);
+  const [poSource, setPoSource] = useState(null);
+  const [quotePick, setQuotePick] = useState({}); // oppId -> quoteId | 'manual'
+  const [lines, setLines] = useState([]); // [{key, opportunityId, description, quantity, unitCost}]
+  const [qboVendors, setQboVendors] = useState([]);
+  const [qboVendorId, setQboVendorId] = useState('');
+  // SFDC_Vendor__c -- the real-world vendor object the org's own "CRS
+  // Purchase Order" write-back links to, a completely separate system from
+  // QBO's own Vendor above (no shared crosswalk field between them,
+  // confirmed live 2026-08-26). Suggested by name-match once a QBO vendor is
+  // picked, always user-confirmable, never auto-committed.
+  const [sfdcVendors, setSfdcVendors] = useState([]);
+  const [sfdcVendorId, setSfdcVendorId] = useState('');
+  // Cost_Center__c -- a hard SF validation rule on "CRS Purchase Order"
+  // requires this (found live 2026-08-21: create fails outright without
+  // it). Only 11 real options, mostly vendor-named -- suggested by name
+  // match the same way, but REQUIRED to submit (unlike the SFDC vendor
+  // picker, which is optional) since the whole SF write-back predictably
+  // fails without it.
+  const [costCenters, setCostCenters] = useState([]);
+  const [costCenterId, setCostCenterId] = useState('');
+  const [qboProjectsData, setQboProjectsData] = useState({ projects: [], parents: [] });
+  const [qboItems, setQboItems] = useState([]);
+  const [projectChoice, setProjectChoice] = useState({}); // oppId -> {mode, projectId} | {mode, displayName, parentCustomerId}
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [result, setResult] = useState(null);
+
+  const oppOptions = useMemo(() => buildOppOptions(jobs, serviceStock), [jobs, serviceStock]);
+  const itemOptions = useMemo(() => qboItems.map((i) => [i.id, i.sku ? `${i.sku} - ${i.name}` : i.name]), [qboItems]);
+
+  useEffect(() => {
+    api.getQboVendors().then(setQboVendors).catch(() => {});
+    api.getSfdcVendors().then(setSfdcVendors).catch(() => {});
+    api.getCostCenters().then(setCostCenters).catch(() => {});
+    api.getQboProjects().then(setQboProjectsData).catch(() => {});
+    api.getQboItems().then(setQboItems).catch(() => {});
+  }, []);
+
+  // Suggest a matching SFDC_Vendor__c by name once a QBO Vendor is picked --
+  // never overwrites a choice the user already made themselves.
+  useEffect(() => {
+    if (!qboVendorId || sfdcVendorId || sfdcVendors.length === 0) return;
+    const qboVendorName = qboVendors.find((v) => v.id === qboVendorId)?.name;
+    const suggested = suggestMatch(qboVendorName, sfdcVendors, (v) => v.name);
+    if (suggested) setSfdcVendorId(suggested.id);
+  }, [qboVendorId, sfdcVendors, qboVendors, sfdcVendorId]);
+
+  // Suggest a matching Cost Center the same way -- confirmed live 2026-08-26,
+  // 35/40 real records match their vendor's name exactly. Tries the SFDC
+  // vendor name first (once picked), falling back to the QBO vendor name.
+  useEffect(() => {
+    if (costCenterId || costCenters.length === 0) return;
+    const sfdcVendorName = sfdcVendors.find((v) => v.id === sfdcVendorId)?.name;
+    const qboVendorName = qboVendors.find((v) => v.id === qboVendorId)?.name;
+    const suggested = suggestMatch(sfdcVendorName, costCenters, (c) => c.name)
+      || suggestMatch(qboVendorName, costCenters, (c) => c.name);
+    if (suggested) setCostCenterId(suggested.id);
+  }, [sfdcVendorId, qboVendorId, costCenters, sfdcVendors, qboVendors, costCenterId]);
+
+  // Opportunities with zero quotes are always effectively "manual" -- stamp
+  // that in as soon as poSource loads so quotesReady doesn't block on them.
+  useEffect(() => {
+    if (!poSource) return;
+    setQuotePick((qp) => {
+      let changed = false;
+      const next = { ...qp };
+      for (const o of poSource) {
+        if (o.quotes.length === 0 && next[o.id] !== 'manual') { next[o.id] = 'manual'; changed = true; }
+      }
+      return changed ? next : qp;
+    });
+  }, [poSource]);
+
+  const goBack = () => setStep((s) => PO_STEP_ORDER[Math.max(0, PO_STEP_ORDER.indexOf(s) - 1)]);
+
+  const loadQuotes = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const data = await api.getPoSource(oppIds);
+      setPoSource(data);
+      setQuotePick({});
+      setStep('quotes');
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const quotesReady = poSource && poSource.every((o) => o.quotes.length === 0 || quotePick[o.id]);
+  const oppById = useMemo(() => new Map((poSource || []).map((o) => [o.id, o])), [poSource]);
+
+  const projectsReady = oppIds.every((oid) => {
+    const opp = oppById.get(oid);
+    if (opp?.qboProjectId) return true;
+    const pc = projectChoice[oid];
+    if (!pc) return false;
+    return pc.mode === 'existing' ? !!pc.projectId : !!(pc.displayName?.trim() && pc.parentCustomerId);
+  });
+
+  // Runs after Project resolution (per direction: projects before costs).
+  // Pools every material line the backend returns (already excludes
+  // labor/overhead by Product2.Family server-side -- see purchaseOrders.js;
+  // Vendor__c alone was too unreliable to gate on, only ~54% of real lines
+  // carry one). SKU/item/description prefill for every line; the office
+  // decides what actually belongs on THIS vendor's PO by removing rows, not
+  // by an automated vendor gate. The QBO Vendor field still suggests the
+  // most common vendor tag seen among the pooled lines, since a PO is
+  // single-vendor in QBO -- but it's a suggestion, never a filter.
+  const loadLines = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const quoteIds = Object.values(quotePick).filter((v) => v !== 'manual');
+      const results = await Promise.all(quoteIds.map((qid) => api.getQuoteLines(qid)));
+      const linesByQuoteId = new Map(quoteIds.map((qid, i) => [qid, results[i]]));
+      const pooled = [];
+      for (const o of poSource) {
+        const pick = quotePick[o.id];
+        if (pick === 'manual' || !pick) continue;
+        for (const l of linesByQuoteId.get(pick) || []) pooled.push({ ...l, opportunityId: o.id, opportunityName: o.name });
+      }
+      setLines(
+        pooled.map((l) => ({
+          key: crypto.randomUUID(),
+          opportunityId: l.opportunityId,
+          // The Salesforce quote line this row came from -- shown fixed,
+          // right next to the QBO item picker, so it's always visible which
+          // real part is being added. sourceCode/sourceName are shown as two
+          // distinct fields, never joined into one string -- everything
+          // here is a real value pulled from an existing record, not
+          // authored by this app.
+          sourceCode: l.code,
+          sourceName: l.name,
+          sourceVendor: l.vendor,
+          // Real, single field -- the matched QBO Item's own Description
+          // when there's a match, else Salesforce's own Product2.Description
+          // (see purchaseOrders.js) -- never a code+name concatenation.
+          description: l.description,
+          quantity: l.quantity || 1,
+          unitCost: '',
+          itemId: l.itemId || '',
+          itemName: l.itemName || '',
+          // No match -- offer to create this exact product as a new QBO Item
+          // (per direction) instead of silently falling back to a generic
+          // account line. Prefilled from Salesforce, fully editable. `code`
+          // is the ONE field the user edits and becomes both the new Item's
+          // Name and Sku (matching how real items in this org actually look
+          // -- Name IS the SKU-like code on almost every one; a distinct Sku
+          // is rare). Left blank (not silently filled with the long product
+          // name) when Salesforce has no real code, so there's no confusing
+          // fallback -- the user has to type a real one.
+          newItem: l.itemId ? null : { productId: l.productId, code: l.code || '', description: l.description },
+          searchingItem: false,
+        }))
+      );
+
+      const vendorCounts = new Map();
+      for (const l of pooled) if (l.vendor) vendorCounts.set(l.vendor, (vendorCounts.get(l.vendor) || 0) + 1);
+      const topVendor = [...vendorCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (topVendor) {
+        const suggested = suggestMatch(topVendor, qboVendors, (x) => x.name);
+        if (suggested) setQboVendorId((cur) => cur || suggested.id);
+      }
+      setStep('lines');
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addManualLine = () => setLines((ls) => [...ls, {
+    key: crypto.randomUUID(), opportunityId: oppIds.length === 1 ? oppIds[0] : '', sourceCode: null, sourceName: null, sourceVendor: null,
+    description: '', quantity: 1, unitCost: '', itemId: '', itemName: '', newItem: null, searchingItem: true,
+  }]);
+  const updateLine = (key, field, value) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, [field]: value } : l)));
+  // Picking a real existing Item clears any pending newItem -- an explicit
+  // match always wins over creating a duplicate. Item picks carry both id
+  // and name -- the name is what ends up on the QBO line if this Item
+  // lookup ever goes stale, and it's what the preview step shows without
+  // needing qboItems loaded a second time.
+  const updateLineItem = (key, itemId) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, itemId, itemName: qboItems.find((i) => i.id === itemId)?.name || '', newItem: itemId ? null : l.newItem } : l)));
+  const updateLineNewItem = (key, field, value) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, newItem: { ...l.newItem, [field]: value } } : l)));
+  const toggleSearchItem = (key) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, searchingItem: !l.searchingItem } : l)));
+  const removeLine = (key) => setLines((ls) => ls.filter((l) => l.key !== key));
+
+  const linesValid = lines.length > 0 && lines.every((l) => {
+    if (!l.opportunityId || !l.description.trim() || !(Number(l.quantity) > 0) || !(Number(l.unitCost) >= 0)) return false;
+    if (!l.itemId && l.newItem && !l.newItem.code?.trim()) return false; // pending creation needs a SKU/code
+    return true;
+  });
+
+  const projectLabelFor = (oid) => {
+    const opp = oppById.get(oid);
+    if (opp?.qboProjectId) return qboProjectsData.projects.find((p) => p.id === opp.qboProjectId)?.name || opp.qboProjectId;
+    const pc = projectChoice[oid];
+    if (!pc) return '-';
+    if (pc.mode === 'existing') return qboProjectsData.projects.find((p) => p.id === pc.projectId)?.fullyQualifiedName || pc.projectId;
+    const parentName = qboProjectsData.parents.find((p) => p.id === pc.parentCustomerId)?.name || pc.parentCustomerId;
+    return `NEW - ${pc.displayName} under ${parentName}`;
+  };
+
+  const grandTotal = lines.reduce((sum, l) => sum + Number(l.quantity || 0) * Number(l.unitCost || 0), 0);
+
+  const create = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      trackUsage('create_po');
+      const body = {
+        vendorId: qboVendorId,
+        sfdcVendorId: sfdcVendorId || undefined,
+        costCenterId: costCenterId || undefined,
+        lines: lines.map((l) => {
+          const opp = oppById.get(l.opportunityId);
+          const pc = projectChoice[l.opportunityId];
+          const base = {
+            opportunityId: l.opportunityId, description: l.description.trim(), quantity: Number(l.quantity), unitCost: Number(l.unitCost),
+            itemId: l.itemId || undefined, itemName: l.itemName || undefined,
+            newItem: (!l.itemId && l.newItem)
+              ? { productId: l.newItem.productId, code: l.newItem.code?.trim(), description: l.newItem.description?.trim() || undefined }
+              : undefined,
+          };
+          if (opp?.qboProjectId) return { ...base, projectId: opp.qboProjectId };
+          if (pc.mode === 'existing') return { ...base, projectId: pc.projectId };
+          return { ...base, newProject: { displayName: pc.displayName.trim(), parentCustomerId: pc.parentCustomerId } };
+        }),
+      };
+      const res = await api.createPurchaseOrder(body);
+      setResult(res);
+      setStep('done');
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={() => !busy && onClose()}>
+      <div className="modal modal-po" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Create PO</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={busy}>×</button>
+        </div>
+        <div className="modal-body">
+
+          {step === 'opps' && (
+            <label className="req-field req-field-wide">
+              <span className="req-field-label">Opportunities</span>
+              <OppMultiSelect value={oppIds} onChange={setOppIds} options={oppOptions} />
+            </label>
+          )}
+
+          {step === 'quotes' && poSource && (
+            <>
+              <p className="po-step-hint">Pick which quote to build each job's lines from (or enter that job's lines manually).</p>
+              {poSource.map((o) => (
+                <OppQuotePicker key={o.id} opp={o} value={quotePick[o.id]} onChange={(v) => setQuotePick((qp) => ({ ...qp, [o.id]: v }))} />
+              ))}
+            </>
+          )}
+
+          {step === 'projects' && (
+            <>
+              <p className="po-step-hint">Each selected job needs a QBO project - this is what ties purchase cost back to the right job. Resolve these first, then the line list is ready to go.</p>
+              {oppIds.map((oid) => (
+                <ProjectPickForOpp
+                  key={oid}
+                  opp={oppById.get(oid)}
+                  projectsData={qboProjectsData}
+                  value={projectChoice[oid]}
+                  onChange={(v) => setProjectChoice((pc) => ({ ...pc, [oid]: v }))}
+                />
+              ))}
+            </>
+          )}
+
+          {step === 'lines' && (
+            <>
+              <p className="po-step-hint">Every line from the selected quote(s) is listed below - remove any that don't belong on this PO, then enter each one's cost. A QBO PO covers one vendor, so lines for a different vendor should come off this one.</p>
+
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">QBO Vendor for this PO</span>
+                <SearchableSelect value={qboVendorId} onChange={setQboVendorId} options={qboVendors.map((v) => [v.id, v.name])} placeholder="Search QBO vendors…" />
+              </label>
+
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Salesforce Vendor (CRS Purchase Order record) - optional</span>
+                <SearchableSelect value={sfdcVendorId} onChange={setSfdcVendorId} options={sfdcVendors.map((v) => [v.id, v.name])} placeholder="Search Salesforce vendors…" />
+              </label>
+
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Cost Center (CRS Purchase Order record)</span>
+                <SearchableSelect value={costCenterId} onChange={setCostCenterId} options={costCenters.map((c) => [c.id, c.name])} placeholder="Search cost centers…" />
+              </label>
+
+              {lines.map((l) => (
+                <div className="po-line" key={l.key}>
+                  <div className="po-line-source-row">
+                    <span className={`po-line-source ${l.sourceName ? '' : 'po-line-source-manual'}`}>
+                      {l.sourceName ? (
+                        <>
+                          <span className="po-line-source-tag">From quote</span>
+                          {l.sourceCode && <span className="po-line-source-code">{l.sourceCode}</span>}
+                          <span className="po-line-source-name">{l.sourceName}</span>
+                          {l.sourceVendor && <span className="po-line-source-vendor">{l.sourceVendor}</span>}
+                        </>
+                      ) : 'Manual line - no source product'}
+                    </span>
+                    <span className="po-line-arrow" aria-hidden>→</span>
+                    <div className="po-line-item">
+                      {l.itemId || l.searchingItem ? (
+                        <>
+                          <SearchableSelect value={l.itemId} onChange={(v) => updateLineItem(l.key, v)} options={itemOptions} placeholder="Search QBO item / SKU…" />
+                          {!l.itemId && l.newItem && (
+                            <button type="button" className="po-suggest" onClick={() => toggleSearchItem(l.key)}>Back to creating a new item</button>
+                          )}
+                        </>
+                      ) : l.newItem ? (
+                        <div className="po-line-newitem">
+                          <div className="po-line-newitem-prompt">No QBO item found - create it?</div>
+                          <input className="req-note-input" type="text" placeholder="SKU / part #" value={l.newItem.code} onChange={(e) => updateLineNewItem(l.key, 'code', e.target.value)} />
+                          <input className="req-note-input" type="text" placeholder="Description" value={l.newItem.description} onChange={(e) => updateLineNewItem(l.key, 'description', e.target.value)} />
+                          <button type="button" className="po-suggest" onClick={() => toggleSearchItem(l.key)}>Already exists in QBO? Search instead</button>
+                        </div>
+                      ) : (
+                        <SearchableSelect value={l.itemId} onChange={(v) => updateLineItem(l.key, v)} options={itemOptions} placeholder="Search QBO item / SKU to add…" />
+                      )}
+                    </div>
+                  </div>
+                  <div className="po-line-row">
+                    {oppIds.length > 1 && (
+                      <select className="techfilter po-line-opp" value={l.opportunityId} onChange={(e) => updateLine(l.key, 'opportunityId', e.target.value)}>
+                        <option value="">Job…</option>
+                        {(poSource || []).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                      </select>
+                    )}
+                    <input className="req-note-input po-line-desc" type="text" placeholder="Description" value={l.description} onChange={(e) => updateLine(l.key, 'description', e.target.value)} />
+                    <input className="req-note-input po-line-qty" type="number" min="0" placeholder="Qty" value={l.quantity} onChange={(e) => updateLine(l.key, 'quantity', e.target.value)} />
+                    <input className="req-note-input po-line-cost" type="number" min="0" step="0.01" placeholder="Unit cost" value={l.unitCost} onChange={(e) => updateLine(l.key, 'unitCost', e.target.value)} />
+                    <button type="button" className="req-btn" onClick={() => removeLine(l.key)}>Remove</button>
+                  </div>
+                  {!l.itemId && !l.newItem && (
+                    <div className="po-line-hint">No QBO item selected - this line will post to the generic "Materials" account instead of a specific part. Search above to pick or create one.</div>
+                  )}
+                </div>
+              ))}
+              <button type="button" className="req-btn" onClick={addManualLine}>+ Add line</button>
+            </>
+          )}
+
+          {step === 'preview' && (
+            <>
+              <div className="po-preview-vendor">Vendor: <strong>{qboVendors.find((v) => v.id === qboVendorId)?.name}</strong></div>
+              <div className="po-scroll">
+                <table className="po-preview-table">
+                  <thead>
+                    <tr><th>Job</th><th>QBO Item</th><th>Description</th><th>Qty</th><th>Unit cost</th><th>Total</th><th>Project</th></tr>
+                  </thead>
+                  <tbody>
+                    {lines.map((l) => {
+                      const label = projectLabelFor(l.opportunityId);
+                      return (
+                        <tr key={l.key}>
+                          <td>{oppById.get(l.opportunityId)?.name}</td>
+                          <td>
+                            {l.itemName
+                              ? l.itemName
+                              : l.newItem
+                              ? <span className="po-new-badge">NEW - {l.newItem.code}</span>
+                              : <span className="po-new-badge">Materials (generic)</span>}
+                          </td>
+                          <td>{l.description}</td>
+                          <td>{l.quantity}</td>
+                          <td>${Number(l.unitCost || 0).toFixed(2)}</td>
+                          <td>${(Number(l.quantity || 0) * Number(l.unitCost || 0)).toFixed(2)}</td>
+                          <td>{label.startsWith('NEW -') ? <span className="po-new-badge">{label}</span> : label}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr><td colSpan={5}>Total</td><td colSpan={2}>${grandTotal.toFixed(2)}</td></tr>
+                  </tfoot>
+                </table>
+              </div>
+            </>
+          )}
+
+          {step === 'done' && result && (
+            <div className="po-done">
+              <p>Purchase Order <strong>{result.docNumber || `#${result.id}`}</strong> created in QuickBooks.</p>
+              {result.sfWriteWarning && <div className="inv-caution">{result.sfWriteWarning}</div>}
+              <a className="modal-save-btn po-done-link" href={`https://qbo.intuit.com/app/purchaseorder?txnId=${result.id}`} target="_blank" rel="noreferrer">Open in QuickBooks</a>
+            </div>
+          )}
+
+          {err && <div className="modal-form-error">{err}</div>}
+        </div>
+        <div className="modal-footer">
+          {step !== 'opps' && step !== 'done' && <button className="modal-cancel-btn" onClick={goBack} disabled={busy}>Back</button>}
+          {step === 'opps' && <button className="modal-save-btn" onClick={loadQuotes} disabled={busy || oppIds.length === 0}>{busy ? <LoadingDots inline /> : 'Next'}</button>}
+          {step === 'quotes' && <button className="modal-save-btn" onClick={() => setStep('projects')} disabled={!quotesReady}>Next</button>}
+          {step === 'projects' && <button className="modal-save-btn" onClick={loadLines} disabled={busy || !projectsReady}>{busy ? <LoadingDots inline /> : 'Next'}</button>}
+          {step === 'lines' && <button className="modal-save-btn" onClick={() => setStep('preview')} disabled={!linesValid || !qboVendorId || !costCenterId}>Next</button>}
+          {step === 'preview' && <button className="modal-save-btn" onClick={create} disabled={busy}>{busy ? 'Creating…' : 'Create Purchase Order'}</button>}
+          {step === 'done'
+            ? <button className="modal-save-btn" onClick={onClose}>Done</button>
+            : <button className="modal-cancel-btn" onClick={onClose} disabled={busy}>Cancel</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===================== Create Invoice (QBO invoicing from FS SERVICE_ACK) =====================
+// "+ Create Invoice" -- single job -> pick a real (non-empty) SERVICE_ACK doc
+// -> confirm/override the drafted lines -> preview -> create. Scoped to one
+// job at a time (unlike Create PO's multi-opportunity picker), opened from
+// either JobCard (every Outstanding Jobs row) or JobInvoiceRow (Accounts ->
+// Ready to Bill). Confirmed against a real sent invoice end-to-end during
+// build (WO 53158 / 7849883) -- every default this modal shows (anchor line,
+// narrative, tech items, rates, tax codes, Truck Charges) matched the real
+// invoice's own defaults exactly; only "Helper" needs its rate/tax
+// hand-entered every time, since it's a deliberately blank $0/non-taxable
+// catalog default -- same as the real office does.
+
+// "Service - X" / bare RecordType Service_Call -- confirmed live 2026-08-25
+// most real Opportunities (~44k of ~45k) have no RecordType at all, so
+// RecordType alone can't gate this; Opportunity_Type__c is the populated,
+// reliable signal.
+function isConfirmedServiceJob(job) {
+  if (job?.recordType === 'Service_Call') return true;
+  return (job?.opportunityType || '').toLowerCase().startsWith('service');
+}
+
+function CreateInvoiceModal({ job, onClose, onSaved }) {
+  const [step, setStep] = useState('docs');
+  const [docs, setDocs] = useState(null);
+  const [docId, setDocId] = useState(null);
+  const [draft, setDraft] = useState(null);
+  const [groups, setGroups] = useState([]);
+  const [partsLines, setPartsLines] = useState([]);
+  const [customerId, setCustomerId] = useState('');
+  const [qboParents, setQboParents] = useState([]);
+  const [salesItems, setSalesItems] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [result, setResult] = useState(null);
+
+  const notConfirmedService = !isConfirmedServiceJob(job);
+
+  useEffect(() => {
+    api.getQboProjects().then((d) => setQboParents(d.parents || [])).catch(() => {});
+    api.getQboSalesItems().then(setSalesItems).catch(() => {});
+    setErr(null);
+    api.getServiceAcks(job.id).then((d) => setDocs(d.docs || [])).catch((e) => setErr(e.message));
+  }, [job.id]);
+
+  const salesItemOptions = useMemo(() => salesItems.map((i) => [i.id, i.sku ? `${i.sku} - ${i.name}` : i.name]), [salesItems]);
+
+  const loadLines = async (pickedDocId) => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const d = await api.getServiceAckLines(job.id, pickedDocId);
+      setDraft(d);
+      setDocId(pickedDocId);
+      setGroups(d.groups.map((g) => ({
+        date: g.date,
+        dateNote: g.dateNote,
+        laborLines: g.laborLines.map((l) => ({ ...l, key: crypto.randomUUID() })),
+        truckCharge: g.truckCharge ? { ...g.truckCharge } : null,
+      })));
+      setPartsLines((d.partsLines || []).map((p) => ({
+        ...p,
+        key: crypto.randomUUID(),
+        newItem: p.itemId ? null : { code: p.code || '', description: p.name || '' },
+      })));
+      setCustomerId(d.customerSuggestions?.[0]?.qboCustomerId || '');
+      setStep('lines');
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateLabor = (gi, key, field, value) => setGroups((gs) => gs.map((g, i) => (i !== gi ? g : {
+    ...g, laborLines: g.laborLines.map((l) => (l.key === key ? { ...l, [field]: value } : l)),
+  })));
+  const updateLaborItem = (gi, key, itemId) => {
+    const item = salesItems.find((i) => i.id === itemId);
+    setGroups((gs) => gs.map((g, i) => (i !== gi ? g : {
+      ...g, laborLines: g.laborLines.map((l) => (l.key === key ? { ...l, itemId, itemName: item?.name || '', rate: item?.unitPrice ?? l.rate } : l)),
+    })));
+  };
+  const updateDateNote = (gi, value) => setGroups((gs) => gs.map((g, i) => (i !== gi ? g : { ...g, dateNote: value })));
+  const updateTruckCharge = (gi, field, value) => setGroups((gs) => gs.map((g, i) => (i !== gi ? g : {
+    ...g, truckCharge: g.truckCharge ? { ...g.truckCharge, [field]: value } : g.truckCharge,
+  })));
+
+  const updatePart = (key, field, value) => setPartsLines((ps) => ps.map((p) => (p.key === key ? { ...p, [field]: value } : p)));
+  const updatePartItem = (key, itemId) => {
+    const item = salesItems.find((i) => i.id === itemId);
+    setPartsLines((ps) => ps.map((p) => (p.key === key ? { ...p, itemId, itemName: item?.name || '', rate: item?.unitPrice ?? p.rate, newItem: null } : p)));
+  };
+  const updatePartNewItem = (key, field, value) => setPartsLines((ps) => ps.map((p) => (p.key === key ? { ...p, newItem: { ...p.newItem, [field]: value } } : p)));
+  const removePart = (key) => setPartsLines((ps) => ps.filter((p) => p.key !== key));
+
+  const grandTotal = useMemo(() => {
+    let sum = 0;
+    for (const g of groups) {
+      for (const l of g.laborLines) sum += Number(l.hours || 0) * Number(l.rate || 0);
+      if (g.truckCharge) sum += Number(g.truckCharge.rate || 0);
+    }
+    for (const p of partsLines) sum += Number(p.qty || 0) * Number(p.rate || 0);
+    return sum;
+  }, [groups, partsLines]);
+
+  const linesValid = customerId && groups.some((g) => g.laborLines.some((l) => l.itemId && Number(l.hours) > 0));
+
+  const create = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      trackUsage('create_invoice');
+      const body = {
+        oppId: job.id,
+        customerId,
+        anchorLine: draft.anchorLine,
+        headerNarrative: draft.headerNarrative,
+        groups: groups.map((g) => ({
+          date: g.date,
+          dateNote: g.dateNote,
+          laborLines: g.laborLines.map((l) => ({ itemId: l.itemId, itemName: l.itemName, hours: Number(l.hours), rate: Number(l.rate || 0), taxCodeRef: l.taxCodeRef })),
+          truckCharge: g.truckCharge?.itemId ? { itemId: g.truckCharge.itemId, itemName: g.truckCharge.itemName, rate: Number(g.truckCharge.rate || 0), taxCodeRef: g.truckCharge.taxCodeRef } : null,
+        })),
+        partsLines: partsLines.map((p) => ({
+          itemId: p.itemId || undefined,
+          itemName: p.itemName || undefined,
+          qty: Number(p.qty || 1),
+          rate: Number(p.rate || 0),
+          taxCodeRef: p.taxCodeRef,
+          newItem: (!p.itemId && p.newItem?.code) ? { code: p.newItem.code.trim(), description: p.newItem.description } : undefined,
+        })),
+      };
+      const res = await api.createInvoice(body);
+      setResult(res);
+      setStep('done');
+      if (onSaved) onSaved();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={() => !busy && onClose()}>
+      <div className="modal modal-inv" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Create Invoice</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={busy}>×</button>
+        </div>
+        <div className="modal-body">
+          {notConfirmedService && (
+            <div className="inv-caution">Invoice feature has not yet been designed for Jobs, T&I, or Monitoring -- this job isn't confirmed Service type. You can still try, but review carefully before sending.</div>
+          )}
+
+          {step === 'docs' && (
+            <>
+              <p className="po-step-hint">Pick which completed visit to draft this invoice from.</p>
+              {docs === null && !err && <LoadingDots label="Loading Field Squared data…" />}
+              {docs && docs.length === 0 && <div className="state">No completed Field Squared documents found for this job.</div>}
+              {docs && docs.map((d) => (
+                <button key={d.docId} type="button" className="inv-doc-pick" onClick={() => loadLines(d.docId)} disabled={busy}>
+                  <div className="inv-doc-dates">{d.dates.join(', ')}</div>
+                  <div className="inv-doc-meta">{d.techs.join(', ')} · {d.totalHours}h{d.hasParts ? ' · has parts' : ''}</div>
+                </button>
+              ))}
+            </>
+          )}
+
+          {step === 'lines' && draft && (
+            <>
+              {draft.assignmentFlags?.length > 0 && (
+                <div className="inv-caution inv-caution-mismatch">
+                  {draft.assignmentFlags.map((msg, i) => <div key={i}>{msg}</div>)}
+                </div>
+              )}
+
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Bill to (QBO Customer)</span>
+                {draft.customerSuggestions?.length > 0 && (
+                  <div className="inv-customer-suggestions">
+                    {draft.customerSuggestions.map((s) => (
+                      <button key={s.qboCustomerId} type="button" className={`inv-suggest-chip ${customerId === s.qboCustomerId ? 'on' : ''}`} onClick={() => setCustomerId(s.qboCustomerId)}>
+                        {s.name} <span className="ct">×{s.count}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <SearchableSelect value={customerId} onChange={setCustomerId} options={qboParents.map((p) => [p.id, p.name])} placeholder="Search QBO customers…" />
+              </label>
+
+              <div className="inv-anchor">Line 1 (fixed): {draft.anchorLine}</div>
+              {draft.headerNarrative && <div className="inv-narrative">{draft.headerNarrative}</div>}
+
+              {groups.map((g, gi) => (
+                <div className="inv-group" key={g.date}>
+                  <input className="req-note-input inv-datenote" type="text" value={g.dateNote} onChange={(e) => updateDateNote(gi, e.target.value)} />
+                  {g.laborLines.map((l) => (
+                    <div className="inv-labor-line" key={l.key}>
+                      <span className="inv-labor-tech">{l.techName}{l.repType?.length ? <span className="inv-reptype"> ({l.repType.join(', ')})</span> : null}</span>
+                      <span className="inv-labor-hours">{l.hours}h</span>
+                      <SearchableSelect value={l.itemId} onChange={(v) => updateLaborItem(gi, l.key, v)} options={salesItemOptions} placeholder="QBO labor item…" />
+                      <input className="req-note-input po-line-cost" type="number" min="0" step="0.01" placeholder="Rate" value={l.rate ?? ''} onChange={(e) => updateLabor(gi, l.key, 'rate', e.target.value)} />
+                    </div>
+                  ))}
+                  {g.truckCharge && (
+                    <div className="inv-labor-line">
+                      <span className="inv-labor-tech">{g.truckCharge.itemName}</span>
+                      <span className="inv-labor-hours">1</span>
+                      <span />
+                      <input className="req-note-input po-line-cost" type="number" min="0" step="0.01" value={g.truckCharge.rate ?? ''} onChange={(e) => updateTruckCharge(gi, 'rate', e.target.value)} />
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {!draft.partsRecorded && (
+                <div className="inv-parts-none">No parts recorded on this visit -- confirm none were used before sending.</div>
+              )}
+              {partsLines.length > 0 && (
+                <div className="inv-parts">
+                  <div className="po-step-hint">Parts from this visit:</div>
+                  {partsLines.map((p) => (
+                    <div className="po-line" key={p.key}>
+                      <div className="po-line-source-row">
+                        <span className="po-line-source"><span className="po-line-source-code">{p.code}</span><span className="po-line-source-name">{p.name}</span></span>
+                        <span className="po-line-arrow" aria-hidden>→</span>
+                        <div className="po-line-item">
+                          {p.itemId ? (
+                            <SearchableSelect value={p.itemId} onChange={(v) => updatePartItem(p.key, v)} options={salesItemOptions} placeholder="Search QBO item…" />
+                          ) : (
+                            <div className="po-line-newitem">
+                              <div className="po-line-newitem-prompt">No QBO item found - create it?</div>
+                              <input className="req-note-input" type="text" placeholder="SKU / part #" value={p.newItem?.code || ''} onChange={(e) => updatePartNewItem(p.key, 'code', e.target.value)} />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="po-line-row">
+                        <input className="req-note-input po-line-qty" type="number" min="0" value={p.qty} onChange={(e) => updatePart(p.key, 'qty', e.target.value)} />
+                        <input className="req-note-input po-line-cost" type="number" min="0" step="0.01" placeholder="Rate" value={p.rate ?? ''} onChange={(e) => updatePart(p.key, 'rate', e.target.value)} />
+                        <button type="button" className="req-btn" onClick={() => removePart(p.key)}>Remove</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {step === 'preview' && draft && (
+            <>
+              <div className="po-preview-vendor">Bill to: <strong>{draft.customerSuggestions?.find((s) => s.qboCustomerId === customerId)?.name || qboParents.find((p) => p.id === customerId)?.name || customerId}</strong></div>
+              <div className="po-scroll">
+                <table className="po-preview-table">
+                  <thead><tr><th>Line</th><th>Qty</th><th>Rate</th><th>Total</th></tr></thead>
+                  <tbody>
+                    <tr><td>{draft.anchorLine}</td><td colSpan={3}></td></tr>
+                    {draft.headerNarrative && <tr><td>{draft.headerNarrative}</td><td colSpan={3}></td></tr>}
+                    {groups.map((g) => (
+                      <React.Fragment key={g.date}>
+                        <tr><td>{g.dateNote}</td><td colSpan={3}></td></tr>
+                        {g.laborLines.map((l) => (
+                          <tr key={l.key}><td>{l.itemName || '(no item picked)'}</td><td>{l.hours}</td><td>${Number(l.rate || 0).toFixed(2)}</td><td>${(Number(l.hours || 0) * Number(l.rate || 0)).toFixed(2)}</td></tr>
+                        ))}
+                        {g.truckCharge && (
+                          <tr><td>{g.truckCharge.itemName}</td><td>1</td><td>${Number(g.truckCharge.rate || 0).toFixed(2)}</td><td>${Number(g.truckCharge.rate || 0).toFixed(2)}</td></tr>
+                        )}
+                      </React.Fragment>
+                    ))}
+                    {partsLines.map((p) => (
+                      <tr key={p.key}><td>{p.itemName || p.name}</td><td>{p.qty}</td><td>${Number(p.rate || 0).toFixed(2)}</td><td>${(Number(p.qty || 0) * Number(p.rate || 0)).toFixed(2)}</td></tr>
+                    ))}
+                  </tbody>
+                  <tfoot><tr><td colSpan={3}>Total</td><td>${grandTotal.toFixed(2)}</td></tr></tfoot>
+                </table>
+              </div>
+              <p className="po-step-hint">Tax follows each line's QBO item default and is editable in QBO before sending. This tool never sends the invoice -- it's created unsent for office review.</p>
+            </>
+          )}
+
+          {step === 'done' && result && (
+            <div className="po-done">
+              <p>Invoice <strong>{result.docNumber || `#${result.id}`}</strong> created in QuickBooks (total ${Number(result.total || 0).toFixed(2)}), unsent.</p>
+              <a className="modal-save-btn po-done-link" href={`https://qbo.intuit.com/app/invoice?txnId=${result.id}`} target="_blank" rel="noreferrer">Open in QuickBooks</a>
+            </div>
+          )}
+
+          {err && <div className="modal-form-error">{err}</div>}
+        </div>
+        <div className="modal-footer">
+          {step === 'lines' && <button className="modal-cancel-btn" onClick={() => setStep('docs')} disabled={busy}>Back</button>}
+          {step === 'preview' && <button className="modal-cancel-btn" onClick={() => setStep('lines')} disabled={busy}>Back</button>}
+          {step === 'lines' && <button className="modal-save-btn" onClick={() => setStep('preview')} disabled={!linesValid}>Next</button>}
+          {step === 'preview' && <button className="modal-save-btn" onClick={create} disabled={busy}>{busy ? 'Creating…' : 'Create Invoice'}</button>}
+          {step === 'done'
+            ? <button className="modal-save-btn" onClick={onClose}>Done</button>
+            : <button className="modal-cancel-btn" onClick={onClose} disabled={busy}>Cancel</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ===================== Office auth + usage UI =====================
 
 // Office login gate (email + password). Rendered by App when there's no session.
@@ -6633,7 +7788,7 @@ function OfficeUsersModal({ meName, onClose }) {
           <div className="modal-header"><div className="modal-title-row"><span className="jname">Office users</span></div>
             <button className="modal-close" onClick={onClose} aria-label="Close">×</button></div>
           <div className="modal-body">
-            {loading ? <span className="fs-users-loading">Loading…</span> : (
+            {loading ? <LoadingDots label="Loading…" inline /> : (
               <div className="manage-techs-list">
                 {users.map((u) => (
                   <button key={u.id} className="office-user-row" onClick={() => setSel(u)}>
@@ -6642,7 +7797,7 @@ function OfficeUsersModal({ meName, onClose }) {
                     <span className={`acct-role ${u.isAdmin ? 'admin' : ''}`}>{u.isAdmin ? 'Admin' : 'User'}</span>
                   </button>
                 ))}
-                {users.length === 0 && <p className="tech-links-hint">No office users yet — check <code>Dispatch_Access__c</code> on a Salesforce User.</p>}
+                {users.length === 0 && <p className="tech-links-hint">No office users yet - check <code>Dispatch_Access__c</code> on a Salesforce User.</p>}
               </div>
             )}
           </div>
@@ -6676,7 +7831,7 @@ function OfficeUserProfile({ user, onClose, onSaved }) {
           </label>
           <label className="role-toggle">
             <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} />
-            <span>Admin — can see Usage &amp; manage office users</span>
+            <span>Admin - can see Usage &amp; manage office users</span>
           </label>
           {err && <p className="req-error">{err}</p>}
         </div>
@@ -6689,14 +7844,14 @@ function OfficeUserProfile({ user, onClose, onSaved }) {
   );
 }
 
-const fmtUsageDate = (ts) => (ts ? new Date(Number(ts)).toLocaleString() : '—');
+const fmtUsageDate = (ts) => (ts ? new Date(Number(ts)).toLocaleString() : '-');
 
-const fmtUsageShort = (ts) => (ts ? new Date(Number(ts)).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—');
+const fmtUsageShort = (ts) => (ts ? new Date(Number(ts)).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '-');
 const USAGE_APPS = [['all', 'All'], ['board', 'Board'], ['dispatch', 'Dispatch']];
 // Friendly labels for raw event slugs. Drives the "Actions summary" panel and
 // the friendlier labels in the Top features table / recent-activity feed. Any
 // slug not listed falls back to its raw form (see eventLabel), so tracking a
-// new event never breaks — it just shows un-prettified until added here.
+// new event never breaks - it just shows un-prettified until added here.
 const EVENT_LABELS = {
   // dispatch (office)
   assignment_add: 'Scheduled a tech',
@@ -6717,6 +7872,10 @@ const EVENT_LABELS = {
   part_checkout: 'Checked out parts',
   fs_link: 'Linked a Field Squared task',
   login: 'Logged in',
+  create_po: 'Created a purchase order',
+  create_invoice: 'Created an invoice',
+  job_detail_open: 'Opened a job from the calendar',
+  opp_link_click: 'Opened an Opportunity in Salesforce',
   // board (tech app)
   request_new: 'Requested a schedule',
   request_accept: 'Accepted an offer',
@@ -6726,12 +7885,32 @@ const EVENT_LABELS = {
 };
 const eventLabel = (slug) => EVENT_LABELS[slug] || slug;
 // Screen views are navigation ("opened the Jobs tab"), not actions taken inside
-// a screen — kept as a separate category everywhere in the Usage dashboard.
-const isScreenView = (slug) => slug === 'screen_view';
-// One friendly line for a feed row: "Viewed Jobs" for a screen view, the action
-// label otherwise.
-const feedLabel = (e) => (isScreenView(e.event) ? `Viewed ${e.screen || 'a screen'}` : eventLabel(e.event));
-// A horizontal bar list ([{label,c}]) scaled to the max — reused across panels.
+// a screen - kept as a separate category everywhere in the Usage dashboard.
+// screen_view_end (the matching "they left" marker, carrying duration) counts
+// as a view too for styling purposes -- it never actually reaches the
+// aggregate byEvent/byScreen-count queries (excluded there at the SQL level,
+// see NO_DURATION_MARKER_CLAUSE), only the recent-activity feed, where this
+// just keeps it tagged "View" rather than looking like an "Action".
+const isScreenView = (slug) => slug === 'screen_view' || slug === 'screen_view_end';
+// Pulls durationMs back out of a feed row's raw `props` JSON string (the
+// recent-activity queries select props as text, not the parsed object).
+const feedDurationMs = (props) => {
+  if (!props) return null;
+  try { return JSON.parse(props)?.durationMs ?? null; } catch { return null; }
+};
+// One friendly line for a feed row: "Viewed Jobs" when it opens, "Viewed Jobs
+// for 2m 14s" once they leave and the duration is known, the action label
+// otherwise. Per direction 2026-08-27 -- duration shown directly in the feed,
+// not just the byScreen averages.
+const feedLabel = (e) => {
+  if (e.event === 'screen_view') return `Viewed ${e.screen || 'a screen'}`;
+  if (e.event === 'screen_view_end') {
+    const dur = fmtDuration(feedDurationMs(e.props));
+    return dur ? `Viewed ${e.screen || 'a screen'} for ${dur}` : `Left ${e.screen || 'a screen'}`;
+  }
+  return eventLabel(e.event);
+};
+// A horizontal bar list ([{label,c}]) scaled to the max - reused across panels.
 function UsageBars({ rows, labelKey = 'd', slice5 = true }) {
   const max = Math.max(1, ...rows.map((r) => r.c));
   if (rows.length === 0) return <p className="tech-links-hint">No activity in this range.</p>;
@@ -6748,8 +7927,1064 @@ function UsageBars({ rows, labelKey = 'd', slice5 = true }) {
   );
 }
 
+// Admin billing reconciliation: QBO vs SF billed/received totals + a per-invoice
+// cross-reference (which invoice #s are in one system but not the other), with a
+// date range, group-by (SF/QBO account & parent), and payment-method filter.
+const RECON_GROUPS = [['', 'No grouping'], ['sfAccount', 'SF account'], ['sfParent', 'SF parent'], ['qboAccount', 'QBO account'], ['qboParent', 'QBO parent']];
+const RECON_METHODS = ['', 'Check', 'ACH', 'Credit Card', 'Cash', 'Other'];
+const RECON_METHOD_OPTS = RECON_METHODS.map((m) => [m, m || 'All methods']);
+const money = (n) => `$${(Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+function ReconList({ title, rows, groupBy }) {
+  const groups = useMemo(() => {
+    if (!groupBy) return null;
+    const m = new Map();
+    for (const r of rows) { const g = r[groupBy] || '(none)'; if (!m.has(g)) m.set(g, { rows: [], total: 0 }); const e = m.get(g); e.rows.push(r); e.total += Number(r.amount) || 0; }
+    return [...m.entries()].sort((a, b) => b[1].total - a[1].total);
+  }, [rows, groupBy]);
+  const total = useMemo(() => rows.reduce((s, r) => s + (Number(r.amount) || 0), 0), [rows]);
+  return (
+    <div className="recon-list">
+      <div className="recon-list-head"><h4>{title}</h4><span className="recon-count">{rows.length} · {money(total)}</span></div>
+      {rows.length === 0 && <div className="recon-empty">None</div>}
+      {!groupBy && rows.length > 0 && (
+        <table className="recon-table"><tbody>
+          {rows.map((r, i) => (
+            <tr key={i}><td className="recon-num">{r.number}{r.dup && <span className="recon-dup" title="Duplicate invoice # - paired by amount"> dup</span>}</td><td>{r.date}</td><td className="recon-amt">{money(r.amount)}</td><td className="recon-cust">{r.customer || '-'}</td><td className="recon-pm">{r.paymentMethod || ''}</td></tr>
+          ))}
+        </tbody></table>
+      )}
+      {groupBy && groups && groups.map(([g, e]) => (
+        <details key={g} className="recon-group"><summary>{g} <span className="recon-count">{e.rows.length} · {money(e.total)}</span></summary>
+          <table className="recon-table"><tbody>
+            {e.rows.map((r, i) => (
+              <tr key={i}><td className="recon-num">{r.number}{r.dup && <span className="recon-dup" title="Duplicate invoice # - paired by amount"> dup</span>}</td><td>{r.date}</td><td className="recon-amt">{money(r.amount)}</td><td className="recon-cust">{r.customer || '-'}</td><td className="recon-pm">{r.paymentMethod || ''}</td></tr>
+            ))}
+          </tbody></table>
+        </details>
+      ))}
+    </div>
+  );
+}
+
+// The "matched invoices" analytics window: invoices present in BOTH systems,
+// grouped by an account dimension, comparing SF vs QBO billed totals per group.
+function ReconMatched({ rows, groupBy }) {
+  const N = (v) => Number(v) || 0;
+  // Grouped by an account dimension...
+  const groups = useMemo(() => {
+    if (!groupBy) return [];
+    const m = new Map();
+    for (const r of rows) {
+      const k = r[groupBy] || '(none)';
+      if (!m.has(k)) m.set(k, { rows: [], sf: 0, qbo: 0, sfR: 0, qboR: 0 });
+      const e = m.get(k); e.rows.push(r); e.sf += N(r.sfAmount); e.qbo += N(r.qboAmount); e.sfR += N(r.sfReceived); e.qboR += N(r.qboReceived);
+    }
+    return [...m.entries()].sort((a, b) => b[1].sf - a[1].sf);
+  }, [rows, groupBy]);
+  // ...or ungrouped (No grouping): one row per invoice, biggest SF↔QBO gaps first.
+  const flat = useMemo(() => {
+    if (groupBy) return [];
+    const gap = (r) => Math.abs(N(r.qboAmount) - N(r.sfAmount)) + Math.abs(N(r.qboReceived) - N(r.sfReceived));
+    return [...rows].sort((a, b) => gap(b) - gap(a) || N(b.sfAmount) - N(a.sfAmount));
+  }, [rows, groupBy]);
+  const tot = useMemo(() => rows.reduce((a, r) => ({ sf: a.sf + N(r.sfAmount), qbo: a.qbo + N(r.qboAmount), sfR: a.sfR + N(r.sfReceived), qboR: a.qboR + N(r.qboReceived) }), { sf: 0, qbo: 0, sfR: 0, qboR: 0 }), [rows]);
+  const label = (RECON_GROUPS.find((g) => g[0] === groupBy) || [, 'Group'])[1];
+  const gapCls = (d) => `recon-amt ${Math.abs(d) > 0.5 ? 'recon-gap' : ''}`;
+  if (rows.length === 0) return <div className="recon-list"><div className="recon-empty">No matched invoices in range</div></div>;
+  return (
+    <div className="recon-list recon-scroll">
+      <table className="recon-matched">
+        {groupBy ? (
+          <>
+            <thead>
+              <tr><th></th><th></th><th colSpan={3} className="recon-grp">Billed</th><th colSpan={3} className="recon-grp">Received</th></tr>
+              <tr><th>{label}</th><th>#</th><th>SF</th><th>QBO</th><th>Δ</th><th>SF</th><th>QBO</th><th>Δ</th></tr>
+            </thead>
+            <tbody>
+              {groups.map(([k, e]) => (
+                <tr key={k}>
+                  <td className="recon-cust">{k}</td><td>{e.rows.length}</td>
+                  <td className="recon-amt">{money(e.sf)}</td><td className="recon-amt">{money(e.qbo)}</td><td className={gapCls(e.qbo - e.sf)}>{money(e.qbo - e.sf)}</td>
+                  <td className="recon-amt">{money(e.sfR)}</td><td className="recon-amt">{money(e.qboR)}</td><td className={gapCls(e.qboR - e.sfR)}>{money(e.qboR - e.sfR)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="recon-foot-grp"><th></th><th></th><th colSpan={3} className="recon-grp">Billed</th><th colSpan={3} className="recon-grp">Received</th></tr>
+              <tr className="recon-foot-lbl"><th>{label}</th><th>#</th><th>SF</th><th>QBO</th><th>Δ</th><th>SF</th><th>QBO</th><th>Δ</th></tr>
+              <tr className="recon-total"><td>Total</td><td>{rows.length}</td>
+                <td className="recon-amt">{money(tot.sf)}</td><td className="recon-amt">{money(tot.qbo)}</td><td className="recon-amt">{money(tot.qbo - tot.sf)}</td>
+                <td className="recon-amt">{money(tot.sfR)}</td><td className="recon-amt">{money(tot.qboR)}</td><td className="recon-amt">{money(tot.qboR - tot.sfR)}</td>
+              </tr>
+            </tfoot>
+          </>
+        ) : (
+          <>
+            <thead>
+              <tr><th></th><th></th><th></th><th colSpan={3} className="recon-grp">Billed</th><th colSpan={3} className="recon-grp">Received</th></tr>
+              <tr><th>Invoice</th><th>Customer</th><th className="recon-date-col">Date</th><th>SF</th><th>QBO</th><th>Δ</th><th>SF</th><th>QBO</th><th>Δ</th></tr>
+            </thead>
+            <tbody>
+              {flat.map((r, i) => (
+                <tr key={r.number + '-' + i}>
+                  <td className="recon-num">{r.number}{r.dup && <span className="recon-dup" title="Duplicate invoice # - paired by amount"> dup</span>}</td><td className="recon-cust">{r.sfAccount || r.qboAccount || '-'}</td><td className="recon-date-cell">{r.qboDate || r.sfDate || ''}</td>
+                  <td className="recon-amt">{money(r.sfAmount)}</td><td className="recon-amt">{money(r.qboAmount)}</td><td className={gapCls(N(r.qboAmount) - N(r.sfAmount))}>{money(N(r.qboAmount) - N(r.sfAmount))}</td>
+                  <td className="recon-amt">{money(r.sfReceived)}</td><td className="recon-amt">{money(r.qboReceived)}</td><td className={gapCls(N(r.qboReceived) - N(r.sfReceived))}>{money(N(r.qboReceived) - N(r.sfReceived))}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="recon-foot-grp"><th></th><th></th><th></th><th colSpan={3} className="recon-grp">Billed</th><th colSpan={3} className="recon-grp">Received</th></tr>
+              <tr className="recon-foot-lbl"><th>Invoice</th><th>Customer</th><th className="recon-date-col">Date</th><th>SF</th><th>QBO</th><th>Δ</th><th>SF</th><th>QBO</th><th>Δ</th></tr>
+              <tr className="recon-total"><td>Total ({rows.length})</td><td></td><td></td>
+                <td className="recon-amt">{money(tot.sf)}</td><td className="recon-amt">{money(tot.qbo)}</td><td className="recon-amt">{money(tot.qbo - tot.sf)}</td>
+                <td className="recon-amt">{money(tot.sfR)}</td><td className="recon-amt">{money(tot.qboR)}</td><td className="recon-amt">{money(tot.qboR - tot.sfR)}</td>
+              </tr>
+            </tfoot>
+          </>
+        )}
+      </table>
+    </div>
+  );
+}
+
+function BillingReconciliation() {
+  const today = new Date().toISOString().slice(0, 10);
+  const ago = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  const [from, setFrom] = useState(ago(90));
+  const [to, setTo] = useState(today);
+  const [groupBy, setGroupBy] = useState('');
+  const [matchGroup, setMatchGroup] = useState('sfParent');
+  const [method, setMethod] = useState('');
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [nonce, setNonce] = useState(0);
+  const forceRef = useRef(false);
+  const [open, setOpen] = useState({ totals: true, matched: true, discrep: true });
+  const [matchQuery, setMatchQuery] = useState('');
+  const [discrepQuery, setDiscrepQuery] = useState('');
+  const toggle = (k) => setOpen((o) => ({ ...o, [k]: !o[k] }));
+  const caret = (k) => <span className="recon-caret">{open[k] ? '▾' : '▸'}</span>;
+
+  useEffect(() => {
+    setLoading(true); setErr(null);
+    const force = forceRef.current; forceRef.current = false; // force cache bypass only on a Refresh click
+    api.getBillingReconciliation({ from, to, paymentMethod: method, refresh: force ? 1 : undefined })
+      .then((d) => { setData(d); setLoading(false); })
+      .catch((e) => { setErr(e.message); setLoading(false); });
+  }, [from, to, method, nonce]);
+
+  const totals = data && [
+    ['Salesforce', data.sf.billed, data.sf.received],
+    ['QuickBooks', data.qbo.billed, data.qbo.received],
+    ['Δ (QBO − SF)', data.deltas.billed, data.deltas.received],
+  ];
+  // Guard every list - a stale/old-shaped API response must never blank the page.
+  const diff = data?.diff || {};
+  const matchedRows = diff.matched || [];
+  const qboOnly = diff.qboOnly || [];
+  const sfOnly = diff.sfOnly || [];
+  // Per-section filter by invoice number (substring match).
+  const hasQ = (q, r) => !q.trim() || String(r.number).toLowerCase().includes(q.trim().toLowerCase());
+  const matchedShown = matchedRows.filter((r) => hasQ(matchQuery, r));
+  const qboOnlyShown = qboOnly.filter((r) => hasQ(discrepQuery, r));
+  const sfOnlyShown = sfOnly.filter((r) => hasQ(discrepQuery, r));
+
+  return (
+    <section className="usage recon">
+      <div className="view-head usage-head">
+        <div><h2>Billing reconciliation</h2><p className="recon-sub">QuickBooks vs Salesforce · QBO billed counts sent invoices only</p></div>
+        <div className="usage-controls">
+          <div className="recon-date">From <DatePicker value={from} onChange={setFrom} placeholder="From" clearable={false} /></div>
+          <div className="recon-date">To <DatePicker value={to} onChange={setTo} placeholder="To" clearable={false} /></div>
+          <div className="usage-range">{[30, 90, 365].map((d) => (
+            <button key={d} className="chip" onClick={() => { setFrom(ago(d)); setTo(today); }}>{d}d</button>
+          ))}</div>
+          <FilterSelect value={method} onChange={setMethod} options={RECON_METHOD_OPTS} placeholder="All methods" ariaLabel="Payment method" />
+          <button className="refresh" onClick={() => { forceRef.current = true; setNonce((n) => n + 1); }}>Refresh</button>
+        </div>
+      </div>
+
+      {err && <div className="empty">Couldn’t load reconciliation: {err}</div>}
+      {!err && !data && <LoadingDots label="Loading…" />}
+      {data && (
+        <>
+          <div className="recon-xref-head">
+            <h3 className="recon-toggle" onClick={() => toggle('totals')}>{caret('totals')} Totals</h3>
+          </div>
+          {open.totals && (
+            <table className="recon-totals">
+              <thead><tr><th></th><th>Billed</th><th>Received</th></tr></thead>
+              <tbody>
+                {totals.map(([label, b, r], i) => (
+                  <tr key={label} className={i === 2 ? 'recon-delta' : ''}>
+                    <td>{label}</td><td>{money(b)}</td><td>{money(r)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {loading && <LoadingDots label="Updating…" inline />}
+
+          <div className="recon-xref-head">
+            <h3 className="recon-toggle" onClick={() => toggle('matched')}>{caret('matched')} Matched invoices <span className="recon-count">{matchedShown.length}{matchQuery.trim() ? ` of ${matchedRows.length}` : ''} · SF vs QBO{matchGroup ? ' by account' : ' per invoice'}</span></h3>
+            {open.matched && <div className="recon-head-ctrls">
+              <input className="recon-filter" placeholder="Filter #" value={matchQuery} onChange={(e) => setMatchQuery(e.target.value)} />
+              <div className="usage-range">{RECON_GROUPS.map(([v, l]) => (
+                <button key={v} className={`chip ${matchGroup === v ? 'on' : ''}`} onClick={() => setMatchGroup(v)}>{l}</button>
+              ))}</div>
+            </div>}
+          </div>
+          {open.matched && <ReconMatched rows={matchedShown} groupBy={matchGroup} />}
+
+          <div className="recon-xref-head">
+            <h3 className="recon-toggle" onClick={() => toggle('discrep')}>{caret('discrep')} Discrepancies <span className="recon-count">{qboOnlyShown.length + sfOnlyShown.length}{discrepQuery.trim() ? ` of ${qboOnly.length + sfOnly.length}` : ''}</span></h3>
+            {open.discrep && <div className="recon-head-ctrls">
+              <input className="recon-filter" placeholder="Filter #" value={discrepQuery} onChange={(e) => setDiscrepQuery(e.target.value)} />
+              <div className="usage-range">{RECON_GROUPS.map(([v, l]) => (
+                <button key={v} className={`chip ${groupBy === v ? 'on' : ''}`} onClick={() => setGroupBy(v)}>{l}</button>
+              ))}</div>
+            </div>}
+          </div>
+          {open.discrep && (
+            <div className="recon-cols">
+              <ReconList title="In QBO (sent), not in SF" rows={qboOnlyShown} groupBy={groupBy} />
+              <ReconList title="In SF, not in QBO" rows={sfOnlyShown} groupBy={groupBy} />
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+// ===================== Expense Tracking (Job/Project Cost Tracking) =====================
+
+// Plain SVG donut, no charting dependency needed for a 2-segment chart --
+// red = materials spent (from the real "CRS Purchase Order" object), green =
+// remaining budget, proportional to Opportunity.Amount. When there's no
+// budget and no spend recorded, renders a flat gray ring rather than
+// guessing a proportion. `size` covers both the list view's compact use and
+// the detail view's larger one.
+function JobDonut({ budget, materialsSpent, size = 64 }) {
+  const strokeWidth = size * 0.16;
+  const radius = size / 2 - strokeWidth / 2;
+  const circumference = 2 * Math.PI * radius;
+  const center = size / 2;
+  const hasAny = budget > 0 || materialsSpent > 0;
+  const spentFraction = budget > 0 ? Math.min(1, materialsSpent / budget) : (materialsSpent > 0 ? 1 : 0);
+  const redLength = circumference * spentFraction;
+  const greenLength = circumference - redLength;
+
+  if (!hasAny) {
+    return (
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="job-donut">
+        <circle cx={center} cy={center} r={radius} fill="none" stroke="var(--line-strong)" strokeWidth={strokeWidth} />
+      </svg>
+    );
+  }
+
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="job-donut">
+      <circle cx={center} cy={center} r={radius} fill="none" stroke="var(--surface-2)" strokeWidth={strokeWidth} />
+      {redLength > 0 && (
+        <circle
+          cx={center} cy={center} r={radius} fill="none" stroke="#D64545" strokeWidth={strokeWidth}
+          strokeDasharray={`${redLength} ${circumference}`}
+          transform={`rotate(-90 ${center} ${center})`}
+        />
+      )}
+      {greenLength > 0 && (
+        <circle
+          cx={center} cy={center} r={radius} fill="none" stroke="#2E9E5B" strokeWidth={strokeWidth}
+          strokeDasharray={`${greenLength} ${circumference}`}
+          strokeDashoffset={-redLength}
+          transform={`rotate(-90 ${center} ${center})`}
+        />
+      )}
+    </svg>
+  );
+}
+
+// Single proportional arc segment, shared by every ring below -- `startFrac`/
+// `frac` are both 0-1 shares of the full circle.
+// Semi-transparent by default, per direction -- full opacity while its own
+// segment is hovered (or while no segment is hovered at all, so the ring
+// isn't dim before any interaction). `segmentKey` identifies which segment
+// this is for the hover-popover logic in JobDonutRings below; the visible
+// stroke itself is the hit area (`pointerEvents: 'stroke'`), no separate
+// invisible hit-path needed at this stroke width.
+function DonutArc({ cx, cy, r, strokeWidth, color, circumference, startFrac, frac, segmentKey, hovered, onHover, onSelect }) {
+  if (frac <= 0) return null;
+  const length = circumference * frac;
+  const offset = -circumference * startFrac;
+  const dim = hovered && hovered !== segmentKey;
+  return (
+    <circle
+      cx={cx} cy={cy} r={r} fill="none" stroke={color} strokeWidth={strokeWidth}
+      strokeDasharray={`${length} ${circumference}`}
+      strokeDashoffset={offset}
+      transform={`rotate(-90 ${cx} ${cy})`}
+      style={{ opacity: dim ? 0.35 : 0.75, cursor: 'pointer', pointerEvents: 'stroke', transition: 'opacity .12s' }}
+      onMouseEnter={() => onHover(segmentKey)}
+      onMouseLeave={() => onHover(null)}
+      onClick={() => onSelect && onSelect(segmentKey)}
+    />
+  );
+}
+
+// A point on the ring at fraction `t` around the circle, starting at 12
+// o'clock and going clockwise -- matches DonutArc's own -90deg rotation
+// convention, used to anchor the hover popover's leader line to the real
+// midpoint of whichever segment is active.
+function pointOnRing(cx, cy, r, t) {
+  const angle = (t * 360 - 90) * (Math.PI / 180);
+  return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+}
+
+const SEGMENT_INFO = {
+  quotedLabor: { label: 'Quoted Labor', color: '#3B7DD8' },
+  quotedParts: { label: 'Quoted Parts', color: '#8B5FBF' },
+  materialExpenses: { label: 'Material Expenses', color: '#D64545' },
+  billedLabor: { label: 'Billed Labor', color: '#D98A2B' },
+  billedMaterials: { label: 'Billed Materials', color: '#2A9D8F' },
+  quotedTotal: { label: 'Quoted Total', color: '#3B7DD8' },
+  billedTotal: { label: 'Billed', color: '#2E9E5B' },
+  technicianHours: { label: 'Technician Hours', color: '#5B6ABF' },
+  helperHours: { label: 'Helper Hours', color: '#E0A72E' },
+};
+
+// Hover popover content per segment -- quoted rings show the real Quote
+// line-item breakdown, Material Expenses shows the real CRS Purchase Order
+// records, Billed Labor shows the real invoice lines that make it up.
+// Capped by default (the hover popover is a quick glance, still space-
+// constrained by whatever room is available near the trigger) -- pass
+// `cap={Infinity}` for the click-to-open SegmentDetailModal below, which has
+// a real scrollable body and isn't fighting for space against the page
+// layout the way the hover popover is.
+const POPOVER_MAX_LINES = 8;
+
+// Hover-intent timing, shared by BulletBar and JobDonutRings -- per
+// direction 2026-08-27: don't pop the popover open the instant the cursor
+// touches the graph (a fast mouse pass-through was popping/closing boxes
+// constantly), and give a longer grace window on the way out so there's
+// real time to move from the (thin) trigger to the portaled popover.
+const POPOVER_OPEN_DELAY = 400;
+const POPOVER_CLOSE_DELAY = 500;
+
+// unit: '$' (default, via fmtCurrency) or 'h' (hours -- BulletBar's Hours
+// rows use this, since fmtCurrency would wrongly format an hours figure as
+// a dollar amount). `full`: the modal's real estate, not the tight 260px
+// hover popover -- drops the fixed equal-width columns so long names get
+// real room instead of getting condensed/wrapped into an unreadable column.
+function SegmentPopoverContent({ segmentKey, total, lines, unit = '$', cap = POPOVER_MAX_LINES, full = false }) {
+  const info = SEGMENT_INFO[segmentKey];
+  const shown = (lines || []).slice(0, cap);
+  const hiddenCount = (lines?.length || 0) - shown.length;
+  const totalText = unit === 'h' ? (total != null ? `${total}h` : '-') : (fmtCurrency(total) ?? '-');
+  return (
+    <div className="donut-popover-body">
+      <div className="donut-popover-title"><span className="exp-dot" style={{ background: info.color }} />{info.label}</div>
+      <div className="donut-popover-total">{totalText}</div>
+      {(!lines || lines.length === 0) && <div className="donut-popover-hint">No itemized detail available.</div>}
+      {shown.length > 0 && (
+        <table className={`donut-popover-lines${full ? ' full' : ''}`}>
+          <tbody>
+            {shown.map((l, i) => <tr key={i}>{l}</tr>)}
+          </tbody>
+        </table>
+      )}
+      {hiddenCount > 0 && <div className="donut-popover-hint">+{hiddenCount} more not shown here</div>}
+      {!full && <div className="donut-popover-cta">Click for full detail</div>}
+    </div>
+  );
+}
+
+// Click-to-open detail -- per direction 2026-08-27, the hover popover alone
+// (portaled, viewport-clamped, but still passive and space-constrained)
+// wasn't a reliable way to read a long real itemized list; a real modal has
+// no viewport-edge math to get wrong and is properly scrollable, so it's the
+// dependable path to "all the information," while hover stays as a fast
+// glance. Shows every real line (cap={Infinity}), not just the popover's
+// capped preview.
+function SegmentDetailModal({ segmentKey, total, lines, unit = '$', onClose }) {
+  const info = SEGMENT_INFO[segmentKey];
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal modal-segment-detail" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="exp-dot" style={{ background: info.color }} /><span className="jname">{info.label}</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          <SegmentPopoverContent segmentKey={segmentKey} total={total} lines={lines} unit={unit} cap={Infinity} full />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Bullet-chart-style bar: fills to `actual`, with a tick mark at `target` on
+// the same scale -- per direction 2026-08-27, replacing the old
+// Expenses/Billed/Hours ring segments. Bars read actual-vs-target far more
+// precisely than ring angle/area (Cleveland & McGill graphical-perception
+// research), and unlike the rings, an over-target bar is allowed to
+// genuinely extend past its tick rather than being clamped -- overshooting
+// a quote is real, useful information, not an overflow bug to hide.
+// Hover behavior mirrors the ring's popover (same SegmentPopoverContent),
+// but anchored with plain CSS above/below the bar instead of polar-
+// coordinate leader-line math, since a bar has no angle to compute.
+function BulletBar({ segmentKey, actual, target, unit = '$', lines }) {
+  const [hovered, setHovered] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+  const closeTimerRef = useRef(null);
+  const openTimerRef = useRef(null);
+  const [pos, setPos] = useState(null);
+  const info = SEGMENT_INFO[segmentKey];
+  const hasData = actual != null && target != null;
+  const scale = hasData ? Math.max(actual, target, 1) : 1;
+  const actualFrac = hasData ? Math.min(1, actual / scale) : 0;
+  const targetFrac = hasData ? Math.min(1, target / scale) : 0;
+  const fmt = (n) => (unit === 'h' ? (n != null ? `${n}h` : '-') : (fmtCurrency(n) ?? '-'));
+
+  // Portaled + viewport-clamped, same pattern JobNotesBadge uses -- a bar
+  // can sit anywhere in a long stacked panel, so a plain top:100% popover
+  // runs off the bottom of the screen for any bar low on the page. The
+  // arrow tracks the bar's real horizontal center so the popover still
+  // visibly points at what it's describing even after its box gets
+  // shifted/clamped to stay on-screen.
+  const cancelClose = () => { if (closeTimerRef.current) { clearTimeout(closeTimerRef.current); closeTimerRef.current = null; } };
+  const cancelOpen = () => { if (openTimerRef.current) { clearTimeout(openTimerRef.current); openTimerRef.current = null; } };
+  const openNow = () => {
+    if (!wrapRef.current) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const POP_WIDTH = 300;
+    const GAP = 10;
+    const EDGE = 8;
+    const CEILING = 420;
+    let left = rect.left;
+    if (left + POP_WIDTH > window.innerWidth - EDGE) left = window.innerWidth - POP_WIDTH - EDGE;
+    if (left < EDGE) left = EDGE;
+    const arrowLeft = Math.max(14, Math.min(POP_WIDTH - 14, rect.left + rect.width / 2 - left));
+    const spaceBelow = window.innerHeight - rect.bottom - GAP - EDGE;
+    const spaceAbove = rect.top - GAP - EDGE;
+    if (spaceBelow >= spaceAbove) {
+      setPos({ top: rect.bottom + GAP, bottom: null, left, arrowLeft, above: false, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow)) });
+    } else {
+      setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, arrowLeft, above: true, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove)) });
+    }
+    setHovered(true);
+  };
+  // Hover-intent: don't pop open on the instant the cursor touches the bar,
+  // only after it's genuinely lingered -- a quick mouse pass-through no
+  // longer flashes a popover open and shut.
+  const handleEnter = () => {
+    cancelClose();
+    if (hovered) return;
+    cancelOpen();
+    openTimerRef.current = setTimeout(() => { openTimerRef.current = null; openNow(); }, POPOVER_OPEN_DELAY);
+  };
+  // Delayed close so moving the mouse from the (thin) bar toward the
+  // popover -- which is portaled away and not directly under the cursor --
+  // has time to land inside the popover itself before it closes. Without
+  // this, the popover vanished the instant the cursor left the bar, before
+  // it could ever be read or scrolled.
+  const handleLeave = () => {
+    cancelOpen();
+    cancelClose();
+    closeTimerRef.current = setTimeout(() => setHovered(false), POPOVER_CLOSE_DELAY);
+  };
+  useEffect(() => () => { cancelClose(); cancelOpen(); }, []);
+  // Close on scroll/resize -- the popover is portaled and positioned in
+  // fixed viewport coordinates computed once at open time, so scrolling the
+  // page (or the panel) leaves it pointing at stale coordinates, visibly
+  // detached from the bar that opened it. But the popover's own body is
+  // independently scrollable (long itemized lists) -- scroll is captured on
+  // window specifically to catch page/panel scrolling anywhere, so it has
+  // to explicitly ignore scroll events that originate from inside the
+  // popover itself, or scrolling to read the list would close it.
+  useEffect(() => {
+    if (!hovered) return;
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setHovered(false); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [hovered]);
+
+  return (
+    <div className="exp-bullet-row">
+      <div className="exp-bullet-label"><span className="exp-dot" style={{ background: info.color }} />{info.label}</div>
+      {!hasData ? (
+        <div className="exp-bullet-nodata">No data</div>
+      ) : (
+        <div
+          className="exp-bullet-track-wrap"
+          ref={wrapRef}
+          onMouseEnter={handleEnter}
+          onMouseLeave={handleLeave}
+          onClick={() => setModalOpen(true)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => e.key === 'Enter' && setModalOpen(true)}
+          title="Click for full detail"
+        >
+          <div className="exp-bullet-track">
+            <div className="exp-bullet-fill" style={{ width: `${actualFrac * 100}%`, background: info.color }} />
+            <div className="exp-bullet-tick" style={{ left: `${targetFrac * 100}%` }} />
+          </div>
+          <div className="exp-bullet-value">{fmt(actual)} of {fmt(target)} quoted</div>
+          {hovered && pos && createPortal(
+            <div
+              ref={popRef}
+              className={`donut-popover exp-bullet-popover ${pos.above ? 'above' : 'below'}`}
+              style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+              onMouseEnter={cancelClose}
+              onMouseLeave={handleLeave}
+            >
+              <div className="exp-bullet-popover-arrow" style={{ left: pos.arrowLeft }} />
+              <SegmentPopoverContent segmentKey={segmentKey} total={actual} lines={lines} unit={unit} />
+            </div>,
+            document.body
+          )}
+        </div>
+      )}
+      {modalOpen && (
+        <SegmentDetailModal segmentKey={segmentKey} total={actual} lines={lines} unit={unit} onClose={() => setModalOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// A single ring for the Expense Tracking detail view -- Quoted Labor +
+// Quoted Parts as a composition of Quoted Total. Simplified 2026-08-27 from
+// the earlier 3-ring design (Quoted/Expenses/Billed all as concentric
+// rings): asked directly whether rings were the right tool, and per
+// direction, only this one is -- it's a genuine part-to-whole composition
+// question ("how is the quote split"), which is what rings are actually
+// good at. Expenses/Billed/Hours are "actual vs. target" comparisons, which
+// read far more precisely as bars (BulletBar below) than as ring segments --
+// kept those as rings even when the underlying job had a real, large number
+// to show would have meant asking a reader to compare arc angles across
+// separate rings, which is measurably harder than reading bar lengths on a
+// shared axis. Hovering either segment pops a leader-lined popover with the
+// real itemized Quote lines, same interaction as before.
+function JobDonutRings({
+  quotedLabor, quotedParts,
+  quotedLaborLines = [], quotedPartsLines = [],
+  size = 200,
+}) {
+  const [hovered, setHovered] = useState(null);
+  const [modalKey, setModalKey] = useState(null);
+  const wrapRef = useRef(null);
+  const popRef = useRef(null);
+  const closeTimerRef = useRef(null);
+  const openTimerRef = useRef(null);
+  const [popPos, setPopPos] = useState(null);
+  const center = size / 2;
+  const strokeWidth = size * 0.16;
+  const rOuter = center - strokeWidth / 2;
+  const cOuter = 2 * Math.PI * rOuter;
+
+  const hasQuote = quotedLabor != null && quotedParts != null;
+  const quotedTotalForScale = (quotedLabor || 0) + (quotedParts || 0);
+  const noQuotedTotal = !(quotedTotalForScale > 0);
+  const scale = noQuotedTotal ? 1 : quotedTotalForScale;
+  const frac = (n) => Math.min(1, (n || 0) / scale);
+  const quotedLaborFrac = frac(quotedLabor);
+  const quotedPartsFrac = frac(quotedParts);
+
+  const midFracByKey = { quotedLabor: quotedLaborFrac / 2, quotedParts: quotedLaborFrac + quotedPartsFrac / 2 };
+  const totalByKey = { quotedLabor, quotedParts };
+  const linesByKey = {
+    quotedLabor: quotedLaborLines.map((l) => (<><td>{l.name}</td><td>{l.qty}</td><td>{fmtCurrency(l.rate)}</td><td>{fmtCurrency(l.amount)}</td></>)),
+    quotedParts: quotedPartsLines.map((l) => (<><td>{l.name}</td><td>{l.qty}</td><td>{fmtCurrency(l.rate)}</td><td>{fmtCurrency(l.amount)}</td></>)),
+  };
+
+  // Popover pops out to the side of the hovered segment, connected by ONE
+  // line -- per direction 2026-08-27, drop the earlier two-piece version
+  // (a short stub inside the ring's own local <svg> + a separately portaled
+  // connector meeting it partway). Splitting one line across two
+  // independently-rendered SVGs in two different coordinate systems is
+  // exactly what kept causing seams/breaks between them, however precisely
+  // the two endpoints were computed. Now there's a single portaled,
+  // viewport-coordinate line drawn once: from the ring's real edge point to
+  // the popover's real measured rect (see the connector effect below).
+  let t = null, ringPt = null, onRight = false;
+  if (hovered) {
+    t = midFracByKey[hovered];
+    ringPt = pointOnRing(center, center, rOuter + strokeWidth / 2, t);
+    onRight = ringPt.x >= center;
+  }
+
+  useEffect(() => {
+    if (!hovered || !ringPt || !wrapRef.current) { setPopPos(null); return; }
+    const wrapRect = wrapRef.current.getBoundingClientRect();
+    const screenX = wrapRect.left + ringPt.x;
+    const screenY = wrapRect.top + ringPt.y;
+    const POP_WIDTH = 300;
+    const GAP = 14;
+    const EDGE = 8;
+    const CEILING = 420;
+    let left = onRight ? screenX + GAP : screenX - GAP - POP_WIDTH;
+    if (left + POP_WIDTH > window.innerWidth - EDGE) left = window.innerWidth - POP_WIDTH - EDGE;
+    if (left < EDGE) left = EDGE;
+    const spaceBelow = window.innerHeight - screenY - EDGE;
+    const spaceAbove = screenY - EDGE;
+    if (spaceBelow >= spaceAbove) {
+      const top = Math.max(EDGE, screenY - 20);
+      setPopPos({ left, top, bottom: null, onRight, screenX, screenY, maxHeight: Math.max(0, Math.min(CEILING, spaceBelow + 20)) });
+    } else {
+      const bottom = Math.max(EDGE, window.innerHeight - screenY - 20);
+      setPopPos({ left, top: null, bottom, onRight, screenX, screenY, maxHeight: Math.max(0, Math.min(CEILING, spaceAbove + 20)) });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hovered]);
+
+  // The real connector: runs after the popover box above has actually
+  // mounted/laid out, measures its true rect, and draws a line from the
+  // ring's edge to the nearest point on that *measured* rect -- not a
+  // predicted one. This is what guarantees the line always visibly touches
+  // the box, however it ended up being positioned/clamped.
+  const [connector, setConnector] = useState(null);
+  useLayoutEffect(() => {
+    if (!hovered || !popPos || !popRef.current) { setConnector(null); return; }
+    const r = popRef.current.getBoundingClientRect();
+    const x2 = popPos.onRight ? r.left : r.right;
+    const y2 = Math.max(r.top + 10, Math.min(r.bottom - 10, popPos.screenY));
+    setConnector({ x1: popPos.screenX, y1: popPos.screenY, x2, y2 });
+  }, [hovered, popPos]);
+
+  // Close on scroll/resize -- same reasoning as BulletBar: a portaled
+  // popover positioned in fixed coordinates computed once at open time goes
+  // stale (visibly detached from the ring) the moment the page scrolls
+  // under it, but scrolling the popover's own body (long itemized lists)
+  // must not count -- ignore scroll events that originate inside it.
+  useEffect(() => {
+    if (!hovered) return;
+    const close = (e) => { if (popRef.current?.contains(e.target)) return; setHovered(null); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [hovered]);
+
+  // Hover-intent open + delayed close, same reasoning as BulletBar --
+  // DonutArc's own onMouseLeave used to clear `hovered` immediately, so
+  // moving the cursor off the thin ring stroke toward the (portaled,
+  // not-directly-underneath) popover closed it before it could ever be
+  // read, and a fast mouse pass-through popped it open and shut instantly.
+  // The popover itself also participates in the same close bridge via its
+  // own mouse handlers below.
+  const cancelClose = () => { if (closeTimerRef.current) { clearTimeout(closeTimerRef.current); closeTimerRef.current = null; } };
+  const cancelOpen = () => { if (openTimerRef.current) { clearTimeout(openTimerRef.current); openTimerRef.current = null; } };
+  const scheduleClose = () => { cancelOpen(); cancelClose(); closeTimerRef.current = setTimeout(() => setHovered(null), POPOVER_CLOSE_DELAY); };
+  const handleHover = (key) => {
+    if (key) {
+      cancelClose();
+      if (hovered === key) return;
+      cancelOpen();
+      openTimerRef.current = setTimeout(() => { openTimerRef.current = null; setHovered(key); }, POPOVER_OPEN_DELAY);
+    } else {
+      scheduleClose();
+    }
+  };
+  useEffect(() => () => { cancelClose(); cancelOpen(); }, []);
+
+  const popover = hovered && popPos ? createPortal(
+    <div
+      ref={popRef}
+      className="donut-popover"
+      style={{ left: popPos.left, top: popPos.top ?? undefined, bottom: popPos.bottom ?? undefined, maxHeight: popPos.maxHeight }}
+      onMouseEnter={cancelClose}
+      onMouseLeave={scheduleClose}
+    >
+      <SegmentPopoverContent segmentKey={hovered} total={totalByKey[hovered]} lines={linesByKey[hovered]} />
+    </div>,
+    document.body
+  ) : null;
+
+  // Portaled, viewport-sized, measured connector -- see the comment above
+  // `connector`'s effect. Sits below the popover (z-index) so the popover's
+  // own edge visually caps off where the line ends.
+  const connectorLine = connector ? createPortal(
+    <svg className="donut-connector-svg" width={window.innerWidth} height={window.innerHeight}>
+      <line x1={connector.x1} y1={connector.y1} x2={connector.x2} y2={connector.y2} stroke="var(--ink-soft)" strokeWidth={1.5} />
+    </svg>,
+    document.body
+  ) : null;
+
+  return (
+    <div className="job-donut-rings-wrap" ref={wrapRef} style={{ width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="job-donut-rings">
+        {/* Quoted -- Quoted Labor + Quoted Parts. Dashed/neutral when there's
+            no real quote to show. Click a segment for the full detail modal;
+            hover stays as a fast glance. */}
+        {hasQuote && !noQuotedTotal ? (
+          <>
+            <circle cx={center} cy={center} r={rOuter} fill="none" stroke="var(--surface-2)" strokeWidth={strokeWidth} />
+            <DonutArc cx={center} cy={center} r={rOuter} strokeWidth={strokeWidth} color="#3B7DD8" circumference={cOuter} startFrac={0} frac={quotedLaborFrac} segmentKey="quotedLabor" hovered={hovered} onHover={handleHover} onSelect={setModalKey} />
+            <DonutArc cx={center} cy={center} r={rOuter} strokeWidth={strokeWidth} color="#8B5FBF" circumference={cOuter} startFrac={quotedLaborFrac} frac={quotedPartsFrac} segmentKey="quotedParts" hovered={hovered} onHover={handleHover} onSelect={setModalKey} />
+          </>
+        ) : (
+          <circle cx={center} cy={center} r={rOuter} fill="none" stroke="var(--line-strong)" strokeWidth={strokeWidth} strokeDasharray="4 4" />
+        )}
+      </svg>
+      {connectorLine}
+      {popover}
+      {modalKey && (
+        <SegmentDetailModal segmentKey={modalKey} total={totalByKey[modalKey]} lines={linesByKey[modalKey]} onClose={() => setModalKey(null)} />
+      )}
+    </div>
+  );
+}
+
+// List row: name/address/status/LID similar to JobCard's summary fields
+// (read-only, no assignment controls needed here) plus the compact donut and
+// the raw figures next to it, per direction -- the donut is never shown
+// alone.
+function ExpenseJobRow({ job, onOpen }) {
+  return (
+    <button type="button" className="exp-row" onClick={() => onOpen(job.id)}>
+      <JobDonut budget={job.awardedAmount} materialsSpent={job.materialExpenses} size={48} />
+      <div className="exp-row-main">
+        <div className="exp-row-name">{job.name}</div>
+        <div className="exp-row-meta">
+          {job.lid && <span className="lidtag">LID {job.lid}</span>}
+          <span>{job.address || 'No address'}</span>
+          {job.status && <span className={`badge ${statusClass(job.status)}`}>{job.status}</span>}
+        </div>
+      </div>
+      <div className="exp-row-figures">
+        <div><span className="exp-figure-label">Awarded Amount</span> {fmtCurrency(job.awardedAmount) ?? '-'}</div>
+        <div><span className="exp-figure-label">Material Expenses</span> {fmtCurrency(job.materialExpenses) ?? '-'}</div>
+        {!job.hasPurchaseOrders && <span className="exp-none-note">No CRS Purchase Orders recorded yet</span>}
+      </div>
+    </button>
+  );
+}
+
+const QUOTE_SOURCE_LABEL = {
+  awarded: 'From the awarded quote',
+  'single-match': 'From a quote matching the awarded amount',
+  'sum-match': 'From multiple quotes whose combined total matches the awarded amount',
+  'most-recent': 'From the most recent quote (no matching quote found)',
+  none: 'No quote data available for this job',
+};
+
+function ExpenseJobDetail({ oppId, onBack }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    setData(null);
+    setErr(null);
+    api.getJobCost(oppId).then(setData).catch((e) => setErr(e.message));
+  }, [oppId]);
+
+  // Popover line-builders for the bullet bars below -- same shape
+  // SegmentPopoverContent already expects ([{name/date/amount fragments}]),
+  // built here at the call site same as the ring used to. billedLabor/
+  // billedMaterial lines now carry the real invoice docNumber (not just the
+  // internal SF id, which was never shown but also wasn't the identifier
+  // that belongs here) -- per direction 2026-08-27, so hovering a line
+  // shows which real invoice it came from.
+  const billedLaborLines = data ? data.invoices.flatMap((inv) =>
+    inv.lines.filter((l) => l.category === 'labor')
+      .map((l) => (<><td>{inv.docNumber ?? '-'}</td><td>{l.itemName}</td><td>{fmtDate(inv.date)}</td><td>{fmtCurrency(l.amount)}</td></>))
+  ) : [];
+  const billedMaterialLines = data ? data.invoices.flatMap((inv) =>
+    inv.lines.filter((l) => l.category === 'parts')
+      .map((l) => (<><td>{inv.docNumber ?? '-'}</td><td>{l.itemName}</td><td>{fmtDate(inv.date)}</td><td>{fmtCurrency(l.amount)}</td></>))
+  ) : [];
+  const billedInvoiceLines = data ? data.invoices.map((inv) => (
+    <><td>{inv.docNumber ?? '-'}</td><td>{fmtDate(inv.date)}</td><td>{fmtCurrency(inv.amount)}</td></>
+  )) : [];
+  const quotedTotalLines = data ? [...(data.quotedLaborLines || []), ...(data.quotedPartsLines || [])]
+    .map((l) => (<><td>{l.name}</td><td>{l.qty}</td><td>{fmtCurrency(l.rate)}</td><td>{fmtCurrency(l.amount)}</td></>)) : [];
+  const technicianHoursLines = data ? (data.technicianBreakdown || []).map((t) => (<><td>{t.name}</td><td>{t.hours}h</td></>)) : [];
+  const helperHoursLines = data ? (data.helperBreakdown || []).map((t) => (<><td>{t.name}</td><td>{t.hours}h</td></>)) : [];
+
+  return (
+    <section className="exp-detail">
+      <button type="button" className="req-btn" onClick={onBack}>← Back to jobs</button>
+      {err && <div className="empty">Couldn't load job cost: {err}</div>}
+      {!err && !data && <LoadingDots label="Loading…" />}
+      {data && (
+        <>
+          <div className="exp-detail-head">
+            <OppLink className="jname" id={data.opportunity.id} name={data.opportunity.name} />
+            {data.opportunity.lid && <span className="lidtag">LID {data.opportunity.lid}</span>}
+          </div>
+
+          <div className="exp-detail-donut-row">
+            <JobDonutRings
+              quotedLabor={data.quotedLabor}
+              quotedParts={data.quotedParts}
+              quotedLaborLines={data.quotedLaborLines}
+              quotedPartsLines={data.quotedPartsLines}
+              size={240}
+            />
+            <div className="exp-detail-figures">
+              <div className="exp-figure-row">Awarded Amount <strong>{fmtCurrency(data.awardedAmount) ?? '-'}</strong></div>
+
+              <div className="exp-figure-group-label">Quoted <span className="exp-quote-source">({QUOTE_SOURCE_LABEL[data.quoteSource]})</span></div>
+              <div className="exp-figure-row"><span className="exp-dot exp-dot-quoted-labor" />Quoted Labor <strong>{fmtCurrency(data.quotedLabor) ?? '-'}</strong></div>
+              <div className="exp-figure-row"><span className="exp-dot exp-dot-quoted-parts" />Quoted Parts <strong>{fmtCurrency(data.quotedParts) ?? '-'}</strong></div>
+              <div className="exp-figure-row">Quoted Total <strong>{fmtCurrency(data.quotedTotal) ?? '-'}</strong></div>
+              {!(data.quotedTotal > 0) && <div className="exp-none-note">No quote data for this job -- the ring above shows relative to billed/expense totals instead</div>}
+              {!data.hasPurchaseOrders && <div className="exp-none-note">No CRS Purchase Orders recorded for this job yet</div>}
+              {!data.hasFsLink && <div className="exp-none-note">No Field Squared data for this job</div>}
+            </div>
+          </div>
+
+          <div className="exp-bullet-panel">
+            <div className="exp-figure-group-label">Award vs. Quote</div>
+            <BulletBar segmentKey="quotedTotal" actual={data.quotedTotal} target={data.awardedAmount} unit="$" lines={quotedTotalLines} />
+
+            <div className="exp-figure-group-label">Materials</div>
+            <BulletBar segmentKey="materialExpenses" actual={data.materialExpenses} target={data.quotedParts} unit="$" lines={
+              (data.materialExpenseLines || []).map((l) => (<><td>{l.poNumber}</td><td>{l.vendor ?? '-'}</td><td>{fmtDate(l.date) ?? '-'}</td><td>{fmtCurrency(l.amount)}</td></>))
+            } />
+            <BulletBar segmentKey="billedMaterials" actual={data.billedMaterials} target={data.quotedParts} unit="$" lines={billedMaterialLines} />
+
+            <div className="exp-figure-group-label">Labor</div>
+            <BulletBar segmentKey="billedLabor" actual={data.billedLabor} target={data.quotedLabor} unit="$" lines={billedLaborLines} />
+            <BulletBar segmentKey="technicianHours" actual={data.hasFsLink ? data.technicianHours : null} target={data.quotedTechnicianHours} unit="h" lines={technicianHoursLines} />
+            <BulletBar segmentKey="helperHours" actual={data.hasFsLink ? data.helperHours : null} target={data.quotedHelperHours} unit="h" lines={helperHoursLines} />
+
+            <div className="exp-figure-group-label">Billing</div>
+            <BulletBar segmentKey="billedTotal" actual={data.billed} target={data.awardedAmount} unit="$" lines={billedInvoiceLines} />
+            {data.overBilledBy != null && <div className="exp-none-note">Billed {fmtCurrency(data.overBilledBy)} over the Awarded Amount</div>}
+          </div>
+
+          <h3>Invoices</h3>
+          {data.invoices.length === 0 && <div className="na">No invoices on file</div>}
+          {data.invoices.map((inv) => (
+            <div className="invoice-detail exp-invoice" key={inv.id}>
+              <div className="invoice-detail-row">
+                <span className="invoice-detail-label">Invoice #</span>
+                <span className="invoice-detail-value">
+                  {inv.docNumber ?? <span className="na">-</span>}
+                  {inv.qboId && (
+                    <a className="qbo-open-link" href={`https://qbo.intuit.com/app/invoice?txnId=${inv.qboId}`} target="_blank" rel="noopener noreferrer">↗ QuickBooks</a>
+                  )}
+                </span>
+              </div>
+              <div className="invoice-detail-row"><span className="invoice-detail-label">Date</span><span className="invoice-detail-value">{fmtDate(inv.date) ?? <span className="na">-</span>}</span></div>
+              <div className="invoice-detail-row"><span className="invoice-detail-label">Amount</span><span className="invoice-detail-value">{fmtCurrency(inv.amount) ?? <span className="na">-</span>}</span></div>
+              <div className="invoice-detail-row"><span className="invoice-detail-label">Status</span><span className="invoice-detail-value">{inv.status ?? <span className="na">-</span>}</span></div>
+              {(inv.laborAmt != null || inv.partsAmt != null || inv.otherAmt != null) && (
+                <div className="invoice-detail-row">
+                  <span className="invoice-detail-label">Labor / Parts / Other (est.)</span>
+                  <span className="invoice-detail-value">{fmtCurrency(inv.laborAmt) ?? '-'} / {fmtCurrency(inv.partsAmt) ?? '-'} / {fmtCurrency(inv.otherAmt) ?? '-'}</span>
+                </div>
+              )}
+              {inv.lines.length > 0 && (
+                <table className="exp-invoice-lines">
+                  <thead><tr><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th><th>Category</th></tr></thead>
+                  <tbody>
+                    {inv.lines.map((l, i) => (
+                      <tr key={i}>
+                        <td>{l.itemName ?? '-'}</td>
+                        <td>{l.qty ?? '-'}</td>
+                        <td>{fmtCurrency(l.rate) ?? '-'}</td>
+                        <td>{fmtCurrency(l.amount) ?? '-'}</td>
+                        <td>{l.category}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+    </section>
+  );
+}
+
+// Sort menu tree -- same hover-to-expand flyout shape/CSS as the Outstanding
+// Jobs tab's Type filter (TypeFilterMenu, reuses the same .fsel-* classes),
+// just with every category always expanding (no bare-category selection --
+// every metric here has exactly an ascending/descending pair).
+const EXPENSE_SORT_TREE = [
+  { category: 'Last Modified', subs: [['modified_recent', 'Most recent'], ['modified_oldest', 'Oldest']] },
+  { category: 'Awarded Amount', subs: [['budget_desc', 'High to low'], ['budget_asc', 'Low to high']] },
+  { category: 'Material Expenses', subs: [['spend_desc', 'High to low'], ['spend_asc', 'Low to high']] },
+  { category: '% of Awarded Amount Spent', subs: [['pct_desc', 'High to low'], ['pct_asc', 'Low to high']] },
+  { category: 'Close Date', subs: [['close_recent', 'Most recent'], ['close_oldest', 'Oldest']] },
+  { category: 'Name', subs: [['name_az', 'A to Z'], ['name_za', 'Z to A']] },
+];
+
+function expenseSortLabel(key) {
+  for (const { category, subs } of EXPENSE_SORT_TREE) {
+    const hit = subs.find(([v]) => v === key);
+    if (hit) return `${category} · ${hit[1]}`;
+  }
+  return 'Sort';
+}
+
+function sortExpenseJobs(jobs, key) {
+  const pctUsed = (j) => (j.awardedAmount > 0 ? j.materialExpenses / j.awardedAmount : (j.materialExpenses > 0 ? Infinity : 0));
+  const sorted = [...jobs];
+  switch (key) {
+    case 'modified_recent': sorted.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || '')); break;
+    case 'modified_oldest': sorted.sort((a, b) => (a.lastModified || '').localeCompare(b.lastModified || '')); break;
+    case 'budget_desc': sorted.sort((a, b) => b.awardedAmount - a.awardedAmount); break;
+    case 'budget_asc': sorted.sort((a, b) => a.awardedAmount - b.awardedAmount); break;
+    case 'spend_desc': sorted.sort((a, b) => b.materialExpenses - a.materialExpenses); break;
+    case 'spend_asc': sorted.sort((a, b) => a.materialExpenses - b.materialExpenses); break;
+    case 'pct_desc': sorted.sort((a, b) => pctUsed(b) - pctUsed(a)); break;
+    case 'pct_asc': sorted.sort((a, b) => pctUsed(a) - pctUsed(b)); break;
+    case 'close_recent': sorted.sort((a, b) => (b.closeDate || '').localeCompare(a.closeDate || '')); break;
+    case 'close_oldest': sorted.sort((a, b) => (a.closeDate || '').localeCompare(b.closeDate || '')); break;
+    case 'name_az': sorted.sort((a, b) => a.name.localeCompare(b.name)); break;
+    case 'name_za': sorted.sort((a, b) => b.name.localeCompare(a.name)); break;
+    default: break;
+  }
+  return sorted;
+}
+
+// Flyout sort menu -- mirrors TypeFilterMenu's structure (App.jsx) exactly,
+// reusing the same .fsel-* CSS, just with EXPENSE_SORT_TREE's shape (every
+// category always has an asc/desc-style pair, no bare-category click).
+function ExpenseSortMenu({ value, onChange }) {
+  const { open, setOpen, pos, wrapRef, popRef } = useAnchoredPopover(170);
+  const [activeCat, setActiveCat] = useState(null);
+  const [flip, setFlip] = useState(false);
+
+  useEffect(() => { if (!open) setActiveCat(null); }, [open]);
+
+  const pick = (v) => { onChange(v); setOpen(false); };
+  const onEnterCat = (category) => {
+    setActiveCat(category);
+    if (popRef.current) {
+      const r = popRef.current.getBoundingClientRect();
+      setFlip(r.right + 200 > window.innerWidth - 8);
+    }
+  };
+
+  return (
+    <div className="fsel-wrap" ref={wrapRef}>
+      <button type="button" className="fsel-trigger" aria-label="Sort" onClick={() => setOpen((o) => !o)}>
+        <span className="fsel-val">{expenseSortLabel(value)}</span>
+        <span className="fsel-caret" aria-hidden>▾</span>
+      </button>
+      {open && createPortal(
+        <div className="fsel-menu" ref={popRef}
+          style={{ left: pos.left, minWidth: pos.width, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
+          onMouseLeave={() => setActiveCat(null)}>
+          {EXPENSE_SORT_TREE.map(({ category, subs }) => (
+            <div key={category} className="fsel-catrow" onMouseEnter={() => onEnterCat(category)}>
+              <button type="button" className="fsel-opt has-sub">{category}</button>
+              {activeCat === category && (
+                <div className={`fsel-sub ${flip ? 'flip-left' : ''}`}>
+                  {subs.map(([v, label]) => (
+                    <button key={v} type="button" className={`fsel-opt ${value === v ? 'sel' : ''}`} onClick={() => pick(v)}>{label}</button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+// Persists which job's detail view (if any) is open, the same localStorage
+// pattern as the top-level VIEW_STATE_KEY above (this app has no router) --
+// without it, a refresh while looking at a job's cost breakdown dropped back
+// to the full jobs list instead of staying put. Scoped to its own key rather
+// than folded into VIEW_STATE_KEY since this tab's state is self-contained.
+const EXPENSE_VIEW_STATE_KEY = 'dispatch_expense_view_state';
+const loadExpenseViewState = () => {
+  try { return JSON.parse(localStorage.getItem(EXPENSE_VIEW_STATE_KEY) || '{}'); } catch { return {}; }
+};
+
+function ExpenseTrackingTab() {
+  const [jobs, setJobs] = useState(null);
+  const [err, setErr] = useState(null);
+  const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState('modified_recent');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [selectedOppId, setSelectedOppId] = useState(() => loadExpenseViewState().selectedOppId ?? null);
+
+  useEffect(() => {
+    localStorage.setItem(EXPENSE_VIEW_STATE_KEY, JSON.stringify({ selectedOppId }));
+  }, [selectedOppId]);
+
+  useEffect(() => {
+    api.getExpenseJobs().then((d) => setJobs(d.jobs)).catch((e) => setErr(e.message));
+  }, []);
+
+  // A job's own "type" label for filtering/display -- recordType 'Job' wins
+  // (the more concrete signal, same as isJobType's own priority), else the
+  // real Opportunity_Type__c value. Flat, single-level -- these bare category
+  // names (Fire/Access/CCTV/Security/...) have no further nesting the way
+  // Service Call's sub-types do, so TypeFilterMenu's flyout arrow never
+  // triggers here (every entry gets empty subtypes, same as clicking a
+  // leaf-level category in the Outstanding Jobs Type menu).
+  const jobTypeLabel = (j) => (j.recordType === 'Job' ? 'Job' : (j.opportunityType || 'Other'));
+  const jobTypeTree = useMemo(() => {
+    if (!jobs) return [];
+    const types = new Set(jobs.map(jobTypeLabel));
+    return [...types].sort().map((category) => ({ category, subtypes: [] }));
+  }, [jobs]);
+
+  if (selectedOppId) {
+    return <ExpenseJobDetail oppId={selectedOppId} onBack={() => setSelectedOppId(null)} />;
+  }
+
+  const q = search.trim().toLowerCase();
+  // Searches across every field shown in the row, not just name -- address,
+  // LID, and status all match too, so a search actually surfaces every real
+  // result rather than only name/address hits.
+  const filtered = jobs
+    ? jobs.filter((j) => (typeFilter === 'all' || jobTypeLabel(j) === typeFilter)
+        && (!q
+          || j.name.toLowerCase().includes(q)
+          || (j.address || '').toLowerCase().includes(q)
+          || (j.lid || '').toLowerCase().includes(q)
+          || (j.status || '').toLowerCase().includes(q)))
+    : [];
+  const shown = sortExpenseJobs(filtered, sortKey);
+
+  return (
+    <section className="exp-list">
+      <div className="view-head">
+        <div><h2>Expense Tracking</h2><p>{jobs ? `${shown.length} of ${jobs.length} jobs` : 'Loading…'}</p></div>
+        <div className="usage-controls">
+          <div className="searchbox">
+            <span className="si">⌕</span>
+            <input className="searchinput" type="text" placeholder="Search jobs…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          </div>
+          {jobTypeTree.length > 0 && <TypeFilterMenu value={typeFilter} tree={jobTypeTree} onChange={setTypeFilter} />}
+          <ExpenseSortMenu value={sortKey} onChange={setSortKey} />
+        </div>
+      </div>
+      {err && <div className="empty">Couldn't load jobs: {err}</div>}
+      {!err && !jobs && <LoadingDots label="Loading jobs…" />}
+      {jobs && shown.length === 0 && <div className="empty">{q ? 'No jobs match that search.' : 'No jobs or invoiced service calls found.'}</div>}
+      {shown.map((job) => <ExpenseJobRow key={job.id} job={job} onOpen={setSelectedOppId} />)}
+    </section>
+  );
+}
+
 // Admin usage dashboard (D1-backed): KPIs, per-day + time-of-day bars, by-screen,
 // top features, who's-using-it, a recent-activity feed, and a per-user drill-down.
+// Auto-refresh interval while the Usage tab is actually open -- per direction
+// 2026-08-27: before this, the tab had no polling at all, only refetching on
+// first mount or the manual "↻ Refresh" button -- an admin watching it could
+// genuinely miss a just-fired event indefinitely. This only runs while
+// UsageDashboard is mounted (i.e. only while the Usage tab is the active
+// tab), same lifecycle-scoping as any other component-local interval here.
+const USAGE_POLL_MS = 20 * 1000;
+
 function UsageDashboard({ refreshKey = 0 }) {
   const [days, setDays] = useState(30);
   const [app, setApp] = useState('all');
@@ -6759,14 +8994,34 @@ function UsageDashboard({ refreshKey = 0 }) {
   const [people, setPeople] = useState([]);
   const [selPerson, setSelPerson] = useState('');
   const [detail, setDetail] = useState(null);
+  const [tick, setTick] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => { setData(null); setErr(null); api.getUsage(days, app).then(setData).catch((e) => setErr(e.message)); }, [days, app, refreshKey]);
-  useEffect(() => { api.getUsageRecent({ days, app, limit: 120 }).then((r) => setRecent(r.events || [])).catch(() => setRecent([])); }, [days, app, refreshKey]);
-  useEffect(() => { api.getUsagePeople().then((r) => setPeople(r.people || [])).catch(() => {}); }, [refreshKey]);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  // Per direction 2026-08-27: the auto-refresh (or the manual filter/days
+  // change below it) used to null out `data` before every refetch, which
+  // dropped the whole page back to the bare LoadingDots state every 20s --
+  // scroll position, an open drill-down, whatever you were looking at, all
+  // blown away by a poll tick you didn't even ask for. Same "stay on the old
+  // data until the new data is ready" fix already applied to Billing
+  // Reconciliation -- `data` (and `recent`/`people`/`detail` below, which
+  // never had the clear-first bug in the first place) is only ever replaced
+  // once the new fetch resolves, never blanked mid-flight. `refreshing`
+  // drives a small inline "Updating…" indicator instead of a full teardown.
+  useEffect(() => {
+    setRefreshing(true);
+    api.getUsage(days, app).then((d) => { setData(d); setErr(null); }).catch((e) => setErr(e.message)).finally(() => setRefreshing(false));
+  }, [days, app, refreshKey, tick]);
+  useEffect(() => { api.getUsageRecent({ days, app, limit: 120 }).then((r) => setRecent(r.events || [])).catch(() => setRecent([])); }, [days, app, refreshKey, tick]);
+  useEffect(() => { api.getUsagePeople().then((r) => setPeople(r.people || [])).catch(() => {}); }, [refreshKey, tick]);
   useEffect(() => {
     if (!selPerson) { setDetail(null); return; }
     api.getUsageUser(selPerson, days).then(setDetail).catch(() => setDetail(null));
-  }, [selPerson, days, refreshKey]);
+  }, [selPerson, days, refreshKey, tick]);
 
   const peopleOptions = useMemo(
     () => people.map((p) => [p.name, `${p.name} · ${p.kind === 'tech' ? 'Tech' : 'Office'}`]),
@@ -6796,7 +9051,11 @@ function UsageDashboard({ refreshKey = 0 }) {
   return (
     <section className="usage">
       <div className="view-head usage-head">
-        <div><h2>Usage</h2></div>
+        <div>
+          <h2>Usage</h2>
+          <div className="synced"><span className="dot" /><span className="lbl">Auto-refreshes every {USAGE_POLL_MS / 1000}s</span></div>
+          {refreshing && data && <LoadingDots label="Updating…" inline />}
+        </div>
         <div className="usage-controls">
           <div className="usage-range">
             {USAGE_APPS.map(([v, l]) => (
@@ -6812,7 +9071,7 @@ function UsageDashboard({ refreshKey = 0 }) {
       </div>
 
       {err && <div className="empty">Couldn’t load usage: {err}</div>}
-      {!err && !data && <div className="state">Loading usage…</div>}
+      {!err && !data && <LoadingDots label="Loading usage…" />}
       {data && (
         <>
           <div className="usage-kpis">
@@ -6822,14 +9081,14 @@ function UsageDashboard({ refreshKey = 0 }) {
             <div className="usage-kpi"><span className="k-num">{data.totals.logins ?? 0}</span><span className="k-lbl">Logins</span></div>
             <div className="usage-kpi"><span className="k-num">{(data.byEvent || []).find((e) => e.event === 'quote_sent')?.c ?? 0}</span><span className="k-lbl">Quotes sent</span></div>
             <div className="usage-kpi">
-              <span className="k-num">{(data.byApp || []).map((a) => `${a.app}:${a.c}`).join(' · ') || '—'}</span>
+              <span className="k-num">{(data.byApp || []).map((a) => `${a.app}:${a.c}`).join(' · ') || '-'}</span>
               <span className="k-lbl">By app</span>
             </div>
           </div>
 
           <div className="usage-panel">
             <h3>Actions summary</h3>
-            <p className="usage-panel-sub">Key things people did — scheduling, quotes, status changes, and more.</p>
+            <p className="usage-panel-sub">Key things people did - scheduling, quotes, status changes, and more.</p>
             {actionRows.length === 0 ? (
               <p className="tech-links-hint">No actions in this range.</p>
             ) : (
@@ -6872,10 +9131,10 @@ function UsageDashboard({ refreshKey = 0 }) {
               <h3>Screen views</h3>
               <p className="usage-panel-sub">Which screens people opened (navigation, not actions).</p>
               <table className="usage-table">
-                <thead><tr><th>Screen</th><th>Views</th></tr></thead>
+                <thead><tr><th>Screen</th><th>Views</th><th>Avg time on screen</th></tr></thead>
                 <tbody>
-                  {(data.byScreen || []).map((s, i) => (<tr key={i}><td>{s.screen}</td><td>{s.c}</td></tr>))}
-                  {(data.byScreen || []).length === 0 && <tr><td colSpan={2} className="tech-links-hint">No screen views yet.</td></tr>}
+                  {(data.byScreen || []).map((s, i) => (<tr key={i}><td>{s.screen}</td><td>{s.c}</td><td>{fmtDuration(s.avgMs) ?? '-'}</td></tr>))}
+                  {(data.byScreen || []).length === 0 && <tr><td colSpan={3} className="tech-links-hint">No screen views yet.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -6900,7 +9159,7 @@ function UsageDashboard({ refreshKey = 0 }) {
           <div className="usage-panel">
             <h3>Check a specific person</h3>
             <SearchableSelect value={selPerson} onChange={setSelPerson} options={peopleOptions} placeholder="Pick a tech or office user…" />
-            {selPerson && !detail && <div className="state">Loading…</div>}
+            {selPerson && !detail && <LoadingDots label="Loading…" />}
             {selPerson && detail && (
               <div className="usage-detail">
                 <div className="usage-kpis">
@@ -6928,8 +9187,8 @@ function UsageDashboard({ refreshKey = 0 }) {
                       <div>
                         <h4 className="usage-subh">Their screen views</h4>
                         <table className="usage-table">
-                          <thead><tr><th>Screen</th><th>Views</th></tr></thead>
-                          <tbody>{(detail.byScreen || []).map((s, i) => (<tr key={i}><td>{s.screen}</td><td>{s.c}</td></tr>))}</tbody>
+                          <thead><tr><th>Screen</th><th>Views</th><th>Avg time</th></tr></thead>
+                          <tbody>{(detail.byScreen || []).map((s, i) => (<tr key={i}><td>{s.screen}</td><td>{s.c}</td><td>{fmtDuration(s.avgMs) ?? '-'}</td></tr>))}</tbody>
                         </table>
                       </div>
                     </div>
