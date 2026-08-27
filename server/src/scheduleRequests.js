@@ -98,12 +98,12 @@ scheduleRequests.post('/schedule-requests/:id/approve', async (c) => {
     if (!OPEN_STATUSES.includes(reqRec[sr.status])) {
       return c.json({ error: `Cannot approve a request in status "${reqRec[sr.status]}"` }, 409);
     }
-    // The office cannot accept its own live offer — the turn belongs to the technician.
+    // The office cannot accept its own live offer - the turn belongs to the technician.
     if (reqRec[sr.lastOfferBy] === 'Office') {
-      return c.json({ error: 'Cannot approve — waiting on technician response' }, 409);
+      return c.json({ error: 'Cannot approve - waiting on technician response' }, 409);
     }
 
-    // Time off isn't tied to a job — Job__c may be blank on these records — so
+    // Time off isn't tied to a job - Job__c may be blank on these records - so
     // the target is derived from Type__c, not read off Job__c. Everything else
     // (job requests, "New WO Required") does use Job__c as the target.
     const isTimeOff = reqRec[sr.type] === 'Time off';
@@ -114,13 +114,13 @@ scheduleRequests.post('/schedule-requests/:id/approve', async (c) => {
         return c.json({ error: 'opportunityId required to approve a "New WO Required" request' }, 400);
       }
       if (opportunityId) {
-        // Re-point first — preserves the trail from the original ask to the real job.
+        // Re-point first - preserves the trail from the original ask to the real job.
         await sf.updateRecord(sr.sobject, id, { [sr.job]: opportunityId });
         targetOppId = opportunityId;
       }
     }
 
-    // status passed unconditionally — createAssignment's time-off sentinel guard
+    // status passed unconditionally - createAssignment's time-off sentinel guard
     // nulls it out when targetOppId is the time-off sentinel.
     const { assignmentId } = await createAssignment(c.env, targetOppId, {
       technicianId: reqRec[sr.tech],
@@ -159,12 +159,12 @@ scheduleRequests.post('/schedule-requests/:id/counter', async (c) => {
     if (!OPEN_STATUSES.includes(reqRec[sr.status])) {
       return c.json({ error: `Cannot counter a request in status "${reqRec[sr.status]}"` }, 409);
     }
-    // The office cannot counter its own live offer — not its turn.
+    // The office cannot counter its own live offer - not its turn.
     if (reqRec[sr.lastOfferBy] === 'Office') {
-      return c.json({ error: 'Cannot counter — waiting on technician response' }, 409);
+      return c.json({ error: 'Cannot counter - waiting on technician response' }, 409);
     }
 
-    // Countering overwrites rather than appending — SF field history is the audit trail.
+    // Countering overwrites rather than appending - SF field history is the audit trail.
     const payload = {
       [sr.proposedDate]: date,
       [sr.proposedStart]: toSfTime(start),

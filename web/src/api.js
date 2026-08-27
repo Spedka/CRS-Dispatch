@@ -36,7 +36,7 @@ export const api = {
       body: JSON.stringify(fields),
     }).then(j),
 
-  // status and scheduledDate are optional — when provided the server also updates
+  // status and scheduledDate are optional - when provided the server also updates
   // the SF Opportunity in the same request, eliminating a second round-trip.
   // endTime is required by the server (400s without it) for real job assignments.
   addAssignment: (oppId, technicianId, workDate, startTime, endTime, status, scheduledDate) =>
@@ -94,7 +94,7 @@ export const api = {
   getScheduleRequests: (opts) =>
     fetch(`/api/schedule-requests${opts?.resolved ? '?resolved=1' : ''}`).then(j),
 
-  // opportunityId only required for isNewWo rows — the server 400s otherwise.
+  // opportunityId only required for isNewWo rows - the server 400s otherwise.
   approveScheduleRequest: (id, opportunityId) =>
     fetch(`/api/schedule-requests/${id}/approve`, {
       method: 'POST',
@@ -194,6 +194,47 @@ export const api = {
       body: JSON.stringify(fields),
     }).then(j),
 
+  // ---- Create PO (QBO purchasing) ----
+  getPoSource: (oppIds) => fetch(`/api/finance/po-source?oppIds=${oppIds.map(encodeURIComponent).join(',')}`).then(j),
+
+  getQuoteLines: (quoteId) => fetch(`/api/finance/quotes/${quoteId}/lines`).then(j),
+
+  getQboVendors: () => fetch('/api/finance/qbo-vendors').then(j),
+
+  getSfdcVendors: () => fetch('/api/finance/sfdc-vendors').then(j),
+
+  getCostCenters: () => fetch('/api/finance/cost-centers').then(j),
+
+  getQboProjects: () => fetch('/api/finance/qbo-projects').then(j),
+
+  getQboItems: () => fetch('/api/finance/qbo-items').then(j),
+
+  createPurchaseOrder: (body) =>
+    fetch('/api/finance/purchase-orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(j),
+
+  // ---- Create Invoice (QBO invoicing from FS SERVICE_ACK data) ----
+  getServiceAcks: (oppId) => fetch(`/api/finance/service-acks/${oppId}`).then(j),
+
+  getServiceAckLines: (oppId, docId) => fetch(`/api/finance/service-acks/${oppId}/${docId}/lines`).then(j),
+
+  getQboSalesItems: () => fetch('/api/finance/qbo-sales-items').then(j),
+
+  // ---- Expense Tracking (Job/Project Cost Tracking) ----
+  getExpenseJobs: () => fetch('/api/finance/expense-jobs').then(j),
+
+  getJobCost: (oppId) => fetch(`/api/finance/job-cost/${oppId}`).then(j),
+
+  createInvoice: (body) =>
+    fetch('/api/finance/invoices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(j),
+
   // ---- Office users (admin) ----
   getOfficeUsers: () => fetch('/api/auth/office-users').then(j),
 
@@ -215,6 +256,14 @@ export const api = {
     if (actor) p.set('actor', actor);
     if (app && app !== 'all') p.set('app', app);
     return fetch(`/api/usage/recent?${p}`).then(j);
+  },
+
+  // Admin billing reconciliation (QBO vs SF). opts: { from, to, paymentMethod, refresh }.
+  // groupBy is applied client-side (rows carry the grouping keys).
+  getBillingReconciliation: (opts = {}) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(opts)) if (v != null && v !== '') p.set(k, String(v));
+    return fetch(`/api/finance/reconciliation?${p}`).then(j);
   },
 
 };

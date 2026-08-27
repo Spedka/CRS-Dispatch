@@ -11,12 +11,16 @@ const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 const OVERLAP_MS = 5 * 60 * 1000;
 const MIN_INTERVAL_MS = 60 * 1000;
 const MAX_UNLINKED_PER_RUN = 30;
-// Safety cap on the drift-verification pass below — the suspect set should
+// A task modified within this window is "fresh" - never skip-listed on a no-match,
+// so a WO created just before its SF opp keeps retrying every tick instead of
+// being stranded for the 24h skip-list TTL.
+const RECENT_NO_SKIP_MS = 2 * 24 * 60 * 60 * 1000;
+// Safety cap on the drift-verification pass below - the suspect set should
 // normally be small (only jobs the drift badge would actually flag), but
 // this bounds worst-case FS API calls in one tick if a status-list change
 // ever caused mass false-flagging.
 const MAX_DRIFT_CHECK_PER_RUN = 30;
-// Window for assignment reconciliation — slightly larger than the cron interval
+// Window for assignment reconciliation - slightly larger than the cron interval
 // to avoid gaps if a run starts a few seconds late.
 const RECONCILE_WINDOW_MS = 10 * 60 * 1000;
 
@@ -37,6 +41,54 @@ function findInSf(sfByName, sfByWoNum, task) {
   return wo ? (sfByWoNum.get(wo) ?? null) : null;
 }
 
+// ---- Tier-3 LID match (Test & Inspection only) ----------------------------
+// FS T&I task names and the SF Opp for the same job rarely share an exact name
+// or WO number (different WO#, "Test & Inspection" vs "T&I" vs "Annual", SF opps
+// named by site/LOCATION_NAME). But the FS task's Data.LID_NUMBER is the site's
+// LID, matching SF Opportunity.LID__c. A site gets a new T&I Opp every year, so
+// LID alone is NOT unique - the safe key is LID + the year in the name + "is a
+// T&I" + matching discrepancy-flag, and only when it resolves to exactly one Opp.
+// Scoped to recent inspection years the office still needs on record.
+const TI_YEARS = new Set(['2024', '2025', '2026']);
+const tiRe = /\bt\s*&\s*i\b|test\s*(?:&|and|\/|\+)?\s*inspection/i;
+const isTI = (s) => tiRe.test(s || '');
+const yearInName = (s) => (String(s).match(/\b(20\d{2})\b/) || [])[1] || null;
+const isDiscrep = (s) => /discrep/i.test(s || '');
+const esc = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+// A task is worth a (per-task) LID SOQL only if it's a T&I with a LID and an
+// in-scope year - a small slice of any batch, so the tier stays within budget.
+function isLidEligible(task) {
+  const lid = task.Data && task.Data.LID_NUMBER;
+  return !!lid && (isTI(task.Name) || isTI(task.TaskType)) && TI_YEARS.has(yearInName(task.Name));
+}
+
+// Returns the single gated Opp for this task's LID, or null (no match / ambiguous).
+async function findByLid(sf, task) {
+  const raw = String(task.Data.LID_NUMBER).trim();
+  const stripped = raw.replace(/^0+/, ''); // SF LID__c may or may not be zero-padded
+  const fy = yearInName(task.Name);
+  const fd = isDiscrep(task.Name);
+  const rows = await sf.query(
+    `SELECT Id, ${f.oppName}, ${f.oppLid} FROM Opportunity
+     WHERE (${f.oppLid} = '${esc(raw)}' OR ${f.oppLid} = '${esc(stripped)}')
+       AND ${f.oppFsTaskId} = null LIMIT 100`
+  );
+  const hits = rows.filter((r) => {
+    const nm = r[f.oppName] || '';
+    return isTI(nm) && yearInName(nm) === fy && isDiscrep(nm) === fd;
+  });
+  return hits.length === 1 ? hits[0] : null;
+}
+
+async function stampLink(sf, oppId, task) {
+  await sf.updateRecord('Opportunity', oppId, {
+    [f.oppFsTaskId]: task.ExternalId,
+    [f.oppFsStatus]: task.Status ?? null,
+    [f.oppFsLastModified]: task.LastUpdated ?? null,
+  });
+}
+
 export async function runFsSync(env) {
   const KV = env.SF_TOKENS;
   const fs = createFs(env);
@@ -53,18 +105,48 @@ export async function runFsSync(env) {
     ? new Date(new Date(stored).getTime() - OVERLAP_MS).toISOString()
     : new Date(Date.now() - ONE_YEAR_MS).toISOString();
 
-  let tasks;
+  // Narrow window - tasks FS reports modified since the last run. Drives the
+  // status-snapshot / assignment reconcile pass, which only cares about
+  // recently-touched tasks.
+  let recentTasks;
   try {
-    tasks = await fs.listModified(since);
+    recentTasks = await fs.listModified(since);
   } catch (e) {
     console.error('[fs-sync] listModified failed:', e.message);
     return;
   }
+  const linkableRecent = recentTasks.filter(isLinkable);
 
-  const linkable = tasks.filter(isLinkable);
-  console.log(`[fs-sync] ${tasks.length} FS tasks, ${linkable.length} linkable`);
+  // Wide window - the full past-year task list, cached in KV so we don't refetch
+  // ~2k tasks every 5-min tick. This is what lets the linking pass chew through
+  // the whole UNLINKED BACKLOG a batch at a time, instead of only ever seeing
+  // tasks modified in the last few minutes (which left older unlinked tasks
+  // stranded indefinitely). Refreshed every 30 min.
+  const SCAN_CACHE_KEY = 'fs_link_scan_list';
+  let scanTasks = await KV.get(SCAN_CACHE_KEY, 'json');
+  if (!scanTasks) {
+    try {
+      scanTasks = await fs.listModified(new Date(Date.now() - ONE_YEAR_MS).toISOString());
+      await KV.put(SCAN_CACHE_KEY, JSON.stringify(scanTasks), { expirationTtl: 1800 });
+    } catch (e) {
+      console.error('[fs-sync] scan-list fetch failed, falling back to narrow window:', e.message);
+      scanTasks = recentTasks;
+    }
+  }
 
-  // ONE bulk query — all SF opps that already have an FS link.
+  // Linking candidates = anything just modified (recent list) FIRST, then the
+  // backlog (scan list), deduped by ExternalId. Recent-first matters: toMatch is
+  // capped at MAX_UNLINKED_PER_RUN and sliced from the front, so putting the
+  // backlog first would starve brand-new tasks (a freshly-created WO would wait
+  // behind the whole backlog drain). Recent tasks go in the first slots and link
+  // on the very next tick once their SF opp exists.
+  const linkCandidates = new Map();
+  for (const t of recentTasks) if (isLinkable(t)) linkCandidates.set(t.ExternalId, t);
+  for (const t of scanTasks) if (isLinkable(t)) linkCandidates.set(t.ExternalId, t);
+  const linkable = [...linkCandidates.values()];
+  console.log(`[fs-sync] ${recentTasks.length} recent / ${scanTasks.length} scanned FS tasks, ${linkable.length} linkable candidates`);
+
+  // ONE bulk query - all SF opps that already have an FS link.
   // Includes Id so we can create/delete child assignment records without extra queries.
   let linkedOpps;
   try {
@@ -83,7 +165,7 @@ export async function runFsSync(env) {
   console.log(`[fs-sync] ${linkedMap.size} already linked`);
 
   // ---- Linking pass (unlinked tasks only, capped per run) ----
-  // Skip IDs that had no SF match on a previous run — persisted in KV for 24 hours
+  // Skip IDs that had no SF match on a previous run - persisted in KV for 24 hours
   // so each run advances to fresh tasks rather than retrying the same hopeless batch.
   const NO_MATCH_KEY = 'fs_no_match_ids';
   const skipRaw = await KV.get(NO_MATCH_KEY, 'json');
@@ -99,6 +181,12 @@ export async function runFsSync(env) {
   // One targeted SOQL per batch: filter by exact names + WO-number LIKE clauses.
   // This avoids per-task queries while also avoiding the LIMIT-2000 cutoff that
   // a catch-all "WHERE FS_Task_Id__c = null" scan would hit on the full opp backlog.
+  //
+  // Deliberately does NOT filter candidate Opps by status. Matching a task to
+  // its Opportunity has nothing to do with the Opp's board status, and the old
+  // `Project_Status__c IN (jobStatusValues)` filter silently dropped every match
+  // whose Opp sat at a blank or completed status - the bulk of the backlog.
+  // Scoped to the past year via CreatedDate instead (same window as the scan list).
   let sfByName = new Map();
   let sfByWoNum = new Map();
   if (toMatch.length > 0) {
@@ -108,18 +196,32 @@ export async function runFsSync(env) {
       const woLikes = woNums.map(n => `${f.oppName} LIKE 'WO ${n}%'`);
       const nameFilter = `${f.oppName} IN (${nameList})`;
       const nameOrWo = woLikes.length ? `(${nameFilter} OR ${woLikes.join(' OR ')})` : nameFilter;
-      const boardStatuses = config.jobStatusValues.map(s => `'${s}'`).join(',');
+      const scanSince = new Date(Date.now() - ONE_YEAR_MS).toISOString();
       const matchOpps = await sf.query(
-        `SELECT Id, ${f.oppName}, ${f.oppStatus}
+        `SELECT Id, ${f.oppName}
          FROM Opportunity
          WHERE ${f.oppFsTaskId} = null
-           AND ${f.oppStatus} IN (${boardStatuses})
+           AND CreatedDate >= ${scanSince}
            AND ${nameOrWo}`
       );
-      sfByName = new Map(matchOpps.map(o => [o[f.oppName], o]));
+
+      // Uniqueness gate (mis-assign guard): only keep a name/WO key that resolves
+      // to EXACTLY ONE candidate Opp. If a name or WO number maps to multiple
+      // Opps, refuse to guess - the task stays unlinked for a human to resolve
+      // via the manual fs-link endpoint rather than risk a wrong auto-link.
+      const nameCount = new Map();
+      const woCount = new Map();
       for (const opp of matchOpps) {
-        const wo = parseWoNum(opp[f.oppName]);
-        if (wo && !sfByWoNum.has(wo)) sfByWoNum.set(wo, opp);
+        const nm = opp[f.oppName];
+        nameCount.set(nm, (nameCount.get(nm) || 0) + 1);
+        const wo = parseWoNum(nm);
+        if (wo) woCount.set(wo, (woCount.get(wo) || 0) + 1);
+      }
+      for (const opp of matchOpps) {
+        const nm = opp[f.oppName];
+        if (nameCount.get(nm) === 1) sfByName.set(nm, opp);
+        const wo = parseWoNum(nm);
+        if (wo && woCount.get(wo) === 1) sfByWoNum.set(wo, opp);
       }
     } catch (e) {
       console.error('[fs-sync] batch match query failed:', e.message);
@@ -129,33 +231,79 @@ export async function runFsSync(env) {
   let linked = 0;
   const noMatchIds = [];
 
+  // Tiers 1–2 (exact name / WO number) resolve entirely from the batched query
+  // above - no per-task SOQL. Tasks that miss both AND are T&I-with-LID fall
+  // through to the tier-3 LID pass below (one SOQL each, only for that slice).
+  const lidCandidates = [];
   for (const task of toMatch) {
     try {
       const sfOpp = findInSf(sfByName, sfByWoNum, task);
-      if (!sfOpp) {
+      if (sfOpp) {
+        await stampLink(sf, sfOpp.Id, task);
+        console.log(`[fs-sync] linked (name/WO): "${task.Name}" → SF ${sfOpp.Id}`);
+        linked++;
+      } else if (isLidEligible(task)) {
+        lidCandidates.push(task);
+      } else {
         noMatchIds.push(task.ExternalId);
-        continue;
       }
-      // Bundle the raw FS status snapshot into the same write — the list
-      // endpoint's compact task shape already has Status + LastUpdated.
-      await sf.updateRecord('Opportunity', sfOpp.Id, {
-        [f.oppFsTaskId]: task.ExternalId,
-        [f.oppFsStatus]: task.Status ?? null,
-        [f.oppFsLastModified]: task.LastUpdated ?? null,
-      });
-      console.log(`[fs-sync] linked: "${task.Name}" → SF ${sfOpp.Id}`);
-      linked++;
     } catch (e) {
       console.error(`[fs-sync] error on "${task.Name}" (${task.ExternalId}):`, e.message);
     }
   }
 
-  console.log(`[fs-sync] done linking — ${linked} linked, ${noMatchIds.length} no SF match`);
+  // ---- Tier 3: LID match for T&I tasks (one SOQL per candidate) ----
+  // First collect each candidate's single gated Opp, THEN dedupe: if two tasks
+  // both resolve to the same Opp (a multi-building campus with several FS work
+  // orders under one SF T&I Opp), link neither - same refuse-to-guess rule as
+  // the uniqueness gate above. Candidate count is bounded by the 30/run batch.
+  if (lidCandidates.length > 0) {
+    const claims = new Map(); // oppId -> [task, ...]
+    for (const task of lidCandidates) {
+      try {
+        const opp = await findByLid(sf, task);
+        if (opp) {
+          if (!claims.has(opp.Id)) claims.set(opp.Id, []);
+          claims.get(opp.Id).push(task);
+        } else {
+          noMatchIds.push(task.ExternalId);
+        }
+      } catch (e) {
+        console.error(`[fs-sync] LID match error on "${task.Name}":`, e.message);
+        noMatchIds.push(task.ExternalId);
+      }
+    }
+    for (const [oppId, tasks] of claims) {
+      if (tasks.length !== 1) {
+        for (const t of tasks) noMatchIds.push(t.ExternalId); // ambiguous - skip all
+        continue;
+      }
+      const task = tasks[0];
+      try {
+        await stampLink(sf, oppId, task);
+        console.log(`[fs-sync] linked (LID): "${task.Name}" → SF ${oppId}`);
+        linked++;
+      } catch (e) {
+        console.error(`[fs-sync] error linking (LID) "${task.Name}":`, e.message);
+      }
+    }
+  }
+
+  console.log(`[fs-sync] done linking - ${linked} linked, ${noMatchIds.length} no SF match`);
 
   // Persist no-match IDs so next runs skip them. TTL of 24h means they'll be
-  // retried daily in case a matching SF opp is created later.
-  if (noMatchIds.length > 0) {
-    const updated = [...skipIds, ...noMatchIds];
+  // retried daily in case a matching SF opp is created later. EXCEPTION: a task
+  // modified within RECENT_NO_SKIP_MS is left off the skip-list, so a WO whose
+  // SF opp is created minutes/hours later still auto-links on the next tick
+  // instead of being stranded for 24h.
+  const toMatchById = new Map(toMatch.map(t => [t.ExternalId, t]));
+  const isFresh = (id) => {
+    const t = toMatchById.get(id);
+    return t && t.LastUpdated && (Date.now() - new Date(t.LastUpdated).getTime()) < RECENT_NO_SKIP_MS;
+  };
+  const skipToPersist = noMatchIds.filter(id => !isFresh(id));
+  if (skipToPersist.length > 0) {
+    const updated = [...skipIds, ...skipToPersist];
     await KV.put(NO_MATCH_KEY, JSON.stringify(updated), { expirationTtl: 86400 });
   }
 
@@ -164,7 +312,7 @@ export async function runFsSync(env) {
   // Pure SOQL-based check, no FS API calls yet: flag linked opps whose
   // Project_Status__c and cached FS_Status__c look incompatible per the
   // same table the board's drift badge uses. Most flagged jobs are a real,
-  // human-visible disagreement that should stay untouched — this pass
+  // human-visible disagreement that should stay untouched - this pass
   // never writes Project_Status__c. But the flag might instead mean the
   // cached FS_Status__c snapshot itself is simply stale (this cron's other
   // refresh triggers below only catch "FS reports it modified" or "no
@@ -181,7 +329,7 @@ export async function runFsSync(env) {
     .slice(0, MAX_DRIFT_CHECK_PER_RUN);
 
   if (suspectOpps.length > 0) {
-    console.log(`[fs-sync] ${suspectOpps.length} linked opp(s) flagged by status drift check — verifying live FS status`);
+    console.log(`[fs-sync] ${suspectOpps.length} linked opp(s) flagged by status drift check - verifying live FS status`);
   }
 
   for (const opp of suspectOpps) {
@@ -204,11 +352,11 @@ export async function runFsSync(env) {
   // Only tasks modified in the last RECONCILE_WINDOW_MS are processed here.
   // The cron runs every 5 min, so this typically covers 0–5 tasks per run.
   const recentCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
-  const toReconcile = linkable.filter(
+  const toReconcile = linkableRecent.filter(
     t => linkedMap.has(t.ExternalId) && (t.LastUpdated || '') >= recentCutoff
   );
 
-  // Backfill: already-linked opps with no FS_Status__c snapshot yet — e.g. jobs
+  // Backfill: already-linked opps with no FS_Status__c snapshot yet - e.g. jobs
   // linked before the fields existed, or ones FS hasn't touched since. These
   // won't show up in `linkable` (FS hasn't reported them modified), so pull
   // them straight from the bulk linked-opps query instead. Capped per run,
@@ -241,7 +389,7 @@ export async function runFsSync(env) {
         ),
       ]);
 
-      // ---- Status snapshot only — deliberately NOT reconciled/written either
+      // ---- Status snapshot only - deliberately NOT reconciled/written either
       // direction anymore. This used to compare timestamps and auto-push a
       // status to whichever side looked stale, but that could silently
       // overwrite a status a human had just set. Now it's display-only: the
@@ -254,7 +402,7 @@ export async function runFsSync(env) {
       });
 
       // FS users filtered to syncable techs only.
-      // getTask() may return Users as objects {ObjectId, Name, ...} or plain strings —
+      // getTask() may return Users as objects {ObjectId, Name, ...} or plain strings -
       // normalize to string IDs before comparing.
       const toFsId = (u) => (typeof u === 'string' ? u : u?.ObjectId ?? null);
       const fsUserIds = new Set(
@@ -283,14 +431,14 @@ export async function runFsSync(env) {
           console.log(`[fs-sync] added assignment: ${techName} → ${sfOpp.Id}`);
           await notifyTech(env, techName, 'assignment');
         } else {
-          console.warn(`[fs-sync] no SF tech ID for "${techName}" — skipping`);
+          console.warn(`[fs-sync] no SF tech ID for "${techName}" - skipping`);
         }
       }
 
       // Remove: SF has a syncable tech not present in FS Users
       for (const [techName, assignmentRec] of sfAssignedByName) {
         const fsUserId = techDir.byName[techName]?.fsUserId;
-        if (!fsUserId) continue; // not a syncable tech — leave it alone
+        if (!fsUserId) continue; // not a syncable tech - leave it alone
         if (!fsUserIds.has(fsUserId)) {
           await sf.deleteRecord(o.assignment, assignmentRec.Id);
           console.log(`[fs-sync] removed assignment: ${techName} from ${sfOpp.Id}`);

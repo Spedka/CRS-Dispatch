@@ -1,8 +1,8 @@
-# CRS Dispatch — Field Work Board
+# CRS Dispatch - Field Work Board
 
 A small hosted web app that reads outstanding field-work jobs from Salesforce
 (filtered by status) and lets dispatch assign any number of technicians to each
-job. Salesforce stays the single source of truth — this app holds no copy of the
+job. Salesforce stays the single source of truth - this app holds no copy of the
 data, so it can't drift.
 
 ```
@@ -20,11 +20,11 @@ Do this in **Setup → Object Manager**. No code.
 ### a. `Technician__c` (your tech list)
 - Create Object: Label `Technician`, plural `Technicians`.
 - It gets a `Name` field automatically.
-- Add field `Active__c` — Checkbox, default **checked**.
+- Add field `Active__c` - Checkbox, default **checked**.
 - Add a few technician records (Tab → New).
 
 ### b. Opportunity fields (the job)
-- Add `Scheduled_Date__c` — Date. (The work date. `CloseDate` is the *deal* close
+- Add `Scheduled_Date__c` - Date. (The work date. `CloseDate` is the *deal* close
   date, not when the tech shows up.)
 - Address: this scaffold reads `Account.ShippingStreet` / `ShippingCity`. If your
   job address doesn't come from the Account, add custom address fields on
@@ -32,11 +32,11 @@ Do this in **Setup → Object Manager**. No code.
 
 ### c. `Job_Assignment__c` (one tech on one job)
 - Create Object: Label `Job Assignment`.
-- Add `Opportunity__c` — Lookup → **Opportunity**.
+- Add `Opportunity__c` - Lookup → **Opportunity**.
   - In that lookup's settings, set **Child Relationship Name** to `Job_Assignments`
     (so the API exposes it as `Job_Assignments__r`).
-- Add `Technician__c` — Lookup → **Technician**.
-- Add `Work_Date__c` — Date.
+- Add `Technician__c` - Lookup → **Technician**.
+- Add `Work_Date__c` - Date.
 
 > A job with three techs is just three `Job_Assignment__c` rows. That's the
 > "dynamic number" behavior.
@@ -45,7 +45,7 @@ Do this in **Setup → Object Manager**. No code.
 Open `server/src/config.js` and set `jobStatusValues` to the **exact** `Project_Status__c`
 values that mean "needs field work" (the default/fallback status field). If your org uses
 Opportunity **record types** with per-type status fields, also configure
-`config.recordTypeStatus` (`fieldByType` / `valuesByType` / `boardExcludedTypes`) — see
+`config.recordTypeStatus` (`fieldByType` / `valuesByType` / `boardExcludedTypes`) - see
 `CLAUDE.md` → "Opportunity record types" for how the resolver picks a status field per type.
 Strings must match the SF picklists exactly (e.g. `Parts ordered`, lowercase o).
 
@@ -91,7 +91,7 @@ Sanity check the API alone: `curl localhost:3001/api/jobs`.
 ## Notes
 
 - **config.js is the only file that knows your org's names.** If a field name is
-  wrong, fix it there — not scattered through the code.
+  wrong, fix it there - not scattered through the code.
 - **Auth:** backend↔Salesforce uses Client Credentials. App *user* login is not
   built yet (deferred per scope). When you add it, fronting this with CRS
   Google/Microsoft SSO gets you MFA for free.

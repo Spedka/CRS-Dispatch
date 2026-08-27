@@ -1,14 +1,14 @@
-// FS API client — mirrors the pattern in salesforce.js
+// FS API client - mirrors the pattern in salesforce.js
 // Env vars required:
-//   FS_EMAIL        — API account email
-//   FS_PASSWORD     — API account password
-//   FS_WORKSPACE    — numeric workspace ID (e.g. "123")
+//   FS_EMAIL        - API account email
+//   FS_PASSWORD     - API account password
+//   FS_WORKSPACE    - numeric workspace ID (e.g. "123")
 // KV binding:
-//   FS_TOKENS       — same Workers KV namespace used to cache the auth token
+//   FS_TOKENS       - same Workers KV namespace used to cache the auth token
 
 const FS_BASE = 'https://api.fieldsquared.com';
 
-// Per-isolate in-memory cache — warm isolates reuse across requests.
+// Per-isolate in-memory cache - warm isolates reuse across requests.
 let mem = { token: null, expires: 0 };
 
 export function createFs(env) {
@@ -20,7 +20,7 @@ export function createFs(env) {
 
   // ---- Auth ----------------------------------------------------------------
   // IMPORTANT: calling /Authentication again issues a NEW token and immediately
-  // invalidates any previously issued token. Never call speculatively — only on
+  // invalidates any previously issued token. Never call speculatively - only on
   // confirmed 401 or cold start.
   async function fetchNewToken() {
     const res = await fetch(`${FS_BASE}/Authentication`, {
@@ -84,7 +84,7 @@ export function createFs(env) {
 
   /**
    * Fetch a single task by ExternalId (full record including Users array).
-   * Uses the /Task/{id} endpoint the FS web app itself uses — returns more
+   * Uses the /Task/{id} endpoint the FS web app itself uses - returns more
    * detail than the list endpoint.
    */
   async function getTask(externalId) {
@@ -98,8 +98,8 @@ export function createFs(env) {
    * Returns the compact list shape (User singular, not Users array).
    * Use getTask() to get the full record for any individual task.
    *
-   * @param {string} since  — ISO 8601 UTC string, e.g. "2026-06-22T00:00:00Z"
-   * @param {string} [taskType] — optional taskType filter (must be single type per FS docs)
+   * @param {string} since  - ISO 8601 UTC string, e.g. "2026-06-22T00:00:00Z"
+   * @param {string} [taskType] - optional taskType filter (must be single type per FS docs)
    */
   async function listModified(since, taskType) {
     let qs = `modifiedsince=${since}`;
@@ -129,7 +129,7 @@ export function createFs(env) {
       method: 'POST',
       body: JSON.stringify({ Name: name, TaskType: taskType, Status: status }),
     });
-    // FS always returns 200 — real errors are in x-errorstatusmessage, not the status code.
+    // FS always returns 200 - real errors are in x-errorstatusmessage, not the status code.
     const errHeader = res.headers.get('x-errorstatusmessage');
     if (errHeader) throw new Error(errHeader);
     if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
@@ -138,7 +138,7 @@ export function createFs(env) {
 
   /**
    * Replace the Users array on a task.
-   * Pass the full desired array — FS treats this as an absolute set (not a delta).
+   * Pass the full desired array - FS treats this as an absolute set (not a delta).
    * Name and TaskType are required by FS even for partial updates.
    */
   async function updateUsers(externalId, name, taskType, userIds) {
@@ -154,12 +154,12 @@ export function createFs(env) {
 
   /**
    * General-purpose task patch. Takes the full task object from getTask(), merges
-   * `fields` into it, and POSTs the complete object back to /Task/{externalId} —
+   * `fields` into it, and POSTs the complete object back to /Task/{externalId} -
    * the same endpoint the FS web app uses. Required for Schedules updates; the
    * /api/task endpoint silently ignores the Schedules field.
    */
   async function patchTask(externalId, fullTask, fields) {
-    // getTask() returns ExternalId: "" (blank) — FS uses ExternalId as the upsert
+    // getTask() returns ExternalId: "" (blank) - FS uses ExternalId as the upsert
     // key and rejects a POST where it's an explicit empty string. Populate it from
     // the URL parameter (same value as ObjectId on a linked task).
     // BasedOn = the VersionId we read from; FS uses it for optimistic concurrency.
@@ -191,7 +191,7 @@ export function createFs(env) {
     return true;
   }
 
-  // ---- TEMPORARY — Documents API exploration (remove after investigation) --
+  // ---- TEMPORARY - Documents API exploration (remove after investigation) --
   // Returns raw {status, ok, body} instead of throwing/parsing so the debug
   // route can surface FS errors verbatim, exactly as they came back.
 
@@ -220,7 +220,7 @@ export function createFs(env) {
 
   /**
    * TEMPORARY. Passthrough for experimenting with /api/document filter params
-   * without redeploying — caller supplies the raw (already-encoded) query string.
+   * without redeploying - caller supplies the raw (already-encoded) query string.
    */
   async function rawDocumentQuery(qs) {
     const res = await fsFetch(`/api/document${qs ? `?${qs}` : ''}`);
@@ -231,7 +231,7 @@ export function createFs(env) {
 
   return {
     getToken, getTask, listModified, listUsers, updateStatus, updateUsers, patchTask,
-    // TEMPORARY — remove along with the /debug/documents route.
+    // TEMPORARY - remove along with the /debug/documents route.
     listDocuments, getDocument, rawDocumentQuery,
   };
 }

@@ -1,4 +1,4 @@
-// Dispatch (office) auth — client side. Stores the device token + user in
+// Dispatch (office) auth - client side. Stores the device token + user in
 // localStorage, patches fetch so every /api and /auth request carries the
 // Bearer token (avoids editing every call in api.js), and exposes login/logout/
 // change-password + a fire-and-forget usage tracker.

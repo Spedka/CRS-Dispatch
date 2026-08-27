@@ -445,7 +445,7 @@ class TvErrorBoundary extends React.Component {
   }
   render() {
     if (this.state.hasError) {
-      return <div className="tv-fallback">Schedule display unavailable — will retry shortly.</div>;
+      return <div className="tv-fallback">Schedule display unavailable - will retry shortly.</div>;
     }
     return this.props.children;
   }
@@ -535,7 +535,7 @@ function TvBoardInner() {
 
   const syncedLabel = lastSyncedAt
     ? new Date(lastSyncedAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-    : '—';
+    : '-';
 
   return (
     <div className="tv-page">

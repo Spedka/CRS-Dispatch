@@ -1,11 +1,11 @@
 // Dispatch (office) auth: /api/auth/login (email + password) issues a long-lived
 // device token that the frontend stores and sends as `Authorization: Bearer
-// <deviceToken>`. Ported from crs-board's worker/src/auth.ts — same stateless,
+// <deviceToken>`. Ported from crs-board's worker/src/auth.ts - same stateless,
 // self-verifying HMAC approach (no server-side session storage; a Worker runs
 // many isolates, so an in-memory session map would only exist on one of them).
 //
 // The device token carries only the user's Name; the ADMIN role is never
-// trusted from the token — admin-gated routes re-read User.Dispatch_Admin__c
+// trusted from the token - admin-gated routes re-read User.Dispatch_Admin__c
 // live from Salesforce (see routes.js), so revoking admin takes effect at once.
 
 const DEV_FALLBACK_SECRET = 'dispatch-dev-insecure-secret-do-not-use-in-prod';
@@ -15,7 +15,7 @@ export function getAuthSecret(env) {
   const secret = env?.AUTH_SECRET;
   if (secret) return secret;
   if (!warnedMissingSecret) {
-    console.warn('AUTH_SECRET not set — dispatch auth tokens use an insecure dev fallback. Set it via `wrangler secret put AUTH_SECRET` before deploying.');
+    console.warn('AUTH_SECRET not set - dispatch auth tokens use an insecure dev fallback. Set it via `wrangler secret put AUTH_SECRET` before deploying.');
     warnedMissingSecret = true;
   }
   return DEV_FALLBACK_SECRET;

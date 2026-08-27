@@ -12,7 +12,7 @@ export const normTime = (v) => (v ? String(v).slice(0, 5) : null);
 export const toSfTime = (hhmm) => (hhmm ? `${hhmm}:00.000Z` : null);
 
 // Live FS↔SF technician directory, read from Salesforce (Technician__c +
-// FS_User_Id__c) instead of a hardcoded map — this is what lets "Add Tech" in
+// FS_User_Id__c) instead of a hardcoded map - this is what lets "Add Tech" in
 // the board UI take effect without a code deploy. Cached per-isolate for a
 // short window since it's queried on most assignment/sync operations;
 // invalidateTechDirectory() clears it right after a new tech is created so
@@ -41,6 +41,36 @@ export async function getTechDirectory(sf) {
 
 export function invalidateTechDirectory() {
   techDirCache = { data: null, expires: 0 };
+}
+
+// Full FS-user-id -> tech name crosswalk, INCLUDING inactive/departed techs
+// -- unlike getTechDirectory above (deliberately active-only, correct for
+// live scheduling: you don't want to assign work to someone no longer
+// active), this is for resolving WHO already did real historical work
+// logged in an FS document (jobCost.js's per-tech hours breakdown).
+// Confirmed live 2026-08-27: a real technician (Adrian Van Luven) had 184+
+// real hours correctly logged under his real FS_User_Id__c, but showed up
+// as an unresolved raw id in the hours breakdown -- not a data problem, just
+// getTechDirectory's active-only filter correctly excluding him for its own
+// purpose while being the wrong lookup for this one. Someone who did real
+// work shouldn't disappear into an opaque id just because they've since
+// left -- history doesn't change when someone's employment status does.
+const TECH_DIR_ALL_TTL_MS = 60_000;
+let techDirAllCache = { data: null, expires: 0 };
+
+export async function getTechDirectoryAll(sf) {
+  const now = Date.now();
+  if (techDirAllCache.data && now < techDirAllCache.expires) return techDirAllCache.data;
+
+  const rows = await sf.query(`SELECT Id, Name, ${o.technicianFsUserId} FROM ${o.technician}`);
+  const byFsId = {};
+  for (const r of rows) {
+    const fsUserId = r[o.technicianFsUserId] || null;
+    if (fsUserId) byFsId[fsUserId] = { sfId: r.Id, name: r.Name };
+  }
+  const data = { byFsId };
+  techDirAllCache = { data, expires: now + TECH_DIR_ALL_TTL_MS };
+  return data;
 }
 
 // US Eastern DST: second Sunday of March → first Sunday of November.
@@ -99,7 +129,7 @@ export function buildFsSchedules(task, isoDate, localTime = '08:00', endLocalTim
       TimeZone: existing.TimeZone ?? '',
     }];
   }
-  // No existing schedule — mint a client-side ObjectId. FS keys the Schedules
+  // No existing schedule - mint a client-side ObjectId. FS keys the Schedules
   // array by ObjectId and rejects entries that omit it.
   return [{ ObjectId: fsObjectId(), Start: start, End: end, Users: [], Teams: [], Data: {}, TimeZone: '' }];
 }
@@ -115,7 +145,7 @@ export async function createAssignment(env, oppId, {
 }) {
   // Approved time off is a Job_Assignment__c against a hidden sentinel
   // Opportunity. Its Project_Status__c sits outside jobStatusValues on
-  // purpose — that's what keeps it off the board. Guard here, not in each
+  // purpose - that's what keeps it off the board. Guard here, not in each
   // caller, so nothing can rewrite the sentinel into a real board status.
   const isTimeOff = oppId === env.TIME_OFF_OPPORTUNITY_ID;
   if (isTimeOff) {
@@ -165,7 +195,7 @@ export async function createAssignment(env, oppId, {
     console.log('[API] Warning: could not fetch created assignment', e.message);
   }
 
-  // Caller doesn't know the job's other assignment dates — derive the earliest
+  // Caller doesn't know the job's other assignment dates - derive the earliest
   // one ourselves so a later assignment doesn't push FS's scheduled date forward.
   // The newly inserted row is included by this query, which is what we want.
   if (deriveScheduledDate && !scheduledDate) {
@@ -210,7 +240,7 @@ export async function createAssignment(env, oppId, {
             fsPatch.Users = [...currentUserIds, fsUserId];
           }
           if (status) {
-            const fsStatus = sfToFsStatus(status, true); // always has assignments — just added one
+            const fsStatus = sfToFsStatus(status, true); // always has assignments - just added one
             if (fsStatus) fsPatch.Status = fsStatus;
           }
           // scheduledDate = earliest assignment date (derived by client); use it
