@@ -36,6 +36,26 @@ h1,h2{margin:0;}
 
 main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
 
+/* Desktop-default state for the mobile-only overrides inside the media
+   query below -- MUST stay before it in source order (equal specificity,
+   later source wins when a media condition is active, so a rule placed
+   after the query would silently cancel its own override on mobile --
+   caught this exact bug live 2026-08-28, these three were originally
+   misplaced after the query and it silently no-opped every JobCard/filter
+   mobile fix). */
+.filters-mobile{display:none;margin-bottom:18px;}
+.job-expand-toggle{display:none;}
+.job-collapsible{display:contents;}
+/* Layout-transparent on desktop, same reasoning as .job-collapsible itself
+   -- its children (.meta/.assignlist etc.) need to participate directly in
+   .job-collapsible's own display:contents parent, not be boxed by this
+   wrapper. Only becomes a real box inside the mobile media query below. */
+.job-collapsible-inner{display:contents;}
+/* Desktop already shows the status control in .row1 -- this mobile-only
+   duplicate (App.jsx, JobCard) stays hidden there. */
+.job-collapsible-status-row{display:none;}
+.tech-week-list{display:none;}
+
 /* Locked app-shell (no page bounce/zoom, each screen scrolls internally
    instead of the page) -- mobile/PWA-install only. Desktop keeps the
    original plain-page layout, where the whole window scrolls normally;
@@ -107,7 +127,334 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
      on some versions, which is why this font-size rule is the one that
      actually has to work). */
   input, select, textarea { font-size:16px !important; }
+
+  /* Per direction 2026-08-28: "zoom locking wasn't implemented on certain
+     pages" -- real, and not actually a per-page inconsistency so much as a
+     gap that was always there everywhere except .tabs (below). The
+     maximum-scale/user-scalable=no viewport meta (index.html) is only a
+     best-effort layer -- modern iOS versions ignore it outright for
+     accessibility, same caveat already noted on the input font-size rule
+     above. touch-action is the mechanism that actually holds on those
+     versions, and it has to be set per-element, not once globally: the
+     html/body/#root lock above stops the outer PAGE from bouncing/zooming,
+     but every element that scrolls WITHIN that locked shell is its own
+     touch-handling surface and silently falls back to touch-action:auto
+     (pinch-zoom allowed) unless it says otherwise -- .tabs was the only one
+     that ever got this treatment. pan-x pan-y (not the `manipulation`
+     shorthand, which still permits pinch-zoom) explicitly allows normal
+     scrolling in both directions while excluding pinch-zoom specifically.
+     Centralized here, one list, same reasoning as the font-size rule above
+     -- add any new scrollable container's class to this list rather than
+     styling touch-action next to its own rules, so this can't silently miss
+     one the way per-component treatment already did once. */
+  main,
+  .modal,
+  .grid-wrap,
+  .contacts-wrap,
+  .recon-scroll,
+  .po-scroll,
+  .donut-popover,
+  .exp-invoice-lines-scroll,
+  .notes-pop-list,
+  .icp-list {
+    touch-action: pan-x pan-y;
+  }
+
+  /* Status filter chip row -> single dropdown (App.jsx) -- the full chip
+     row wrapped across several lines, pushing the job list below the fold
+     before it was ever seen. !important on .filters-desktop is deliberate
+     -- the base .filters{display:flex} rule (styles.css, shared with the
+     .filters class this same element also carries) sits later in the file
+     than this media query, so at equal single-class specificity it was
+     winning and the chip row kept showing on mobile alongside the new
+     dropdown. Same root cause as .job-row-status just above. */
+  .filters-desktop { display:none !important; }
+  .filters-mobile { display:block; }
+
+  /* JobCard collapse -- show just the name/status "top part" by default,
+     expand the rest (address, scheduled date, assigned techs) on tap. The
+     toggle only renders meaningfully here; desktop never shows it and
+     .job-collapsible is always visible there (base CSS, no override
+     needed). */
+  .job-expand-toggle{display:flex;align-items:center;justify-content:center;min-width:36px;min-height:36px;margin-left:auto;border:none;background:none;cursor:pointer;color:var(--ink-faint);flex-shrink:0;}
+  .job-expand-chevron{font-size:15px;}
+  /* Same grid-rows 0fr->1fr cascade as .cascade-panel elsewhere in this
+     file (own separate rules since .job-collapsible needs a display:contents
+     desktop default that .cascade-panel doesn't). This content includes
+     DatePicker/TimePicker/TechMultiSelect, whose popovers are positioned via
+     getBoundingClientRect() against the viewport -- initially left transform
+     off here over a (checked, real) concern that a `transform` on an
+     ancestor becomes the containing block for position:fixed descendants
+     and could throw that off. Verified those three all render their popover
+     content through createPortal(..., document.body), though -- not actual
+     DOM descendants of this wrapper at all despite being nested in the
+     React tree, so the containing-block change never reaches them. Full
+     transform+opacity cascade, same as everywhere else. */
+  .job-collapsible{display:grid;grid-template-rows:0fr;transition:grid-template-rows .3s cubic-bezier(.4,0,.2,1);}
+  .job-collapsible.expanded{grid-template-rows:1fr;}
+  .job-collapsible-inner{display:flex;flex-direction:column;gap:10px;overflow:hidden;min-height:0;opacity:0;transform:translateY(-6px);transition:opacity .22s ease,transform .28s cubic-bezier(.4,0,.2,1);}
+  .job-collapsible.expanded .job-collapsible-inner{opacity:1;transform:translateY(0);}
+
+  /* A full assignment row (check + name + date + 2x time + remove) doesn't
+     fit a phone's width -- .job's own overflow:hidden was silently clipping
+     whatever didn't fit instead of wrapping it. */
+  .assignrow{flex-wrap:wrap;}
+
+  /* .jname still ran off the right of the card -- a flex item's default
+     min-width is auto (its own content width), not 0, so it never actually
+     shrunk to the row's available space; it just kept rendering on one line
+     at full width and let .job's overflow:hidden clip whatever didn't fit.
+     min-width:0 alone on .jname wasn't enough -- the same default-auto-
+     min-width problem exists at every level between it and the actual
+     width constraint (.job's own grid track): .job is a 2-column grid
+     (stripe + content) and a grid item's min-width also defaults to auto,
+     so .body's content could still force that 1fr track wider; .body and
+     .row1 are both flex containers with the same issue one level down.
+     Needs min-width:0 at each level in the chain, not just the leaf text
+     element, for the shrink to actually reach it. overflow-wrap lets the
+     name break within itself once it runs out of spaces to wrap at. */
+  .job{min-width:0;}
+  .body{min-width:0;}
+  .row1{min-width:0;}
+  .jname{min-width:0;overflow-wrap:break-word;}
+  /* The REAL blocker, found after the min-width chain above still didn't
+     work: .jname is rendered by OppLink with .opp-link ALSO on it
+     (App.jsx), and .opp-link sets flex:none (flex-shrink:0) -- the item
+     was never even attempting to shrink in the first place, regardless of
+     min-width, because flex-shrink:0 skips it entirely during the shrink
+     pass. !important + later-file precedence, same reasoning as
+     .job-row-status above (.opp-link's rule sits after this media query). */
+  .jname{flex-shrink:1 !important;}
+
+  /* Per-job status pill -- redundant now that the top picklist covers
+     filtering by status, and it's a wide button in every single row.
+     Hidden on mobile only; the status stripe on the card's own left edge
+     still shows it at a glance. .job-row-status distinguishes this from
+     FilterSelect's other status-pill uses (e.g. the job detail modal),
+     which stay untouched. !important is deliberate, same reasoning as the
+     input font-size rule up top -- .fsel-trigger's own display:inline-flex
+     (styles.css, FilterSelect's base trigger style) is a plain rule that
+     sits LATER in this file than this media query, so at equal (single-
+     class) specificity it was winning regardless of the query being
+     active -- confirmed live 2026-08-28, the pill was still showing despite
+     this rule. Needs to win unconditionally, not depend on staying below
+     wherever FilterSelect's own styles happen to be in the file. */
+  .job-row-status{display:none !important;}
+  /* ...but hiding it here left no way to actually CHANGE a job's status on
+     mobile at all -- the top dropdown (.filters-mobile) only *filters* the
+     list, it was never an editor. Real gap, not a style call; found live
+     2026-08-28. .job-collapsible-status-row is the mobile-only duplicate
+     control (App.jsx, JobCard) living inside the expanded card instead --
+     shown here, same !important reasoning as the rule above it. */
+  .job-collapsible-status-row{display:block;margin-bottom:2px;}
+
+  /* Per direction 2026-08-28: drop the "+ Invoice" quick-action from the
+     job row on mobile -- one more wide button competing for space in a row
+     that already has name/LID/FS/status/notes. .job-row-invoice-btn scopes
+     this to JobCard's own inline button specifically (JobInvoiceRow's own
+     "+ Create Invoice" button, a different screen entirely, shares the
+     .inv-badge class but not this one, and stays untouched). */
+  .job-row-invoice-btn{display:none !important;}
+
+  /* Tech Schedule -> per-tech collapsed list, mirroring crs-board's own
+     "All Techs" crew view (CrewBoard.tsx/.css) -- per direction 2026-08-28,
+     the 7-day grid only ever showed ~2 real day columns on a phone.
+     !important on both sides of the swap, proactively -- this exact
+     equal-specificity/later-source-wins conflict has hit three different
+     rules already today (.job-row-status, .filters-desktop, .jname), so
+     not worth risking a fourth silent no-op here. */
+  .sched-desktop{display:none !important;}
+  .tech-week-list{display:flex !important;flex-direction:column;gap:9px;padding:0 0 18px;}
+
+  /* Contacts -> each table row becomes a stacked card instead of a 5-column
+     row that only ever showed the name before you had to scroll. CSS-only
+     transform (no JSX/component duplication) -- Contacts' own cell content
+     is already self-labeled (Phone/Mobile/Fax text, the buildings-count
+     toggle, a real email link), so stacking it doesn't lose any context.
+     Accounts (.accounts-screen) gets the same structural transform, but its
+     columns (Type/LID/Address/Phone/Billing) are bare values, not self-
+     labeled -- those get explicit data-label tags below instead. Both
+     screens share `.contacts-table` (Parts uses it too, untouched here --
+     no mobile treatment yet, different columns again). */
+  .contacts-screen .contacts-table,
+  .accounts-screen .contacts-table { display: block; }
+  /* flex column + gap, not block + tr{margin-bottom} -- avoids a
+     known-flaky combination in mobile WebKit where margin on a <tr>
+     forced to display:block can silently no-op (anonymous-table-box
+     fixup left over from the element still being part of a real HTML
+     table underneath). Not confirmed as the cause of anything here, just
+     a more reliable mechanism than hoping margin behaves. */
+  .contacts-screen .contacts-table tbody,
+  .accounts-screen .contacts-table tbody {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  /* .contacts-table's own base rule sets min-width:600px (for the desktop
+     column layout) and sits later in the file than this query -- checked
+     proactively this time rather than waiting for a report, given how many
+     times that exact pattern has already bitten today. Without this
+     override the stacked cards would still be forced 600px wide on a
+     360-430px phone. */
+  .contacts-screen .contacts-table,
+  .accounts-screen .contacts-table { min-width: 0 !important; }
+  /* Compound selector (no space) -- .contacts-wrap/.accounts-wrap and
+     .contacts-screen/.accounts-screen are two classes on the SAME div, not
+     nested elements. Written with a space for most of this session (see
+     git history), which is a descendant combinator and never matches a
+     single element carrying both classes -- that bug was the actual source
+     of Contacts' "white box behind the cards" mystery (full story: the
+     commit that fixed it). Kept as compound here from the start for
+     Accounts, not repeating that one. */
+  .contacts-screen.contacts-wrap,
+  .accounts-screen.contacts-wrap {
+    background: var(--bg) !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    overflow: visible !important;
+  }
+  .contacts-screen .contacts-table thead,
+  .accounts-screen .contacts-table thead { display: none; }
+  .contacts-screen .contacts-table tr,
+  .accounts-screen .contacts-table tr {
+    display: block;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    /* background intentionally NOT set here -- the later !important block
+       below owns it now, after tbody turned out to have its own opaque
+       default rendering that needed peeling back with !important too;
+       setting it here as well would just be redundant/confusing dead
+       weight once that rule always wins anyway. */
+    /* .job cards get exactly this same box-shadow (styles.css) and clearly
+       stand off the page by comparison. Spacing between cards now comes
+       from tbody's flex gap (above), not margin here -- margin-bottom on a
+       <tr> turned out to be the actual bug (see tbody comment above), and
+       stacking a margin on top of the flex gap would just double it. */
+    box-shadow: var(--shadow);
+    padding: 12px 14px;
+  }
+  .contacts-screen .contacts-table td,
+  .accounts-screen .contacts-table td {
+    display: block;
+    padding: 6px 0;
+    border-bottom: none;
+  }
+  .contacts-screen .contacts-table td:first-child,
+  .accounts-screen .contacts-table td:first-child { padding-top: 0; }
+  .contacts-screen .contacts-table td:last-child,
+  .accounts-screen .contacts-table td:last-child {
+    padding-bottom: 0;
+    padding-top: 10px;
+    margin-top: 4px;
+    border-top: 1px solid var(--line);
+  }
+
+  /* Found via the color diagnostic 2026-08-28 -- tbody was rendering fully
+     opaque, immune to every earlier fix since those only ever touched
+     .contacts-wrap (a layer BELOW tbody in paint order) or tbody's
+     `display` (never its background). transparent on tbody alone still
+     wasn't enough, though -- whatever's making tbody opaque by default
+     could be true of the rest of the table/*section chain too, so this
+     forces transparent all the way from tbody up through <table> itself,
+     rather than peeling one layer at a time again. */
+  .contacts-screen .contacts-table,
+  .contacts-screen .contacts-table tbody,
+  .contacts-screen .contacts-table tr,
+  .contacts-screen .contacts-table td,
+  .accounts-screen .contacts-table,
+  .accounts-screen .contacts-table tbody,
+  .accounts-screen .contacts-table tr,
+  .accounts-screen .contacts-table td {
+    background: transparent !important;
+  }
+  /* ...except the card itself, which SHOULD be the real white surface --
+     re-asserted after the blanket rule above (later in the same query,
+     same specificity as the tr selector above it, so this wins). */
+  .contacts-screen .contacts-table tr,
+  .accounts-screen .contacts-table tr {
+    background: var(--surface) !important;
+  }
+  /* Exclude the always-mounted account-detail-row from the card treatment
+     above -- it needs to render as truly nothing (no border/shadow/padding)
+     while collapsed to 0 height, same reasoning as its desktop td rule
+     (styles.css, .contacts-table tr.account-detail-row td). Extra class so
+     this wins on specificity alone, but !important anyway per this file's
+     established pattern -- proven necessary too many times this session to
+     assume order will save it. */
+  .accounts-screen .contacts-table tr.account-detail-row {
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+  }
+  /* THE actual bug (found live 2026-08-28 from a screenshot + DevTools --
+     the earlier "doubled gap" theory was wrong/incomplete and got
+     reverted). account-detail-row's <td> is the only child of its own
+     <tr>, so it's ALSO a :last-child -- the shared card treatment below
+     (`.accounts-screen .contacts-table td:last-child`, the divider line
+     above the Billing field on every normal row) matches it too, adding
+     padding-top/margin-top/border-top that sits on the <td> itself,
+     completely outside the Cascade inside it. That's why it was visible
+     regardless of expanded/collapsed state -- it was never part of the
+     Cascade's own content at all. The earlier `padding: 0 !important` a
+     few lines up didn't beat it: `.accounts-screen .contacts-table
+     td:last-child` has 3 classes/pseudo-classes (.accounts-screen,
+     .contacts-table, :last-child) vs. this rule's 2 (.accounts-screen,
+     .contacts-table) + tr.account-detail-row's class, and CSS specificity
+     compares class-count before type-count, so the :last-child rule won
+     for padding-top specifically despite this rule's own `padding: 0`. */
+  .accounts-screen .contacts-table tr.account-detail-row td:last-child {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+    border-top: none !important;
+  }
+
+  /* Accounts-only: unlike Contacts' self-labeled cells (Phone/Mobile/Fax
+     text baked into the content itself), Type/LID/Address/Phone/Billing are
+     bare values -- stacked with no header row (thead is hidden above) they
+     wouldn't read as anything. App.jsx tags each <td> with data-label
+     (e.g. data-label="Type"); this renders it as a small caption above the
+     value, mobile-only. The Name cell (first child, holds the row's own
+     buttons) and the expandable "Account Details" panel's own inline
+     "Street: value" spans are already self-labeled and don't carry
+     data-label, so they're untouched. */
+  .accounts-screen .contacts-table td[data-label] { padding-top: 14px; }
+  /* The Name <td> (no data-label) is always the first cell, so "Type" is
+     always the first *labeled* one -- named explicitly rather than
+     :first-of-type, which matches the first <td> of any kind (the Name
+     cell) and would never actually select this one. */
+  .accounts-screen .contacts-table td[data-label="Type"] { padding-top: 6px; }
+  .accounts-screen .contacts-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    color: var(--ink-faint);
+    margin-bottom: 3px;
+  }
 }
+
+.tech-week-empty{text-align:center;color:var(--ink-faint);font-size:13px;padding:32px 0;}
+.tech-week-card{border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden;flex-shrink:0;}
+.tech-week-head{width:100%;display:flex;align-items:center;gap:10px;padding:13px 14px;background:transparent;border:none;cursor:pointer;text-align:left;font:inherit;}
+.tech-week-name{font-size:15px;font-weight:600;color:var(--ink);flex-shrink:0;}
+.tech-week-summary{flex:1;min-width:0;display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-soft);}
+.tech-week-free{color:var(--ink-faint);}
+.tech-week-chevron{flex-shrink:0;font-size:18px;color:var(--ink-faint);transition:transform .2s;}
+.tech-week-chevron.open{transform:rotate(90deg);}
+.tech-week-body{border-top:1px solid var(--line);display:flex;flex-direction:column;}
+.tech-week-empty-day{padding:10px 14px;font-size:12.5px;color:var(--ink-faint);}
+.tech-week-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border:none;border-left:3px solid var(--scheduled);border-bottom:1px solid var(--line);background:transparent;cursor:pointer;text-align:left;font:inherit;width:100%;}
+.tech-week-row:last-child{border-bottom:none;}
+.tech-week-row.done{border-left-color:var(--open);}
+.tech-week-row.off{border-left-color:var(--line-strong);}
+.tech-week-row-day{font-size:11px;font-weight:600;color:var(--ink-soft);flex-shrink:0;width:56px;}
+.tech-week-row-time{font-size:12px;font-weight:600;color:var(--ink);flex-shrink:0;width:42px;font-family:'IBM Plex Mono',monospace;}
+.tech-week-row-info{flex:1;min-width:0;font-size:13px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .state{padding:48px;text-align:center;color:var(--ink-soft);}
 .state.err{color:var(--emergency);background:var(--emergency-bg);border-radius:var(--radius);}
 .state small{color:var(--ink-faint);}
@@ -379,9 +726,30 @@ td.open{background:var(--open-bg);}
 .tech-link-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;}
 .tech-link-name{font-size:13px;font-weight:600;color:var(--ink);}
 
+/* Cascade-in entrance for every real dropdown/menu popover in the app
+   (SearchableSelect, FilterSelect, TechMultiSelect, DatePicker, TimePicker,
+   the opportunity multi-select, the notes/contact popovers, and the
+   category-flyout submenu) -- per direction 2026-08-28, same "flowy, not
+   clunky" goal as .cascade-panel above, applied to the app's other main
+   category of instant-appear UI. These are conditionally MOUNTED (not
+   toggled via a class like .cascade-panel), so a CSS @keyframes animation
+   is the right tool instead -- it plays automatically the moment an
+   element is inserted into the DOM, no JS coordination needed the way a
+   transition would require. Deliberately NOT applied to .donut-popover
+   (Expense Tracking's hover popover) -- that one measures its own
+   rendered position/size via getBoundingClientRect to draw a connector
+   line back to the hovered segment, and animating its transform would
+   throw that measurement off mid-animation; it already has its own
+   established positioning logic from earlier this session, left alone
+   here. Only an entrance animation -- these all still close instantly on
+   click-outside/Escape (conditional unmount), which is the normal,
+   expected feel for a dropdown closing; only the open needed to stop
+   feeling like a light switch. */
+@keyframes cascade-menu-in{from{opacity:0;transform:translateY(-6px);}to{opacity:1;transform:translateY(0);}}
+
 /* Notes menu (header button + dropdown, portaled like DatePicker) */
 .notes-menu-wrap{position:relative;}
-.notes-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);width:320px;display:flex;flex-direction:column;overflow:hidden;}
+.notes-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);width:320px;display:flex;flex-direction:column;overflow:hidden;animation:cascade-menu-in .16s cubic-bezier(.4,0,.2,1) both;}
 /* Narrower variant for JobNotesBadge's per-job popup -- a single job's notes
    list doesn't need the header menu's full 320px. */
 .job-notes-pop{width:280px;}
@@ -432,7 +800,12 @@ td.open{background:var(--open-bg);}
 .manage-tech-add .req-field-label{display:block;margin-bottom:8px;}
 .modal-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 14px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--surface);z-index:1;}
 .modal-title-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
-.modal-close{border:none;background:none;cursor:pointer;font-size:22px;line-height:1;color:var(--ink-faint);padding:2px 6px;border-radius:6px;flex-shrink:0;}
+/* min-width/min-height 44px is the Apple HIG / WCAG 2.5.5 minimum touch
+   target -- the glyph itself stays the same visual size (font-size
+   unchanged), this only grows the actual tappable area around it, via
+   flex-centering rather than padding so it stays centered regardless of
+   exact icon metrics. */
+.modal-close{border:none;background:none;cursor:pointer;font-size:22px;line-height:1;color:var(--ink-faint);border-radius:8px;flex-shrink:0;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;margin:-9px -9px 0 0;}
 .modal-close:hover{color:var(--emergency);background:var(--emergency-bg);}
 .modal-body{padding:16px 20px 20px;display:flex;flex-direction:column;gap:10px;flex:1;}
 .modal-body .meta{flex-wrap:wrap;}
@@ -531,9 +904,40 @@ td.open{background:var(--open-bg);}
 .contacts-table td{padding:11px 16px;border-bottom:1px solid var(--line);vertical-align:top;font-size:13.5px;}
 .contacts-table tr:last-child td{border-bottom:none;}
 .contacts-table tr:hover td{background:var(--surface-2);}
+/* Accounts' expand-on-tap detail row (AccountsTab, renderAccountRow) is now
+   always mounted (see .cascade-panel above) rather than conditionally
+   rendered, so its own <td> needs zero padding/border of its own -- the
+   base .contacts-table td rule above would otherwise leave a visible
+   ~22px empty strip with a divider line even while collapsed to 0 height.
+   Spacing instead lives on .cascade-panel-inner, scoped to this row only
+   (that class is shared/reused elsewhere without needing padding). */
+.contacts-table tr.account-detail-row td{padding:0;border-bottom:none;}
+.account-detail-row .cascade-panel-inner{padding:12px 16px;}
+/* display:block on BOTH the row and its cell, unconditionally (not just the
+   mobile override further up) -- found live 2026-08-28: on desktop this row
+   stayed genuine display:table-row/table-cell, and a table-cell's height is
+   partly governed by its row's own table-layout sizing, which doesn't
+   reliably let a nested display:grid child collapse all the way to 0fr in
+   every engine (real height-collapse quirks around grid/flex sizing inside
+   table cells) -- the row was visibly stuck at a partial height instead of
+   fully closing. colSpan={6} doesn't need real table layout to render
+   correctly once display is overridden this way (the mobile version below
+   already proved that), so this makes the desktop version behave the same,
+   not just the mobile one. */
+.contacts-table tr.account-detail-row,
+.contacts-table tr.account-detail-row td{display:block;}
 .contact-name{font-weight:600;color:var(--ink);}
 .contact-title{font-size:11.5px;color:var(--ink-faint);margin-top:2px;}
 .contact-link{color:var(--brand);text-decoration:none;font-size:13px;}
+.contact-link:hover{text-decoration:underline;}
+.contact-numbers{display:flex;flex-direction:column;gap:3px;}
+.contact-number-row{display:flex;align-items:center;gap:6px;}
+.contact-number-tag{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;color:var(--ink-faint);width:38px;flex-shrink:0;}
+.contact-edit-btn{font:inherit;font-size:12px;font-weight:600;color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line-strong);border-radius:7px;padding:5px 12px;cursor:pointer;white-space:nowrap;}
+.contact-edit-btn:hover{color:var(--ink);border-color:var(--ink-faint);}
+.contact-view-rows{display:flex;flex-direction:column;gap:8px;margin-top:6px;}
+.contact-view-row{display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--ink);}
+.contact-view-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-faint);width:52px;flex-shrink:0;}
 .contact-link:hover{text-decoration:underline;text-underline-offset:2px;}
 .linklike{font:inherit;font-size:13.5px;color:var(--brand);background:none;border:none;padding:0;cursor:pointer;text-align:left;}
 .linklike:hover{text-decoration:underline;text-underline-offset:2px;}
@@ -550,7 +954,7 @@ td.open{background:var(--open-bg);}
 .ss-wrap{position:relative;}
 .ss-input{font:inherit;font-size:12.5px;border:1px solid var(--line-strong);border-radius:8px;padding:6px 10px;color:var(--ink);background:var(--surface);width:180px;}
 .ss-input:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
-.ss-dropdown{position:fixed;overflow-y:auto;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);z-index:300;display:flex;flex-direction:column;gap:10px;padding:10px;}
+.ss-dropdown{position:fixed;overflow-y:auto;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);z-index:300;display:flex;flex-direction:column;gap:10px;padding:10px;animation:cascade-menu-in .16s cubic-bezier(.4,0,.2,1) both;}
 /* flex-shrink:0 is load-bearing: .ss-option sets overflow:hidden (for its
    ellipsis), which drops its flexbox automatic min-height to 0 -- without
    flex-shrink:0, once the list is taller than .ss-dropdown's capped
@@ -576,16 +980,22 @@ td.open{background:var(--open-bg);}
 .fsel-trigger.placeholder .fsel-val{color:var(--ink-faint);}
 .fsel-val{overflow:hidden;text-overflow:ellipsis;max-width:220px;}
 .fsel-caret{font-size:10px;line-height:1;color:var(--ink-faint);}
-.fsel-menu{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:6px;display:flex;flex-direction:column;gap:2px;}
+.fsel-menu{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:6px;display:flex;flex-direction:column;gap:2px;animation:cascade-menu-in .16s cubic-bezier(.4,0,.2,1) both;}
 .fsel-menu.scroll{overflow-y:auto;}
 .fsel-opt{font:inherit;font-size:12.5px;line-height:1.3;text-align:left;background:none;border:none;padding:8px 12px;border-radius:6px;cursor:pointer;color:var(--ink);white-space:nowrap;width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;}
 .fsel-opt:hover{background:var(--surface-2);}
 .fsel-opt.sel{background:var(--scheduled-bg);color:var(--ink);font-weight:600;}
 .fsel-opt.has-sub::after{content:'▸';font-size:10px;color:var(--ink-faint);}
-/* A category row anchors its hover-flyout submenu to the right. */
+/* A category row anchors its hover-flyout submenu to the right. Its own
+   cascade-in is horizontal (translateX), not vertical like every other
+   menu above -- it flies out sideways, not down, so a vertical slide
+   would look wrong here. Direction flips with .flip-left so the motion
+   still matches whichever side it actually opens toward. */
+@keyframes cascade-menu-in-right{from{opacity:0;transform:translateX(-6px);}to{opacity:1;transform:translateX(0);}}
+@keyframes cascade-menu-in-left{from{opacity:0;transform:translateX(6px);}to{opacity:1;transform:translateX(0);}}
 .fsel-catrow{position:relative;}
-.fsel-sub{position:absolute;left:100%;top:-6px;margin-left:2px;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:6px;display:flex;flex-direction:column;gap:2px;min-width:150px;z-index:301;}
-.fsel-sub.flip-left{left:auto;right:100%;margin-left:0;margin-right:2px;}
+.fsel-sub{position:absolute;left:100%;top:-6px;margin-left:2px;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:6px;display:flex;flex-direction:column;gap:2px;min-width:150px;z-index:301;animation:cascade-menu-in-right .16s cubic-bezier(.4,0,.2,1) both;}
+.fsel-sub.flip-left{left:auto;right:100%;margin-left:0;margin-right:2px;animation-name:cascade-menu-in-left;}
 
 /* Multi-select tech picker for adding assignments (TechMultiSelect). Trigger
    wears .addtech (dashed pill, on cards/modal) or .techms-field (full field, in
@@ -596,12 +1006,30 @@ td.open{background:var(--open-bg);}
 .techms-field:hover{border-color:var(--ink-faint);}
 .techms-val{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px;}
 .techms-caret{font-size:10px;line-height:1;color:var(--ink-faint);}
-.techms-menu{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:6px;display:flex;flex-direction:column;gap:2px;overflow-y:auto;}
+.techms-menu{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:6px;display:flex;flex-direction:column;gap:2px;overflow-y:auto;animation:cascade-menu-in .16s cubic-bezier(.4,0,.2,1) both;}
 .techms-opt{font:inherit;font-size:12.5px;line-height:1.3;text-align:left;background:none;border:none;padding:8px 10px;border-radius:6px;cursor:pointer;color:var(--ink);white-space:nowrap;display:flex;align-items:center;gap:9px;width:100%;}
 .techms-opt:hover{background:var(--surface-2);}
 .techms-opt.on{background:var(--scheduled-bg);font-weight:600;}
 .techms-check{display:inline-grid;place-items:center;width:16px;height:16px;border:1.5px solid var(--line-strong);border-radius:4px;font-size:11px;line-height:1;color:#fff;flex-shrink:0;}
 .techms-opt.on .techms-check{background:var(--brand);border-color:var(--brand);}
+
+/* Reusable expand/collapse animation -- per direction 2026-08-28, "a very
+   flowy feel... not clunky." Rendered exclusively through the Cascade/
+   LazyCascade components (App.jsx), not built by hand from these classes
+   directly -- `max-height` here is driven by an inline style from JS
+   (Cascade measures the real content height via scrollHeight rather than
+   relying on a pure-CSS trick). Originally built as a CSS-only
+   grid-template-rows:0fr->1fr toggle, no JS involved -- switched away from
+   that live 2026-08-28 after it was visibly getting stuck partway through,
+   in both directions, for some content (Account Details' flex-wrap
+   layout); the fr-unit interpolation that trick depends on isn't reliably
+   hitting its true 0/full-height end state for every kind of content.
+   `.cascade-panel-inner`'s fade/slide is unrelated to that switch and
+   still works exactly as before -- it's what makes this read as one
+   continuous cascading motion rather than a box just growing. */
+.cascade-panel{overflow:hidden;transition:max-height .32s cubic-bezier(.4,0,.2,1);}
+.cascade-panel-inner{opacity:0;transform:translateY(-6px);transition:opacity .22s ease,transform .28s cubic-bezier(.4,0,.2,1);}
+.cascade-panel.expanded .cascade-panel-inner{opacity:1;transform:translateY(0);}
 
 .contact-buildings{display:flex;flex-direction:column;gap:5px;}
 .buildings-toggle{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12.5px;font-weight:600;color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line-strong);border-radius:7px;padding:4px 10px;cursor:pointer;}
@@ -801,7 +1229,7 @@ td.open{background:var(--open-bg);}
 /* position:fixed + portaled to <body> in DatePicker — top/left set inline from
    the trigger's getBoundingClientRect() so overflow:hidden ancestors (e.g. .job's
    rounded status stripe) can't clip it. z-index clears the job modal (200). */
-.dp-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:12px;width:250px;overflow-y:auto;}
+.dp-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:12px;width:250px;overflow-y:auto;animation:cascade-menu-in .16s cubic-bezier(.4,0,.2,1) both;}
 .dp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
 .dp-month{font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:600;color:var(--ink);}
 .dp-nav{font:inherit;font-size:13px;font-weight:700;width:26px;height:26px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface-2);color:var(--ink-soft);cursor:pointer;}
@@ -828,7 +1256,7 @@ td.open{background:var(--open-bg);}
 /* TimePicker -- trigger reuses the caller's own .atime/.req-time class for
    sizing, so no new CSS is needed for the button itself, only its popup. */
 .tp-wrap{position:relative;display:inline-flex;}
-.tp-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:10px;width:240px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;}
+.tp-pop{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:10px;width:240px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;animation:cascade-menu-in .16s cubic-bezier(.4,0,.2,1) both;}
 .tp-text{font:inherit;font-family:'IBM Plex Mono',monospace;font-size:13px;border:1px solid var(--line-strong);border-radius:7px;padding:6px 9px;color:var(--ink);background:var(--surface);width:100%;text-align:center;box-sizing:border-box;}
 .tp-text:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
 .tp-quick{display:flex;flex-direction:column;gap:4px;padding-bottom:8px;border-bottom:1px solid var(--line);}
@@ -862,6 +1290,7 @@ td.open{background:var(--open-bg);}
 .acct-role{display:inline-block;margin-top:3px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-soft);background:var(--surface-2);border-radius:5px;padding:1px 7px;}
 .acct-role.admin{background:var(--brand);color:#fff;}
 .acct-ok{color:#1a7f37;font-size:12.5px;margin:0;}
+.acct-build-time{font-size:11px;color:var(--ink-faint);white-space:nowrap;}
 .req-error{color:var(--emergency);font-size:12.5px;margin:4px 0 0;}
 
 .office-user-row{display:flex;align-items:center;gap:12px;width:100%;text-align:left;font:inherit;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 12px;cursor:pointer;}
@@ -982,6 +1411,9 @@ td.open{background:var(--open-bg);}
 .recon-filter::placeholder{color:var(--ink-faint);font-weight:400;}
 .recon-filter:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
 .recon-dup{font-size:9.5px;font-weight:700;color:var(--needs);text-transform:uppercase;letter-spacing:.04em;vertical-align:middle;}
+.recon-linked{color:var(--brand);font-weight:700;}
+.recon-unlinked{color:var(--ink-faint);}
+.recon-linked-count{font-size:10.5px;color:var(--ink-faint);font-weight:400;}
 .recon-matched td.recon-date-cell{text-align:left;color:var(--ink-soft);white-space:nowrap;}
 .recon-matched th.recon-date-col{text-align:left;}
 
@@ -1001,7 +1433,7 @@ td.open{background:var(--open-bg);}
 .oppms-chip{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;color:var(--ink);background:var(--scheduled-bg);border:1px solid var(--scheduled);border-radius:7px;padding:4px 8px;}
 .oppms-chip button{border:none;background:none;cursor:pointer;color:var(--ink-soft);font-size:13px;line-height:1;padding:0;}
 .oppms-chip button:hover{color:var(--emergency);}
-.oppms-menu{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:8px;display:flex;flex-direction:column;gap:6px;overflow:hidden;}
+.oppms-menu{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px rgba(22,32,46,.18);padding:8px;display:flex;flex-direction:column;gap:6px;overflow:hidden;animation:cascade-menu-in .16s cubic-bezier(.4,0,.2,1) both;}
 .oppms-search{font:inherit;font-size:12.5px;border:1px solid var(--line-strong);border-radius:7px;padding:6px 10px;color:var(--ink);background:var(--surface);width:100%;}
 .oppms-search:focus{outline:2px solid var(--brand-bright);outline-offset:1px;border-color:var(--brand);}
 .oppms-list{overflow-y:auto;display:flex;flex-direction:column;gap:2px;}
@@ -1130,8 +1562,24 @@ td.open{background:var(--open-bg);}
 .exp-figure-group-label:first-child{margin-top:0;}
 .exp-quote-source{font-weight:400;text-transform:none;letter-spacing:normal;font-size:11px;color:var(--ink-soft);}
 .job-donut-rings{flex-shrink:0;overflow:visible;}
+
+/* Service Analytics -- Service Call jobs have no ring (no quote composition
+   to show), so this is a plain summary card instead of the donut-row. */
+.exp-service-summary{display:flex;flex-direction:column;gap:6px;font-size:13.5px;color:var(--ink);background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;padding:18px 22px;margin-bottom:20px;}
+.exp-profit-figure{display:flex;align-items:baseline;gap:10px;margin-top:8px;padding:10px 14px;border-radius:10px;}
+.exp-profit-figure.is-profit{background:rgba(14,124,112,.08);}
+.exp-profit-figure.is-loss{background:var(--emergency-bg);}
+.exp-profit-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);}
+.exp-profit-amount{font-size:19px;font-weight:700;}
+.exp-profit-figure.is-profit .exp-profit-amount{color:var(--brand);}
+.exp-profit-figure.is-loss .exp-profit-amount{color:var(--emergency);}
+.exp-profit-note{font-size:11px;color:var(--ink-faint);}
+.exp-hours-block{margin-bottom:8px;}
+.exp-hours-people{display:flex;flex-direction:column;gap:2px;margin:4px 0 2px 4px;}
+.exp-hours-person{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--ink-soft);max-width:280px;}
 .exp-invoice{margin-bottom:12px;}
-.exp-invoice-lines{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;}
+.exp-invoice-lines-scroll{overflow-x:auto;margin-top:8px;}
+.exp-invoice-lines{width:100%;min-width:480px;border-collapse:collapse;font-size:12px;}
 .exp-invoice-lines th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--ink-faint);padding:4px 8px;border-bottom:1px solid var(--line-strong);}
 .exp-invoice-lines td{padding:5px 8px;border-bottom:1px solid var(--line);color:var(--ink);}
 

@@ -427,6 +427,10 @@ const JobCard = React.memo(function JobCard({
   // the readOnly early return so the hook order stays consistent across both
   // branches below.
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
+  // Mobile-only collapse (styles.css hides .job-collapsible below 768px
+  // unless this is true) -- desktop is unaffected, everything always shows
+  // there regardless of this value.
+  const [expanded, setExpanded] = useState(false);
   // Local, bottom-fixed warning (same .toast styling used app-wide) instead
   // of a native alert() -- the default browser dialog interrupts at the top
   // of the page and needs a manual dismiss; this matches how every other
@@ -436,7 +440,7 @@ const JobCard = React.memo(function JobCard({
   const invoiceBtn = (
     <button
       type="button"
-      className={`fs-badge inv-badge${job.fsTaskId ? '' : ' inv-badge-nofs'}`}
+      className={`fs-badge inv-badge job-row-invoice-btn${job.fsTaskId ? '' : ' inv-badge-nofs'}`}
       title={job.fsTaskId ? 'Draft an invoice from Field Squared completion data' : 'Field Squared must be attached to this job before an invoice can be drafted'}
       onClick={() => job.fsTaskId ? setShowInvoiceModal(true) : flashInvoiceWarn('Field Squared must be attached to this job before an invoice can be drafted.')}
     >+ Invoice</button>
@@ -461,21 +465,32 @@ const JobCard = React.memo(function JobCard({
             <span className={`badge ${statusClass(job.status)}`}>{job.status}</span>
             {invoiceBtn}
             {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
+            {/* Mobile-only (styles.css) -- desktop always shows everything
+                below already, this toggle is a no-op there. Per direction
+                2026-08-28: show just the name/status "top part" of a job
+                card by default on a phone, expand for the rest on tap. */}
+            <button type="button" className="job-expand-toggle" onClick={() => setExpanded((e) => !e)} aria-label={expanded ? 'Collapse job details' : 'Expand job details'} aria-expanded={expanded}>
+              <span className="job-expand-chevron">{expanded ? '▾' : '▸'}</span>
+            </button>
           </div>
-          <div className="meta">
-            <span><span className="ic">◍</span>{job.address || 'No address'}</span>
-            {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}
-            {job.scheduledDate && <span className="created">Scheduled {fmtDate(job.scheduledDate)}</span>}
-          </div>
-          {job.assignments.length > 0 && (
-            <div className="rotechs">
-              {job.assignments.map((a) => (
-                <span className="rotech" key={a.assignmentId}>
-                  {a.completed ? '✓ ' : ''}{a.technicianName}{a.workDate ? ` · ${fmtDate(a.workDate)}` : ''}
-                </span>
-              ))}
+          <div className={`job-collapsible ${expanded ? 'expanded' : ''}`}>
+            <div className="job-collapsible-inner">
+              <div className="meta">
+                <span><span className="ic">◍</span>{job.address || 'No address'}</span>
+                {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}
+                {job.scheduledDate && <span className="created">Scheduled {fmtDate(job.scheduledDate)}</span>}
+              </div>
+              {job.assignments.length > 0 && (
+                <div className="rotechs">
+                  {job.assignments.map((a) => (
+                    <span className="rotech" key={a.assignmentId}>
+                      {a.completed ? '✓ ' : ''}{a.technicianName}{a.workDate ? ` · ${fmtDate(a.workDate)}` : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
         {invoiceModal}
         {invoiceWarnToast}
@@ -503,11 +518,20 @@ const JobCard = React.memo(function JobCard({
               ...(!assignableStatusesFor(job.recordType).includes(job.status) ? [[job.status, job.status]] : []),
               ...assignableStatusesFor(job.recordType).map((s) => [s, s]),
             ]}
-            triggerClassName={`statussel-pill ${statusClass(job.status)}`}
+            triggerClassName={`statussel-pill job-row-status ${statusClass(job.status)}`}
             ariaLabel="Job status"
           />
           {invoiceBtn}
           {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
+          {/* Mobile-only (styles.css) -- see the readOnly branch above for
+              the full reasoning. The FS-attach panel below is deliberately
+              kept OUTSIDE .job-collapsible -- it's rendered from a user just
+              tapping "Attach FS" in this same row, so it must stay visible
+              regardless of collapse state or that tap would silently appear
+              to do nothing. */}
+          <button type="button" className="job-expand-toggle" onClick={() => setExpanded((e) => !e)} aria-label={expanded ? 'Collapse job details' : 'Expand job details'} aria-expanded={expanded}>
+            <span className="job-expand-chevron">{expanded ? '▾' : '▸'}</span>
+          </button>
         </div>
         {fsOpen && (
           <div className="fs-attach-panel">
@@ -544,6 +568,32 @@ const JobCard = React.memo(function JobCard({
             ))}
           </div>
         )}
+        <div className={`job-collapsible ${expanded ? 'expanded' : ''}`}>
+        <div className="job-collapsible-inner">
+        {/* Mobile-only duplicate of the .row1 status control (hidden there
+            via .job-row-status on mobile, styles.css) -- per direction
+            2026-08-28, the top status *filter* dropdown only narrows the
+            list, it was never a way to *change* an individual job's status,
+            so hiding the per-row control on mobile with nothing replacing
+            it left no way to edit status from a phone at all. Same
+            dual-instance pattern already used for .filters-desktop/
+            .filters-mobile: render both, let CSS show the right one per
+            breakpoint, rather than trying to relocate one DOM node between
+            two different parents. Desktop hides this copy (.job-collapsible-
+            status, styles.css) since .row1's version already covers it
+            there. */}
+        <div className="job-collapsible-status-row">
+          <FilterSelect
+            value={job.status}
+            onChange={(v) => onSetStatus(job, v)}
+            options={[
+              ...(!assignableStatusesFor(job.recordType).includes(job.status) ? [[job.status, job.status]] : []),
+              ...assignableStatusesFor(job.recordType).map((s) => [s, s]),
+            ]}
+            triggerClassName={`statussel-pill job-collapsible-status ${statusClass(job.status)}`}
+            ariaLabel="Job status"
+          />
+        </div>
         <div className="meta">
           <span><span className="ic">◍</span>{job.address || 'No address'}</span>
           {job.closeDate && <span className="created">Close Date {fmtDate(job.closeDate)}</span>}
@@ -641,6 +691,8 @@ const JobCard = React.memo(function JobCard({
               </div>
             )}
           </div>
+        </div>
+        </div>
         </div>
       </div>
       {invoiceModal}
@@ -954,7 +1006,10 @@ function DispatchApp({ user, onLoggedOut }) {
   }, []);
 
   useEffect(() => {
-    if (tab !== 'accounts' || accountsLoaded) return;
+    // Also loaded for the Contacts tab, not just Accounts -- ContactInfoModal's
+    // account-reassignment picker (opened from Contacts' own Edit button)
+    // needs this same list, same reasoning as contacts being shared above.
+    if ((tab !== 'accounts' && tab !== 'contacts') || accountsLoaded) return;
     setAccountsLoading(true);
     api.getAccounts()
       .then((a) => { setAccounts(a); setAccountsLoaded(true); })
@@ -1787,7 +1842,15 @@ function DispatchApp({ user, onLoggedOut }) {
               </div>
             </div>
 
-            <div className="filters">
+            {/* Per direction 2026-08-28: the full chip row wrapped across
+                several lines on a phone, pushing the actual job list below
+                the fold before a user ever saw one. Not a scroll fix (the
+                same "no scrolling" rule applies to a horizontally-scrolling
+                chip strip too) -- a single compact dropdown covers the same
+                ground in one row's worth of height. Desktop keeps the
+                original chip row untouched; only one of these two ever
+                shows at a time (styles.css). */}
+            <div className="filters filters-desktop">
               {statuses.map(([s, count]) => (
                 <button key={s} className={`chip ${filter === s ? 'on' : ''}`} onClick={() => setFilter(s)}>
                   {s === 'all' ? 'All outstanding' : s}<span className="ct">{count}</span>
@@ -1799,6 +1862,17 @@ function DispatchApp({ user, onLoggedOut }) {
                   {s}{filter === s && !extraLoading && <span className="ct">{shown.length}</span>}
                 </button>
               ))}
+            </div>
+            <div className="filters-mobile">
+              <FilterSelect
+                value={filter}
+                onChange={setFilter}
+                ariaLabel="Filter by status"
+                options={[
+                  ...statuses.map(([s, count]) => [s, s === 'all' ? `All outstanding (${count})` : `${s} (${count})`]),
+                  ...TERMINAL_STATUSES.map((s) => [s, `${s}${filter === s && !extraLoading ? ` (${shown.length})` : ''}`]),
+                ]}
+              />
             </div>
 
             <div className="jobs">
@@ -1854,6 +1928,7 @@ function DispatchApp({ user, onLoggedOut }) {
           <ContactsTab
             contacts={contacts}
             loading={contactsLoading}
+            accounts={accounts}
             onRefresh={async () => { const c = await api.getContacts(); setContacts(c); }}
             onUpdateContact={updateContact}
           />
@@ -3589,7 +3664,7 @@ const TimePicker = React.memo(function TimePicker({ value, onChange, quickPicks,
   );
 });
 
-function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
+function ContactsTab({ contacts, loading, accounts: allAccounts, onRefresh, onUpdateContact }) {
   const [search, setSearch] = useState('');
   const [parentFilter, setParentFilter] = useState('');
   const [accountFilter, setAccountFilter] = useState('');
@@ -3604,25 +3679,15 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
   const [changingContact, setChangingContact] = useState(null); // accountId being reassigned
   const [pickerQuery, setPickerQuery] = useState('');
   const [saving, setSaving] = useState(false);
-  const [editing, setEditing] = useState(null); // { contactId, field, value }
-
-  const startEdit = (contactId, field, value) => setEditing({ contactId, field, value: value ?? '' });
-
-  const commitEdit = async () => {
-    if (!editing) return;
-    const { contactId, field, value } = editing;
-    setEditing(null);
-    try {
-      await onUpdateContact(contactId, { [field]: value });
-    } catch (e) {
-      alert(`Could not save: ${e.message}`);
-    }
-  };
-
-  const onEditKey = (e) => {
-    if (e.key === 'Enter') commitEdit();
-    if (e.key === 'Escape') setEditing(null);
-  };
+  // Editing now happens in ContactInfoModal (a real Edit button, same
+  // component AccountsTab already uses) -- per direction 2026-08-28,
+  // replacing the old per-field click-to-edit-in-place cells below, which
+  // also had a real bug: the phone/email links' preventDefault (needed so a
+  // click always opened the editor instead of following the link) meant
+  // clicking a number to call it, or an email to mail it, silently did
+  // nothing.
+  const [viewingContactId, setViewingContactId] = useState(null);
+  const viewingContact = viewingContactId ? contacts.find((c) => c.id === viewingContactId) : null;
 
   const toggle = (id) => setExpanded((prev) => {
     const next = new Set(prev);
@@ -3738,10 +3803,10 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
       </div>
 
       {loading && (
-        <div className="contacts-wrap">
+        <div className="contacts-wrap contacts-screen">
           <table className="contacts-table">
             <thead>
-              <tr><th>Name</th><th>Buildings</th><th>Phone</th><th>Email</th></tr>
+              <tr><th>Name</th><th>Buildings</th><th>Phone</th><th>Email</th><th></th></tr>
             </thead>
             <tbody>
               {[0, 1, 2, 3, 4, 5].map((i) => (
@@ -3750,6 +3815,7 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
                   <td><span className="skel-block" style={{ width: 80, height: 13, display: 'inline-block' }} /></td>
                   <td><span className="skel-block" style={{ width: 90, height: 13, display: 'inline-block' }} /></td>
                   <td><span className="skel-block" style={{ width: 140, height: 13, display: 'inline-block' }} /></td>
+                  <td><span className="skel-block" style={{ width: 44, height: 13, display: 'inline-block' }} /></td>
                 </tr>
               ))}
             </tbody>
@@ -3760,7 +3826,7 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
         <div className="empty">{hasFilter ? 'No contacts match those filters.' : 'No contacts found.'}</div>
       )}
       {!loading && filtered.length > 0 && (
-        <div className="contacts-wrap">
+        <div className="contacts-wrap contacts-screen">
           <table className="contacts-table">
             <thead>
               <tr>
@@ -3768,21 +3834,14 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
                 <th>Buildings</th>
                 <th>Phone</th>
                 <th>Email</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {filtered.slice(0, visibleCount).map((c) => (
                 <tr key={c.id}>
                   <td>
-                    {editing?.contactId === c.id && editing?.field === 'name'
-                      ? <div className="contact-edit-row">
-                          <input className="contact-edit-input" autoFocus value={editing.value}
-                            onChange={(e) => setEditing((s) => ({ ...s, value: e.target.value }))}
-                            onKeyDown={onEditKey} />
-                          <button className="contact-edit-save" onClick={commitEdit}>Save</button>
-                          <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
-                        </div>
-                      : <div className="contact-name contact-editable" onClick={() => startEdit(c.id, 'name', c.name)}>{c.name}</div>}
+                    <div className="contact-name">{c.name}</div>
                     {c.company && <div className="contact-title">{c.company}</div>}
                     {c.title && <div className="contact-title">{c.title}</div>}
                   </td>
@@ -3794,81 +3853,77 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
                             <span className="buildings-chevron">{expanded.has(c.id) ? '▾' : '▸'}</span>
                             <span>{c.accounts.length} {c.accounts.length === 1 ? 'building' : 'buildings'}</span>
                           </button>
-                          {expanded.has(c.id) && c.accounts.map((a) => (
-                            <div key={a.id} className="contact-building-row">
-                              <div className="contact-building-meta">
-                                <span className="contact-building-name">{a.name}</span>
-                                {a.lid && <span className="lidtag">LID {a.lid}</span>}
-                              </div>
-                              <button
-                                className="change-contact-btn"
-                                onClick={() => {
-                                  setChangingContact(changingContact === a.id ? null : a.id);
-                                  setPickerQuery('');
-                                }}
-                              >
-                                Change contact
-                              </button>
-                              {changingContact === a.id && (
-                                <div className="inline-contact-picker">
-                                  <input
-                                    className="icp-input"
-                                    type="text"
-                                    placeholder="Search contacts…"
-                                    value={pickerQuery}
-                                    onChange={(e) => setPickerQuery(e.target.value)}
-                                    autoFocus
-                                  />
-                                  <div className="icp-list">
-                                    {contactOptions
-                                      .filter(([, name]) => !pickerQuery.trim() || fuzzyNameMatch(pickerQuery, name))
-                                      .slice(0, 8)
-                                      .map(([id, name, company]) => (
-                                        <button
-                                          key={id}
-                                          className="icp-option"
-                                          disabled={saving}
-                                          onClick={() => handleChangeContact(a.id, id)}
-                                        >
-                                          <span className="icp-name">{name}</span>
-                                          {company && <span className="icp-company">{company}</span>}
-                                        </button>
-                                      ))}
-                                  </div>
-                                  <button className="icp-cancel" onClick={() => { setChangingContact(null); setPickerQuery(''); }}>
-                                    Cancel
-                                  </button>
+                          {/* Cascade (App.jsx) -- always mounted (not
+                              `expanded.has(c.id) &&`) so open/close is a real
+                              animated transition, not an instant appear/
+                              disappear. Per direction 2026-08-28: "a very
+                              flowy feel... not clunky." */}
+                          <Cascade open={expanded.has(c.id)}>
+                            {c.accounts.map((a) => (
+                              <div key={a.id} className="contact-building-row">
+                                <div className="contact-building-meta">
+                                  <span className="contact-building-name">{a.name}</span>
+                                  {a.lid && <span className="lidtag">LID {a.lid}</span>}
                                 </div>
-                              )}
-                            </div>
-                          ))}
+                                <button
+                                  className="change-contact-btn"
+                                  onClick={() => {
+                                    setChangingContact(changingContact === a.id ? null : a.id);
+                                    setPickerQuery('');
+                                  }}
+                                >
+                                  Change contact
+                                </button>
+                                {changingContact === a.id && (
+                                  <div className="inline-contact-picker">
+                                    <input
+                                      className="icp-input"
+                                      type="text"
+                                      placeholder="Search contacts…"
+                                      value={pickerQuery}
+                                      onChange={(e) => setPickerQuery(e.target.value)}
+                                      autoFocus
+                                    />
+                                    <div className="icp-list">
+                                      {contactOptions
+                                        .filter(([, name]) => !pickerQuery.trim() || fuzzyNameMatch(pickerQuery, name))
+                                        .slice(0, 8)
+                                        .map(([id, name, company]) => (
+                                          <button
+                                            key={id}
+                                            className="icp-option"
+                                            disabled={saving}
+                                            onClick={() => handleChangeContact(a.id, id)}
+                                          >
+                                            <span className="icp-name">{name}</span>
+                                            {company && <span className="icp-company">{company}</span>}
+                                          </button>
+                                        ))}
+                                    </div>
+                                    <button className="icp-cancel" onClick={() => { setChangingContact(null); setPickerQuery(''); }}>
+                                      Cancel
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </Cascade>
                         </div>}
                   </td>
                   <td>
-                    {editing?.contactId === c.id && editing?.field === 'phone'
-                      ? <div className="contact-edit-row">
-                          <input className="contact-edit-input" autoFocus type="tel" value={editing.value}
-                            onChange={(e) => setEditing((s) => ({ ...s, value: formatPhone(e.target.value) }))}
-                            onKeyDown={onEditKey} />
-                          <button className="contact-edit-save" onClick={commitEdit}>Save</button>
-                          <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
-                        </div>
-                      : <span className="contact-editable" onClick={() => startEdit(c.id, 'phone', formatPhone(c.phone))}>
-                          {c.phone ? <a href={`tel:${c.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(c.phone)}</a> : <span className="na">-</span>}
-                        </span>}
+                    {!c.phone && !c.mobile && !c.fax
+                      ? <span className="na">-</span>
+                      : <div className="contact-numbers">
+                          {c.phone && <div className="contact-number-row"><span className="contact-number-tag">Phone</span><a href={`tel:${c.phone}`} className="contact-link">{formatPhone(c.phone)}</a></div>}
+                          {c.mobile && <div className="contact-number-row"><span className="contact-number-tag">Mobile</span><a href={`tel:${c.mobile}`} className="contact-link">{formatPhone(c.mobile)}</a></div>}
+                          {c.fax && <div className="contact-number-row"><span className="contact-number-tag">Fax</span>{formatPhone(c.fax)}</div>}
+                        </div>}
                   </td>
                   <td>
-                    {editing?.contactId === c.id && editing?.field === 'email'
-                      ? <div className="contact-edit-row">
-                          <input className="contact-edit-input" autoFocus type="email" value={editing.value}
-                            onChange={(e) => setEditing((s) => ({ ...s, value: e.target.value }))}
-                            onKeyDown={onEditKey} />
-                          <button className="contact-edit-save" onClick={commitEdit}>Save</button>
-                          <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
-                        </div>
-                      : <span className="contact-editable" onClick={() => startEdit(c.id, 'email', c.email)}>
-                          {c.email ? <a href={`mailto:${c.email}`} className="contact-link" onClick={(e) => e.preventDefault()}>{c.email}</a> : <span className="na">-</span>}
-                        </span>}
+                    {c.email ? <a href={`mailto:${c.email}`} className="contact-link">{c.email}</a> : <span className="na">-</span>}
+                  </td>
+                  <td>
+                    <button type="button" className="contact-edit-btn" onClick={() => setViewingContactId(c.id)}>Edit</button>
                   </td>
                 </tr>
               ))}
@@ -3876,6 +3931,14 @@ function ContactsTab({ contacts, loading, onRefresh, onUpdateContact }) {
           </table>
           {visibleCount < filtered.length && <div ref={contactsSentinelRef} className="scroll-sentinel" />}
         </div>
+      )}
+      {viewingContact && (
+        <ContactInfoModal
+          contact={viewingContact}
+          accounts={allAccounts}
+          onUpdateContact={onUpdateContact}
+          onClose={() => setViewingContactId(null)}
+        />
       )}
     </section>
   );
@@ -4226,7 +4289,14 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   const [showOverdue, setShowOverdue] = useState(false);
   const [showReadyToBill, setShowReadyToBill] = useState(false);
   const [expanded, setExpanded] = useState(new Set());
-  const [editing, setEditing] = useState(null); // { accountId, field, value }
+  // Id only, not a snapshot - so if the account is edited while the modal's
+  // open, it re-derives the latest record from `accounts` on every render
+  // instead of showing stale data (same reasoning as viewingContactId
+  // below). Replaces the old per-field click-to-edit-in-place cells (was
+  // `editing`/startEdit/commitEdit/editableCell) -- per direction
+  // 2026-08-28, same change already made for ContactsTab: a real Edit
+  // button opening AccountInfoModal, not click-to-edit on scattered fields.
+  const [editingAccountId, setEditingAccountId] = useState(null);
   // Id only, not a snapshot - so if the contact is edited (in this popup or
   // elsewhere) while it's open, the popup re-derives the latest record from
   // `contactsById` on every render instead of showing stale data.
@@ -4234,24 +4304,6 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   // { accountId, kind: 'unpaid' | 'readyToBill' } | null - id-based for the
   // same reason as viewingContactId above.
   const [viewingBilling, setViewingBilling] = useState(null);
-
-  const startEdit = useCallback((accountId, field, value) => setEditing({ accountId, field, value: value ?? '' }), []);
-
-  const commitEdit = useCallback(async () => {
-    if (!editing) return;
-    const { accountId, field, value } = editing;
-    setEditing(null);
-    try {
-      await onUpdateAccount(accountId, { [field]: value });
-    } catch (e) {
-      alert(`Could not save: ${e.message}`);
-    }
-  }, [editing, onUpdateAccount]);
-
-  const onEditKey = useCallback((e) => {
-    if (e.key === 'Enter') commitEdit();
-    if (e.key === 'Escape') setEditing(null);
-  }, [commitEdit]);
 
   const handleChangeAccountContact = useCallback(async (accountId, field, contactId) => {
     await api.updateAccountContact(accountId, contactId, field);
@@ -4269,6 +4321,7 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
   const contactsById = useMemo(() => new Map(contacts.map((c) => [c.id, c])), [contacts]);
   const viewingContact = viewingContactId ? contactsById.get(viewingContactId) ?? null : null;
   const viewingBillingAccount = viewingBilling ? accounts.find((a) => a.id === viewingBilling.accountId) ?? null : null;
+  const editingAccount = editingAccountId ? accounts.find((a) => a.id === editingAccountId) ?? null : null;
 
   // Contacts whose standard AccountId lookup points at each account, grouped
   // once (not filtered per row) to avoid an O(n²) scan over the full contacts
@@ -4400,31 +4453,6 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
 
   const addressLine = (a) => [a.street, [a.city, a.state].filter(Boolean).join(', '), a.zip].filter(Boolean).join(' ') || null;
 
-  const editableCell = useCallback((a, field, value, opts) => {
-    const isEditing = editing?.accountId === a.id && editing?.field === field;
-    if (isEditing) {
-      return (
-        <div className="contact-edit-row">
-          <input
-            className="contact-edit-input"
-            autoFocus
-            type={opts?.type ?? 'text'}
-            value={editing.value}
-            onChange={(e) => setEditing((s) => ({ ...s, value: opts?.format ? opts.format(e.target.value) : e.target.value }))}
-            onKeyDown={onEditKey}
-          />
-          <button className="contact-edit-save" onClick={commitEdit}>Save</button>
-          <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
-        </div>
-      );
-    }
-    return (
-      <span className="contact-editable" onClick={() => startEdit(a.id, field, value)}>
-        {value ? value : <span className="na">-</span>}
-      </span>
-    );
-  }, [editing, onEditKey, commitEdit, startEdit]);
-
   const renderAccountRow = useCallback((a) => (
     <React.Fragment key={a.id}>
       <tr>
@@ -4451,56 +4479,61 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
               onOpenContact={setViewingContactId}
               onChangeAccountContact={handleChangeAccountContact}
             />
+            <button type="button" className="contact-edit-btn" onClick={() => setEditingAccountId(a.id)}>Edit</button>
           </div>
         </td>
-        <td>{a.type ?? <span className="na">-</span>}</td>
-        <td>{a.lid ? <span className="lidtag">LID {a.lid}</span> : <span className="na">-</span>}</td>
-        <td>{addressLine(a) ? (search.trim() ? highlightMatch(addressLine(a), search) : addressLine(a)) : <span className="na">-</span>}</td>
-        <td>
-          {editing?.accountId === a.id && editing?.field === 'phone'
-            ? <div className="contact-edit-row">
-                <input className="contact-edit-input" autoFocus type="tel" value={editing.value}
-                  onChange={(e) => setEditing((s) => ({ ...s, value: formatPhone(e.target.value) }))}
-                  onKeyDown={onEditKey} />
-                <button className="contact-edit-save" onClick={commitEdit}>Save</button>
-                <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
-              </div>
-            : <span className="contact-editable" onClick={() => startEdit(a.id, 'phone', formatPhone(a.phone))}>
-                {a.phone ? <a href={`tel:${a.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(a.phone)}</a> : <span className="na">-</span>}
-              </span>}
+        <td data-label="Type">{a.type ?? <span className="na">-</span>}</td>
+        <td data-label="LID">{a.lid ? <span className="lidtag">LID {a.lid}</span> : <span className="na">-</span>}</td>
+        <td data-label="Address">{addressLine(a) ? (search.trim() ? highlightMatch(addressLine(a), search) : addressLine(a)) : <span className="na">-</span>}</td>
+        <td data-label="Phone">
+          {a.phone ? <a href={`tel:${a.phone}`} className="contact-link">{formatPhone(a.phone)}</a> : <span className="na">-</span>}
         </td>
-        <td>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
-            {a.unpaidJobs?.length > 0 && (
-              <button className="badge emergency badge-btn" onClick={() => setViewingBilling({ accountId: a.id, kind: 'unpaid' })}>
-                Overdue ({a.unpaidJobs.length})
-              </button>
-            )}
-            {a.readyToBillJobs?.length > 0 && (
-              <button className="badge dispatched badge-btn" onClick={() => setViewingBilling({ accountId: a.id, kind: 'readyToBill' })}>
-                Ready to Bill ({a.readyToBillJobs.length})
-              </button>
-            )}
-          </div>
+        <td data-label="Billing">
+          {(a.unpaidJobs?.length > 0 || a.readyToBillJobs?.length > 0) ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+              {a.unpaidJobs?.length > 0 && (
+                <button className="badge emergency badge-btn" onClick={() => setViewingBilling({ accountId: a.id, kind: 'unpaid' })}>
+                  Overdue ({a.unpaidJobs.length})
+                </button>
+              )}
+              {a.readyToBillJobs?.length > 0 && (
+                <button className="badge dispatched badge-btn" onClick={() => setViewingBilling({ accountId: a.id, kind: 'readyToBill' })}>
+                  Ready to Bill ({a.readyToBillJobs.length})
+                </button>
+              )}
+            </div>
+          ) : <span className="na">-</span>}
         </td>
       </tr>
-      {expanded.has(a.id) && (
-        <tr className="contact-building-row">
-          <td colSpan={6}>
+      {/* Row/cell always mounted (not `expanded.has(a.id) &&`) so the tr/td
+          stay real table elements on desktop -- the open/close animation
+          lives entirely on the Cascade component inside the td, not on the
+          table structure itself. Per direction 2026-08-28: "a very flowy
+          feel... not clunky." */}
+      {/* .account-detail-row, not .contact-building-row -- that class is
+          already used elsewhere (the Contacts buildings-list <div>, a
+          completely different element). CSS in this app is plain global
+          imports, not component-scoped (see CLAUDE.md); reusing it here
+          would have silently pulled in .contact-building-row's own
+          display:flex styling onto this <tr>, fighting the table layout
+          on desktop. */}
+      <tr className="account-detail-row">
+        <td colSpan={6}>
+          <Cascade open={expanded.has(a.id)}>
             <div className="contact-building-meta" style={{ flexWrap: 'wrap', gap: '1.5rem' }}>
-              <span>Street: {editableCell(a, 'street', a.street)}</span>
-              <span>City: {editableCell(a, 'city', a.city)}</span>
-              <span>State: {editableCell(a, 'state', a.state)}</span>
-              <span>Zip: {editableCell(a, 'zip', a.zip)}</span>
-              <span>Website: {editableCell(a, 'website', a.website)}</span>
-              <span>Industry: {editableCell(a, 'industry', a.industry)}</span>
+              <span>Street: {a.street || <span className="na">-</span>}</span>
+              <span>City: {a.city || <span className="na">-</span>}</span>
+              <span>State: {a.state || <span className="na">-</span>}</span>
+              <span>Zip: {a.zip || <span className="na">-</span>}</span>
+              <span>Website: {a.website || <span className="na">-</span>}</span>
+              <span>Industry: {a.industry || <span className="na">-</span>}</span>
               <span>Management company: {a.parentName ?? <span className="na">-</span>}</span>
             </div>
-          </td>
-        </tr>
-      )}
+          </Cascade>
+        </td>
+      </tr>
     </React.Fragment>
-  ), [expanded, editing, search, toggle, contactsByAccountId, contacts, handleLinkAccountContact, handleChangeAccountContact, editableCell, onEditKey, commitEdit, startEdit]);
+  ), [expanded, search, toggle, contactsByAccountId, contacts, handleLinkAccountContact, handleChangeAccountContact]);
 
   return (
     <section>
@@ -4556,7 +4589,7 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
       </div>
 
       {loading && (
-        <div className="contacts-wrap">
+        <div className="contacts-wrap accounts-screen">
           <table className="contacts-table">
             <thead>
               <tr><th>Name</th><th>Type</th><th>LID</th><th>Address</th><th>Phone</th><th>Billing</th></tr>
@@ -4605,8 +4638,119 @@ function AccountsTab({ accounts, loading, contacts, onRefresh, onUpdateAccount, 
           onClose={() => setViewingBilling(null)}
         />
       )}
+      {editingAccount && (
+        <AccountInfoModal
+          account={editingAccount}
+          onUpdateAccount={onUpdateAccount}
+          onClose={() => setEditingAccountId(null)}
+        />
+      )}
     </section>
   );
+}
+
+// Expand/collapse animation, JS-measured max-height rather than the pure-
+// CSS grid-template-rows:0fr->1fr trick this used to be (found live
+// 2026-08-28 that the CSS-only version could get visibly stuck partway
+// through, in both directions, for some content -- the fr-unit
+// interpolation it relies on isn't reliably hitting its true end state for
+// every kind of content).
+//
+// Second bug, also found live 2026-08-28: Cascades can now nest (a row's
+// own Account Details Cascade sits inside AccountGroupSection's group-level
+// Cascade). The first version of this measured scrollHeight once at the
+// moment of toggling, then released to a flat 'auto' after the transition
+// settled -- fine for a leaf Cascade, but the OUTER one already has no
+// reason to run its own effect again just because something nested inside
+// it later grows, so it never re-measured and clipped the newly-expanded
+// nested content instead of growing to fit it (confirmed live: the row's
+// own scrollHeight measured correctly, non-zero, but nothing appeared --
+// space for it simply wasn't there, wrong layer). ResizeObserver replaces
+// the "measure once, then trust it" approach with continuous tracking:
+// while open, max-height is kept in sync with the content's real size on
+// every resize, not just at toggle time, so nested growth anywhere inside
+// propagates outward automatically. transform-affecting animation on the
+// observed element itself doesn't cause feedback loops -- ResizeObserver
+// fires on border-box size changes, not on max-height/transform, and this
+// component doesn't change the border-box size of the element IT observes
+// (.cascade-panel-inner) in response to its own state, only of the parent
+// .cascade-panel wrapper.
+function Cascade({ open, children }) {
+  const innerRef = useRef(null);
+  // Always starts at '0px', even when `open` is already true on the very
+  // first render (LazyCascade mounts Cascade fresh at the moment a group
+  // is first opened) -- that's what makes that first open still animate
+  // instead of the content just appearing already fully expanded.
+  const [height, setHeight] = useState('0px');
+  const isFirst = useRef(true);
+
+  // Continuous sync while open -- see the note above. Deliberately not
+  // running while closed: we WANT height clamped to 0 there regardless of
+  // the (invisible) content's real size.
+  useEffect(() => {
+    const el = innerRef.current;
+    if (!el || !open) return;
+    const ro = new ResizeObserver(() => setHeight(`${el.scrollHeight}px`));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open]);
+
+  // Handles the actual open/close transitions -- the ResizeObserver above
+  // only starts tracking once this has already set a real starting height.
+  useEffect(() => {
+    const el = innerRef.current;
+    if (!el) return;
+    if (isFirst.current) {
+      isFirst.current = false;
+      // Mounting already-closed (the normal default for every row) -- stay
+      // at 0px, nothing to animate. Real bug, found live 2026-08-28: this
+      // used to run the full "closing" sequence unconditionally on every
+      // mount, which meant every row flashed open then snapped shut the
+      // instant it (or an ancestor group) first mounted.
+      if (!open) return;
+      setHeight(`${el.scrollHeight}px`);
+      return;
+    }
+    if (open) {
+      setHeight(`${el.scrollHeight}px`);
+      return;
+    }
+    // Closing: max-height may currently be a stale/continuously-updated px
+    // value from the ResizeObserver, which is fine to transition FROM
+    // directly -- snap to the current real height (one paint), then flip
+    // to 0 on the next frame so the browser has two real states to
+    // interpolate between.
+    setHeight(`${el.scrollHeight}px`);
+    let raf1, raf2;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setHeight('0px'));
+    });
+    return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); };
+  }, [open]);
+
+  return (
+    <div className={`cascade-panel ${open ? 'expanded' : ''}`} style={{ maxHeight: height }}>
+      <div ref={innerRef} className="cascade-panel-inner">{children}</div>
+    </div>
+  );
+}
+
+// Lazy-mounted Cascade -- for group toggles that can genuinely hold a lot
+// of content (AccountGroupSection's "No Management Company" group alone
+// can hold thousands of accounts; same shared .mgmt-group-header pattern
+// is used by JobInvoiceRow and PartsTab's Opportunity groups too), always-
+// mounting like ContactsTab/AccountsTab's small per-row expands do would
+// mean every collapsed group on the page renders its content anyway, just
+// visually hidden -- real cost for no visible benefit while collapsed.
+// Renders nothing until `open` first goes true, then behaves exactly like
+// a normal Cascade from then on -- Cascade's own open=false initial state
+// (max-height '0px', not 'auto') is what makes that very first open still
+// animate instead of the content just appearing already expanded.
+function LazyCascade({ open, children }) {
+  const [mounted, setMounted] = useState(open);
+  useEffect(() => { if (open && !mounted) setMounted(true); }, [open, mounted]);
+  if (!mounted) return null;
+  return <Cascade open={open}>{children}</Cascade>;
 }
 
 const AccountGroupSection = React.memo(function AccountGroupSection({ name, accounts, renderRow, forceOpen }) {
@@ -4615,7 +4759,25 @@ const AccountGroupSection = React.memo(function AccountGroupSection({ name, acco
   // Company" alone can hold thousands of accounts, while most groups are
   // small enough to just render in full once opened.
   const [visibleCount, setVisibleCount] = useState(50);
-  const sentinelRef = useRef(null);
+  // Callback ref, not useRef+useEffect(watching `open`) -- now that the
+  // content renders through LazyCascade (below), the sentinel <div> can
+  // take an extra render cycle to actually appear in the DOM after `open`
+  // flips true (LazyCascade mounts on the frame after `open` becomes true,
+  // not the same one). An effect keyed on `open` could fire before the
+  // node exists and silently find `sentinelRef.current` still null. A
+  // callback ref sidesteps the whole timing question -- React calls it
+  // exactly when the node is actually attached/detached, however many
+  // renders that took.
+  const observerRef = useRef(null);
+  const sentinelRef = useCallback((el) => {
+    if (observerRef.current) { observerRef.current.disconnect(); observerRef.current = null; }
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) setVisibleCount((c) => c + 50);
+    }, { rootMargin: '400px' });
+    io.observe(el);
+    observerRef.current = io;
+  }, []);
 
   // A narrowed search (see searchNarrowed in AccountsTab) flips this true so
   // the group holding the match(es) opens itself - doesn't fight a manual
@@ -4632,17 +4794,6 @@ const AccountGroupSection = React.memo(function AccountGroupSection({ name, acco
   const overdueCount = useMemo(() => accounts.reduce((s, a) => s + (a.unpaidJobs?.length || 0), 0), [accounts]);
   const readyToBillCount = useMemo(() => accounts.reduce((s, a) => s + (a.readyToBillJobs?.length || 0), 0), [accounts]);
 
-  useEffect(() => {
-    if (!open) return;
-    const el = sentinelRef.current;
-    if (!el) return;
-    const io = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting) setVisibleCount((c) => c + 50);
-    }, { rootMargin: '400px' });
-    io.observe(el);
-    return () => io.disconnect();
-  }, [open, accounts.length]);
-
   return (
     <div className="mgmt-group">
       <button className="mgmt-group-header" onClick={() => setOpen((o) => !o)}>
@@ -4652,8 +4803,13 @@ const AccountGroupSection = React.memo(function AccountGroupSection({ name, acco
         {overdueCount > 0 && <span className="badge emergency">Overdue {overdueCount}</span>}
         {readyToBillCount > 0 && <span className="badge dispatched">Ready to Bill {readyToBillCount}</span>}
       </button>
-      {open && (
-        <div className="contacts-wrap">
+      {/* LazyCascade (above), not the plain always-mounted .cascade-panel
+          pattern used for the small row-level expands elsewhere -- this
+          group can hold thousands of accounts ("No Management Company"),
+          so it stays unmounted until opened at least once instead of every
+          collapsed group rendering up to 50 rows for nothing. */}
+      <LazyCascade open={open}>
+        <div className="contacts-wrap accounts-screen">
           <table className="contacts-table">
             <thead>
               <tr>
@@ -4671,7 +4827,7 @@ const AccountGroupSection = React.memo(function AccountGroupSection({ name, acco
           </table>
           {visibleCount < accounts.length && <div ref={sentinelRef} className="scroll-sentinel" />}
         </div>
-      )}
+      </LazyCascade>
     </div>
   );
 });
@@ -4710,7 +4866,7 @@ function JobInvoiceRow({ job }) {
         <span className="mgmt-group-name" style={{ fontWeight: 400 }}><OppLink id={job.id} name={job.name} /></span>
         <span className="mgmt-group-count">{job.invoices.length} {job.invoices.length === 1 ? 'invoice' : 'invoices'}</span>
       </button>
-      {open && (
+      <LazyCascade open={open}>
         <div style={{ padding: '10px 14px' }}>
           <button
             type="button"
@@ -4722,7 +4878,7 @@ function JobInvoiceRow({ job }) {
             ? <div className="na">No invoice on file</div>
             : job.invoices.map((inv) => <InvoiceDetail key={inv.id} invoice={inv} />)}
         </div>
-      )}
+      </LazyCascade>
       {showInvoiceModal && <CreateInvoiceModal job={job} onClose={() => setShowInvoiceModal(false)} />}
       {invoiceWarn && <div className="toast">{invoiceWarn}</div>}
     </div>
@@ -4754,104 +4910,258 @@ function InvoiceDetail({ invoice }) {
   );
 }
 
+// Per direction 2026-08-28: a real "Edit" affordance, not click-to-edit-in-
+// place on each field -- the old per-field version also had a real usability
+// bug from it, not just a discoverability one: the phone/email links'
+// onClick={e => e.preventDefault()} (needed so a click always opened the
+// field's editor instead of following the tel:/mailto: link) meant clicking
+// a contact's phone number to actually call it, or their email to actually
+// mail them, silently did nothing. One Edit button now enters a single edit
+// mode for the whole card; outside edit mode every link is a real, working
+// link. Also adds Mobile/Fax -- confirmed live only Phone (72%), Mobile
+// (26%), and Fax (25.5%, more real usage than expected) have meaningful
+// fill rates across this org's 9,078 real Contacts; Home/Other/Assistant
+// Phone are all under 1% and left out to avoid clutter.
 function ContactInfoModal({ contact, accounts, onUpdateContact, onClose }) {
-  const [editing, setEditing] = useState(null); // { field, value }
+  const [editMode, setEditMode] = useState(false);
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
 
   const accountOptions = useMemo(() =>
     accounts.map((a) => [a.id, a.name]).sort((x, y) => x[1].localeCompare(y[1]))
   , [accounts]);
 
-  const startEdit = (field, value) => setEditing({ field, value: value ?? '' });
+  const enterEdit = () => {
+    setForm({
+      name: contact.name ?? '',
+      title: contact.title ?? '',
+      accountId: contact.accountId ?? '',
+      phone: formatPhone(contact.phone) || '',
+      mobile: formatPhone(contact.mobile) || '',
+      fax: formatPhone(contact.fax) || '',
+      email: contact.email ?? '',
+    });
+    setErr(null);
+    setEditMode(true);
+  };
 
-  const commitEdit = async () => {
-    if (!editing) return;
-    const { field, value } = editing;
-    setEditing(null);
+  const save = async () => {
+    setSaving(true);
+    setErr(null);
     try {
-      await onUpdateContact(contact.id, { [field]: value });
+      await onUpdateContact(contact.id, {
+        name: form.name.trim(),
+        title: form.title.trim() || null,
+        accountId: form.accountId || null,
+        phone: form.phone || null,
+        mobile: form.mobile || null,
+        fax: form.fax || null,
+        email: form.email.trim() || null,
+      });
+      setEditMode(false);
     } catch (e) {
-      alert(`Could not save: ${e.message}`);
+      setErr(e.message);
+    } finally {
+      setSaving(false);
     }
   };
 
-  // Escape here is "cancel this field's edit," not "close the popup" - stop
-  // it from also reaching the parent's close-on-Escape listener.
-  const onEditKey = (e) => {
-    if (e.key === 'Enter') commitEdit();
-    if (e.key === 'Escape') { e.stopPropagation(); setEditing(null); }
-  };
-
-  const editableField = (field, value, opts) => {
-    if (editing?.field === field) {
-      return (
-        <div className="contact-edit-row">
-          <input
-            className="contact-edit-input"
-            autoFocus
-            type={opts?.type ?? 'text'}
-            value={editing.value}
-            onChange={(e) => setEditing((s) => ({ ...s, value: opts?.format ? opts.format(e.target.value) : e.target.value }))}
-            onKeyDown={onEditKey}
-          />
-          <button className="contact-edit-save" onClick={commitEdit}>Save</button>
-          <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
-        </div>
-      );
-    }
-    return (
-      <span className="contact-editable" onClick={() => startEdit(field, value)}>
-        {value ? value : <span className="na">{opts?.placeholder ?? '-'}</span>}
-      </span>
-    );
-  };
+  const set = (field) => (v) => setForm((s) => ({ ...s, [field]: v }));
+  const accountName = accounts.find((a) => a.id === contact.accountId)?.name ?? null;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <div className="modal-header">
-          <div className="modal-title-row">{editableField('name', contact.name)}</div>
+          <div className="modal-title-row"><span className="jname">{editMode ? 'Edit contact' : contact.name}</span></div>
           <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
         </div>
         <div className="modal-body">
-          <div className="contact-title">{editableField('title', contact.title, { placeholder: 'Add title' })}</div>
-          <div className="contact-title">
-            <SearchableSelect
-              value={contact.accountId ?? ''}
-              onChange={(id) => onUpdateContact(contact.id, { accountId: id || null })}
-              options={accountOptions}
-              placeholder="Search accounts…"
-            />
-          </div>
-          <div>
-            {editing?.field === 'phone'
-              ? <div className="contact-edit-row">
-                  <input className="contact-edit-input" autoFocus type="tel" value={editing.value}
-                    onChange={(e) => setEditing((s) => ({ ...s, value: formatPhone(e.target.value) }))}
-                    onKeyDown={onEditKey} />
-                  <button className="contact-edit-save" onClick={commitEdit}>Save</button>
-                  <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
-                </div>
-              : <span className="contact-editable" onClick={() => startEdit('phone', formatPhone(contact.phone))}>
-                  {contact.phone ? <a href={`tel:${contact.phone}`} className="contact-link" onClick={(e) => e.preventDefault()}>{formatPhone(contact.phone)}</a> : <span className="na">Add phone</span>}
-                </span>}
-          </div>
-          <div>
-            {editing?.field === 'email'
-              ? <div className="contact-edit-row">
-                  <input className="contact-edit-input" autoFocus type="email" value={editing.value}
-                    onChange={(e) => setEditing((s) => ({ ...s, value: e.target.value }))}
-                    onKeyDown={onEditKey} />
-                  <button className="contact-edit-save" onClick={commitEdit}>Save</button>
-                  <button className="contact-edit-cancel" onClick={() => setEditing(null)}>Cancel</button>
-                </div>
-              : <span className="contact-editable" onClick={() => startEdit('email', contact.email)}>
-                  {contact.email ? <a href={`mailto:${contact.email}`} className="contact-link" onClick={(e) => e.preventDefault()}>{contact.email}</a> : <span className="na">Add email</span>}
-                </span>}
-          </div>
+          {err && <div className="state err">{err}</div>}
+          {!editMode ? (
+            <>
+              {contact.title && <div className="contact-title">{contact.title}</div>}
+              {accountName && <div className="contact-title">{accountName}</div>}
+              <div className="contact-view-rows">
+                <div className="contact-view-row"><span className="contact-view-label">Phone</span>{contact.phone ? <a href={`tel:${contact.phone}`} className="contact-link">{formatPhone(contact.phone)}</a> : <span className="na">-</span>}</div>
+                <div className="contact-view-row"><span className="contact-view-label">Mobile</span>{contact.mobile ? <a href={`tel:${contact.mobile}`} className="contact-link">{formatPhone(contact.mobile)}</a> : <span className="na">-</span>}</div>
+                <div className="contact-view-row"><span className="contact-view-label">Fax</span>{contact.fax ? formatPhone(contact.fax) : <span className="na">-</span>}</div>
+                <div className="contact-view-row"><span className="contact-view-label">Email</span>{contact.email ? <a href={`mailto:${contact.email}`} className="contact-link">{contact.email}</a> : <span className="na">-</span>}</div>
+              </div>
+            </>
+          ) : (
+            <>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Name</span>
+                <input className="req-note-input" autoFocus value={form.name} onChange={(e) => set('name')(e.target.value)} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Title</span>
+                <input className="req-note-input" value={form.title} onChange={(e) => set('title')(e.target.value)} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Account</span>
+                <SearchableSelect value={form.accountId} onChange={set('accountId')} options={accountOptions} placeholder="Search accounts…" />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Phone</span>
+                <input className="req-note-input" type="tel" value={form.phone} onChange={(e) => set('phone')(formatPhone(e.target.value))} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Mobile</span>
+                <input className="req-note-input" type="tel" value={form.mobile} onChange={(e) => set('mobile')(formatPhone(e.target.value))} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Fax</span>
+                <input className="req-note-input" type="tel" value={form.fax} onChange={(e) => set('fax')(formatPhone(e.target.value))} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Email</span>
+                <input className="req-note-input" type="email" value={form.email} onChange={(e) => set('email')(e.target.value)} />
+              </label>
+            </>
+          )}
         </div>
         <div className="modal-footer">
-          <div className="modal-footer-spacer" />
-          <button className="modal-cancel-btn" onClick={onClose}>Close</button>
+          {editMode ? (
+            <>
+              <button className="modal-cancel-btn" onClick={() => setEditMode(false)} disabled={saving}>Cancel</button>
+              <div className="modal-footer-spacer" />
+              <button className="modal-save-btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+            </>
+          ) : (
+            <>
+              <button className="modal-cancel-btn" onClick={enterEdit}>Edit</button>
+              <div className="modal-footer-spacer" />
+              <button className="modal-cancel-btn" onClick={onClose}>Close</button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Mirrors ContactInfoModal directly below it -- same view/edit-mode toggle,
+// same modal-sm/contact-view-row* CSS, added per direction 2026-08-28 to
+// replace AccountsTab's old per-field click-to-edit-in-place cells (street/
+// city/state/zip/website/industry/phone) with one real Edit button. Type,
+// LID, and management company aren't included in the edit form -- they
+// were never editable in the old click-to-edit cells either (plain display
+// text, no onClick), so this isn't dropping any capability.
+function AccountInfoModal({ account, onUpdateAccount, onClose }) {
+  const [editMode, setEditMode] = useState(false);
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const enterEdit = () => {
+    setForm({
+      street: account.street ?? '',
+      city: account.city ?? '',
+      state: account.state ?? '',
+      zip: account.zip ?? '',
+      phone: formatPhone(account.phone) || '',
+      website: account.website ?? '',
+      industry: account.industry ?? '',
+    });
+    setErr(null);
+    setEditMode(true);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setErr(null);
+    try {
+      await onUpdateAccount(account.id, {
+        street: form.street.trim() || null,
+        city: form.city.trim() || null,
+        state: form.state.trim() || null,
+        zip: form.zip.trim() || null,
+        phone: form.phone || null,
+        website: form.website.trim() || null,
+        industry: form.industry.trim() || null,
+      });
+      setEditMode(false);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const set = (field) => (v) => setForm((s) => ({ ...s, [field]: v }));
+  const addressLine = [account.street, [account.city, account.state].filter(Boolean).join(', '), account.zip].filter(Boolean).join(' ') || null;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">{editMode ? 'Edit account' : account.name}</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          {err && <div className="state err">{err}</div>}
+          {!editMode ? (
+            <>
+              {account.type && <div className="contact-title">{account.type}</div>}
+              <div className="contact-view-rows">
+                <div className="contact-view-row"><span className="contact-view-label">LID</span>{account.lid ? <span className="lidtag">LID {account.lid}</span> : <span className="na">-</span>}</div>
+                <div className="contact-view-row"><span className="contact-view-label">Address</span>{addressLine ?? <span className="na">-</span>}</div>
+                <div className="contact-view-row"><span className="contact-view-label">Phone</span>{account.phone ? <a href={`tel:${account.phone}`} className="contact-link">{formatPhone(account.phone)}</a> : <span className="na">-</span>}</div>
+                <div className="contact-view-row"><span className="contact-view-label">Website</span>{account.website ? <a href={account.website.startsWith('http') ? account.website : `https://${account.website}`} target="_blank" rel="noreferrer" className="contact-link">{account.website}</a> : <span className="na">-</span>}</div>
+                <div className="contact-view-row"><span className="contact-view-label">Industry</span>{account.industry || <span className="na">-</span>}</div>
+                <div className="contact-view-row"><span className="contact-view-label">Management co.</span>{account.parentName ?? <span className="na">-</span>}</div>
+              </div>
+            </>
+          ) : (
+            <>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Street</span>
+                <input className="req-note-input" autoFocus value={form.street} onChange={(e) => set('street')(e.target.value)} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">City</span>
+                <input className="req-note-input" value={form.city} onChange={(e) => set('city')(e.target.value)} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">State</span>
+                <input className="req-note-input" value={form.state} onChange={(e) => set('state')(e.target.value)} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Zip</span>
+                <input className="req-note-input" value={form.zip} onChange={(e) => set('zip')(e.target.value)} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Phone</span>
+                <input className="req-note-input" type="tel" value={form.phone} onChange={(e) => set('phone')(formatPhone(e.target.value))} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Website</span>
+                <input className="req-note-input" value={form.website} onChange={(e) => set('website')(e.target.value)} />
+              </label>
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Industry</span>
+                <input className="req-note-input" value={form.industry} onChange={(e) => set('industry')(e.target.value)} />
+              </label>
+            </>
+          )}
+        </div>
+        <div className="modal-footer">
+          {editMode ? (
+            <>
+              <button className="modal-cancel-btn" onClick={() => setEditMode(false)} disabled={saving}>Cancel</button>
+              <div className="modal-footer-spacer" />
+              <button className="modal-save-btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+            </>
+          ) : (
+            <>
+              <button className="modal-cancel-btn" onClick={enterEdit}>Edit</button>
+              <div className="modal-footer-spacer" />
+              <button className="modal-cancel-btn" onClick={onClose}>Close</button>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -5570,7 +5880,8 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
   }, [timeOff]);
 
   return (
-    <div className="grid-wrap">
+    <>
+    <div className="grid-wrap sched-desktop">
       <table className="sched">
         <thead>
           <tr>
@@ -5633,6 +5944,108 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
           ))}
         </tbody>
       </table>
+    </div>
+    {/* Mobile-only (styles.css) -- per direction 2026-08-28, mirroring
+        crs-board's own "All Techs" crew view (CrewBoard.tsx): one collapsed
+        card per tech instead of a 7-day grid that only ever showed ~2 real
+        columns on a phone. Same grid/timeOffByTechDate data, just
+        restructured from "one cell per tech x day" into "one flat, sorted
+        list of real entries per tech" -- an empty day just produces no
+        entry here, unlike the grid where every day gets its own cell
+        (mostly showing "Open"). */}
+    <TechWeekList
+      techs={rows}
+      days={days}
+      grid={grid}
+      timeOffByTechDate={timeOffByTechDate}
+      todayIso={todayIso}
+      onJobClick={onJobClick}
+      onEditOff={onEditOff}
+    />
+    </>
+  );
+}
+
+// See WeekGrid's own comment above for why this exists. One card per tech,
+// summary visible by default, tap to expand into every real slot (job or
+// time off) across the visible week, in day order.
+function TechWeekList({ techs, days, grid, timeOffByTechDate, todayIso, onJobClick, onEditOff }) {
+  const [expanded, setExpanded] = useState(() => new Set());
+  const toggle = (id) => setExpanded((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const byTech = useMemo(() => techs.map((t) => {
+    const entries = [];
+    for (const d of days) {
+      const iso = isoOf(d);
+      const off = timeOffByTechDate[t.id]?.[iso];
+      if (off) entries.push({ kind: 'off', iso, off });
+      for (const item of (grid[t.id]?.[iso] || [])) entries.push({ kind: 'job', iso, ...item });
+    }
+    return { tech: t, entries };
+  }), [techs, days, grid, timeOffByTechDate]);
+
+  const dayLabel = (iso) => {
+    if (iso === todayIso) return 'Today';
+    return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'numeric', day: 'numeric' });
+  };
+
+  if (byTech.length === 0) return <div className="tech-week-empty">No technicians</div>;
+
+  return (
+    <div className="tech-week-list">
+      {byTech.map(({ tech, entries }) => {
+        const isOpen = expanded.has(tech.id);
+        const activeCount = entries.filter((e) => e.kind === 'job' && !e.completed).length;
+        const doneCount = entries.filter((e) => e.kind === 'job' && e.completed).length;
+        const offCount = entries.filter((e) => e.kind === 'off').length;
+        return (
+          <div key={tech.id} className="tech-week-card">
+            <button type="button" className="tech-week-head" onClick={() => toggle(tech.id)} aria-expanded={isOpen}>
+              <span className="tech-week-name">{tech.name}</span>
+              <span className="tech-week-summary">
+                {entries.length === 0
+                  ? <span className="tech-week-free">Open all week</span>
+                  : (
+                    <>
+                      {activeCount > 0 && <span>{activeCount} job{activeCount === 1 ? '' : 's'}</span>}
+                      {doneCount > 0 && <span>✓{doneCount} done</span>}
+                      {offCount > 0 && <span>{offCount} off</span>}
+                    </>
+                  )}
+              </span>
+              <span className={`tech-week-chevron ${isOpen ? 'open' : ''}`}>›</span>
+            </button>
+            {/* Cascade (App.jsx) -- always mounted (not `isOpen &&`) so
+                open/close is a real animated transition instead of an
+                instant mount/unmount. Safe to use the full transform+
+                opacity version here (unlike JobCard's mobile collapse
+                below) -- these rows are plain onClick divs, no
+                DatePicker/TimePicker/etc. inside that render their own
+                position:fixed popovers. */}
+            <Cascade open={isOpen}>
+              <div className="tech-week-body">
+                {entries.length === 0 && <div className="tech-week-empty-day">Nothing scheduled this week</div>}
+                {entries.map((e, i) => e.kind === 'off' ? (
+                  <div key={i} className="tech-week-row off" onClick={() => onEditOff(e.off)} role="button" tabIndex={0} onKeyDown={(ev) => ev.key === 'Enter' && onEditOff(e.off)}>
+                    <span className="tech-week-row-day">{dayLabel(e.iso)}</span>
+                    <span className="tech-week-row-info">Time off</span>
+                  </div>
+                ) : (
+                  <div key={i} className={`tech-week-row ${e.completed ? 'done' : ''}`} onClick={() => onJobClick(e.jobId)} role="button" tabIndex={0} onKeyDown={(ev) => ev.key === 'Enter' && onJobClick(e.jobId)}>
+                    <span className="tech-week-row-day">{dayLabel(e.iso)}</span>
+                    <span className="tech-week-row-time">{e.startTime}</span>
+                    <span className="tech-week-row-info">{e.completed ? '✓ ' : ''}{e.name.split('—')[0].trim()}</span>
+                  </div>
+                ))}
+              </div>
+            </Cascade>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -6551,7 +6964,7 @@ const InventoryGroupSection = React.memo(function InventoryGroupSection({ group,
         {group.opportunityLid && <span className="lidtag">LID {group.opportunityLid}</span>}
         <span className="mgmt-group-count">{group.rows.length} part{group.rows.length === 1 ? '' : 's'}</span>
       </button>
-      {open && (
+      <LazyCascade open={open}>
         <div className="contacts-wrap">
           <table className="contacts-table">
             <thead>
@@ -6593,7 +7006,7 @@ const InventoryGroupSection = React.memo(function InventoryGroupSection({ group,
             </tbody>
           </table>
         </div>
-      )}
+      </LazyCascade>
     </div>
   );
 });
@@ -7763,7 +8176,15 @@ function AccountMenu({ user, onClose, onLoggedOut }) {
           {msg && <p className="acct-ok">{msg}</p>}
           <button className="modal-save-btn" disabled={busy || !pw.trim()} onClick={save}>{busy ? 'Saving…' : 'Save password'}</button>
         </div>
-        <div className="modal-footer"><button className="modal-cancel-btn" onClick={onLoggedOut}>Log out</button></div>
+        <div className="modal-footer">
+          <button className="modal-cancel-btn" onClick={onLoggedOut}>Log out</button>
+          <div className="modal-footer-spacer" />
+          {/* Real build timestamp (vite.config.js), not a hardcoded/manually-
+              bumped version string -- per direction 2026-08-28, a quick way
+              to confirm a deploy actually reached this device instead of
+              guessing from whether something visibly changed. */}
+          <span className="acct-build-time" title="When this version was built">Build {__BUILD_TIME__}</span>
+        </div>
       </div>
     </div>
   );
@@ -7977,8 +8398,8 @@ function ReconMatched({ rows, groupBy }) {
     const m = new Map();
     for (const r of rows) {
       const k = r[groupBy] || '(none)';
-      if (!m.has(k)) m.set(k, { rows: [], sf: 0, qbo: 0, sfR: 0, qboR: 0 });
-      const e = m.get(k); e.rows.push(r); e.sf += N(r.sfAmount); e.qbo += N(r.qboAmount); e.sfR += N(r.sfReceived); e.qboR += N(r.qboReceived);
+      if (!m.has(k)) m.set(k, { rows: [], sf: 0, qbo: 0, sfR: 0, qboR: 0, linked: 0 });
+      const e = m.get(k); e.rows.push(r); e.sf += N(r.sfAmount); e.qbo += N(r.qboAmount); e.sfR += N(r.sfReceived); e.qboR += N(r.qboReceived); if (r.linked) e.linked++;
     }
     return [...m.entries()].sort((a, b) => b[1].sf - a[1].sf);
   }, [rows, groupBy]);
@@ -8004,7 +8425,7 @@ function ReconMatched({ rows, groupBy }) {
             <tbody>
               {groups.map(([k, e]) => (
                 <tr key={k}>
-                  <td className="recon-cust">{k}</td><td>{e.rows.length}</td>
+                  <td className="recon-cust">{k}</td><td>{e.rows.length} <span className="recon-linked-count" title={`${e.linked} of ${e.rows.length} durably linked (QBO_Id__c set)`}>({e.linked}✓)</span></td>
                   <td className="recon-amt">{money(e.sf)}</td><td className="recon-amt">{money(e.qbo)}</td><td className={gapCls(e.qbo - e.sf)}>{money(e.qbo - e.sf)}</td>
                   <td className="recon-amt">{money(e.sfR)}</td><td className="recon-amt">{money(e.qboR)}</td><td className={gapCls(e.qboR - e.sfR)}>{money(e.qboR - e.sfR)}</td>
                 </tr>
@@ -8028,7 +8449,12 @@ function ReconMatched({ rows, groupBy }) {
             <tbody>
               {flat.map((r, i) => (
                 <tr key={r.number + '-' + i}>
-                  <td className="recon-num">{r.number}{r.dup && <span className="recon-dup" title="Duplicate invoice # - paired by amount"> dup</span>}</td><td className="recon-cust">{r.sfAccount || r.qboAccount || '-'}</td><td className="recon-date-cell">{r.qboDate || r.sfDate || ''}</td>
+                  <td className="recon-num">
+                    {r.linked
+                      ? <span className="recon-linked" title="QBO_Id__c is set to this exact QBO invoice — durably linked, not just matched by this page's own amount/date heuristic">✓ </span>
+                      : <span className="recon-unlinked" title="Matched here by amount/date, but QBO_Id__c isn't set to this invoice yet — re-computed live every load">○ </span>}
+                    {r.number}{r.dup && <span className="recon-dup" title="Duplicate invoice # - paired by amount"> dup</span>}
+                  </td><td className="recon-cust">{r.sfAccount || r.qboAccount || '-'}</td><td className="recon-date-cell">{r.qboDate || r.sfDate || ''}</td>
                   <td className="recon-amt">{money(r.sfAmount)}</td><td className="recon-amt">{money(r.qboAmount)}</td><td className={gapCls(N(r.qboAmount) - N(r.sfAmount))}>{money(N(r.qboAmount) - N(r.sfAmount))}</td>
                   <td className="recon-amt">{money(r.sfReceived)}</td><td className="recon-amt">{money(r.qboReceived)}</td><td className={gapCls(N(r.qboReceived) - N(r.sfReceived))}>{money(N(r.qboReceived) - N(r.sfReceived))}</td>
                 </tr>
@@ -8254,6 +8680,7 @@ const SEGMENT_INFO = {
   billedTotal: { label: 'Billed', color: '#2E9E5B' },
   technicianHours: { label: 'Technician Hours', color: '#5B6ABF' },
   helperHours: { label: 'Helper Hours', color: '#E0A72E' },
+  billedOther: { label: 'Other Charges (truck, misc, shipping)', color: '#7A8699' },
 };
 
 // Hover popover content per segment -- quoted rings show the real Quote
@@ -8336,7 +8763,12 @@ function SegmentDetailModal({ segmentKey, total, lines, unit = '$', onClose }) {
 // Hover behavior mirrors the ring's popover (same SegmentPopoverContent),
 // but anchored with plain CSS above/below the bar instead of polar-
 // coordinate leader-line math, since a bar has no angle to compute.
-function BulletBar({ segmentKey, actual, target, unit = '$', lines }) {
+// targetLabel: the word describing what `target` represents in the value
+// line ("$X of $Y ___") -- defaults to 'quoted' (Job Analytics' only real
+// use so far), but Service Analytics targets aren't quotes at all (real
+// cost/expense/awarded figures instead), so hardcoding "quoted" there would
+// just be wrong, not merely imprecise.
+function BulletBar({ segmentKey, actual, target, unit = '$', lines, targetLabel = 'quoted' }) {
   const [hovered, setHovered] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const wrapRef = useRef(null);
@@ -8436,7 +8868,7 @@ function BulletBar({ segmentKey, actual, target, unit = '$', lines }) {
             <div className="exp-bullet-fill" style={{ width: `${actualFrac * 100}%`, background: info.color }} />
             <div className="exp-bullet-tick" style={{ left: `${targetFrac * 100}%` }} />
           </div>
-          <div className="exp-bullet-value">{fmt(actual)} of {fmt(target)} quoted</div>
+          <div className="exp-bullet-value">{fmt(actual)} of {fmt(target)} {targetLabel}</div>
           {hovered && pos && createPortal(
             <div
               ref={popRef}
@@ -8674,6 +9106,97 @@ const QUOTE_SOURCE_LABEL = {
   none: 'No quote data available for this job',
 };
 
+// Service Analytics -- per direction 2026-08-28: Service Call jobs don't go
+// through the Quote process the way Job/Project work does (confirmed live
+// against a real Service - Fire call: quotedLabor/quotedParts/quotedTotal
+// all null, quoteSource 'none'), so the Job Analytics view above -- a ring
+// and every bar built around quote-vs-actual -- renders as an empty "No
+// data" wall for every single Service job. This is a genuinely different
+// question for Service work: real cost vs. real revenue, not estimate vs.
+// actual. Per direction: Materials gets a real paid-vs-charged comparison
+// (both sides are real tracked $ -- Material Expenses from CRS Purchase
+// Orders, Billed Materials from the real invoice), plus the one honest
+// profit figure this app can compute (Materials Profit -- there's no
+// tracked labor cost to net against billed labor, per-tech pay is
+// deliberately never a dollar figure here, so this is scoped to materials
+// only, not claimed as whole-job profit). Labor stays hours-only, per
+// direction: real FS hours with a per-tech Helper/Technician breakdown
+// (who + how many), no dollar "cost" side since none exists.
+function ServiceJobAnalytics({ data, billedInvoiceLines }) {
+  const materialsProfit = data.materialsProfit ?? 0;
+  const isProfit = materialsProfit >= 0;
+  // Real tracked PO spend (materialExpenses) is almost never present on
+  // Service jobs -- per direction 2026-08-28, parts cost here comes from
+  // each billed part's own Product2 catalog list price (Standard Pricebook
+  // UnitPrice) instead, qty x list price per line, summed. A part that
+  // can't be matched to a real catalog product (or has no Standard
+  // Pricebook entry) contributes nothing and is flagged, so an incomplete
+  // estimate stays visibly incomplete rather than silently under-counting.
+  const partsListCostLines = (data.partsListCostLines || []).map((l) => (
+    <><td>{l.code}</td><td>{l.qty}</td><td>{l.matched ? fmtCurrency(l.listPrice) : 'no catalog match'}</td><td>{l.matched ? fmtCurrency(l.cost) : '-'}</td></>
+  ));
+  const hasUnmatchedParts = (data.partsListCostLines || []).some((l) => !l.matched);
+  return (
+    <>
+      <div className="exp-service-summary">
+        <div className="exp-figure-row">Awarded Amount <strong>{fmtCurrency(data.awardedAmount) ?? '-'}</strong></div>
+        <div className="exp-figure-row">Billed Total <strong>{fmtCurrency(data.billed) ?? '-'}</strong></div>
+        <div className={`exp-profit-figure ${isProfit ? 'is-profit' : 'is-loss'}`}>
+          <span className="exp-profit-label">Materials {isProfit ? 'Profit' : 'Loss'}</span>
+          <span className="exp-profit-amount">{isProfit ? '+' : '−'}{fmtCurrency(Math.abs(materialsProfit))}</span>
+        </div>
+        <div className="exp-profit-note">Billed Materials − Parts Catalog Cost (Product2 Standard Pricebook list price × qty for each billed part). Materials only, not overall job profit -- labor cost isn't tracked anywhere in this system.</div>
+        {hasUnmatchedParts && <div className="exp-none-note">One or more billed parts couldn't be matched to a real catalog product/list price -- this estimate is a floor, real cost may be higher</div>}
+        {!data.hasPurchaseOrders && <div className="exp-none-note">No CRS Purchase Orders recorded for this job -- cost estimated from catalog list price instead</div>}
+        {!data.hasFsLink && <div className="exp-none-note">No Field Squared data for this job</div>}
+      </div>
+
+      <div className="exp-bullet-panel">
+        <div className="exp-figure-group-label">Expenses vs. Billed</div>
+        <BulletBar segmentKey="billedTotal" actual={data.billed} target={data.partsListCost} unit="$" lines={billedInvoiceLines} targetLabel="in estimated parts cost (catalog list price)" />
+
+        <div className="exp-figure-group-label">Materials: Catalog Cost vs. Charged</div>
+        <BulletBar segmentKey="billedMaterials" actual={data.billedMaterials} target={data.partsListCost} unit="$" lines={partsListCostLines} targetLabel="in catalog list price" />
+
+        <div className="exp-figure-group-label">Labor</div>
+        <div className="exp-figure-row">Billed Labor <strong>{fmtCurrency(data.billedLabor) ?? '-'}</strong></div>
+        {data.hasFsLink ? (
+          <>
+            <HoursBreakdown label="Technician Hours" hours={data.technicianHours} breakdown={data.technicianBreakdown} />
+            <HoursBreakdown label="Helper Hours" hours={data.helperHours} breakdown={data.helperBreakdown} />
+          </>
+        ) : <div className="exp-none-note">No Field Squared hours data for this job</div>}
+
+        {data.billedOther > 0 && (
+          <>
+            <div className="exp-figure-group-label">Other Charges</div>
+            <div className="exp-figure-row">Truck / Misc / Shipping <strong>{fmtCurrency(data.billedOther)}</strong></div>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+// Real hours (from FS) with who-logged-what visible directly, not hidden
+// behind a hover -- per direction 2026-08-28, Service jobs have no quoted
+// hours to compare against, so this is a plain stat plus a breakdown list,
+// not a BulletBar (which needs a real target to mean anything).
+function HoursBreakdown({ label, hours, breakdown }) {
+  return (
+    <div className="exp-hours-block">
+      <div className="exp-figure-row">{label} <strong>{hours != null ? `${hours}h` : '-'}</strong></div>
+      {breakdown && breakdown.length > 0 && (
+        <div className="exp-hours-people">
+          {breakdown.map((t) => (
+            <div className="exp-hours-person" key={t.name}><span>{t.name}</span><span>{t.hours}h</span></div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ExpenseJobDetail({ oppId, onBack }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -8719,46 +9242,67 @@ function ExpenseJobDetail({ oppId, onBack }) {
             {data.opportunity.lid && <span className="lidtag">LID {data.opportunity.lid}</span>}
           </div>
 
-          <div className="exp-detail-donut-row">
-            <JobDonutRings
-              quotedLabor={data.quotedLabor}
-              quotedParts={data.quotedParts}
-              quotedLaborLines={data.quotedLaborLines}
-              quotedPartsLines={data.quotedPartsLines}
-              size={240}
+          {data.jobKind === 'service' ? (
+            <ServiceJobAnalytics
+              data={data}
+              billedInvoiceLines={billedInvoiceLines}
             />
-            <div className="exp-detail-figures">
-              <div className="exp-figure-row">Awarded Amount <strong>{fmtCurrency(data.awardedAmount) ?? '-'}</strong></div>
+          ) : (
+            <>
+              <div className="exp-detail-donut-row">
+                <JobDonutRings
+                  quotedLabor={data.quotedLabor}
+                  quotedParts={data.quotedParts}
+                  quotedLaborLines={data.quotedLaborLines}
+                  quotedPartsLines={data.quotedPartsLines}
+                  size={240}
+                />
+                <div className="exp-detail-figures">
+                  <div className="exp-figure-row">Awarded Amount <strong>{fmtCurrency(data.awardedAmount) ?? '-'}</strong></div>
 
-              <div className="exp-figure-group-label">Quoted <span className="exp-quote-source">({QUOTE_SOURCE_LABEL[data.quoteSource]})</span></div>
-              <div className="exp-figure-row"><span className="exp-dot exp-dot-quoted-labor" />Quoted Labor <strong>{fmtCurrency(data.quotedLabor) ?? '-'}</strong></div>
-              <div className="exp-figure-row"><span className="exp-dot exp-dot-quoted-parts" />Quoted Parts <strong>{fmtCurrency(data.quotedParts) ?? '-'}</strong></div>
-              <div className="exp-figure-row">Quoted Total <strong>{fmtCurrency(data.quotedTotal) ?? '-'}</strong></div>
-              {!(data.quotedTotal > 0) && <div className="exp-none-note">No quote data for this job -- the ring above shows relative to billed/expense totals instead</div>}
-              {!data.hasPurchaseOrders && <div className="exp-none-note">No CRS Purchase Orders recorded for this job yet</div>}
-              {!data.hasFsLink && <div className="exp-none-note">No Field Squared data for this job</div>}
-            </div>
-          </div>
+                  <div className="exp-figure-group-label">Quoted <span className="exp-quote-source">({QUOTE_SOURCE_LABEL[data.quoteSource]})</span></div>
+                  <div className="exp-figure-row"><span className="exp-dot exp-dot-quoted-labor" />Quoted Labor <strong>{fmtCurrency(data.quotedLabor) ?? '-'}</strong></div>
+                  <div className="exp-figure-row"><span className="exp-dot exp-dot-quoted-parts" />Quoted Parts <strong>{fmtCurrency(data.quotedParts) ?? '-'}</strong></div>
+                  <div className="exp-figure-row">Quoted Total <strong>{fmtCurrency(data.quotedTotal) ?? '-'}</strong></div>
+                  {!(data.quotedTotal > 0) && <div className="exp-none-note">No quote data for this job -- the ring above shows relative to billed/expense totals instead</div>}
+                  {!data.hasPurchaseOrders && <div className="exp-none-note">No CRS Purchase Orders recorded for this job yet</div>}
+                  {!data.hasFsLink && <div className="exp-none-note">No Field Squared data for this job</div>}
+                </div>
+              </div>
 
-          <div className="exp-bullet-panel">
-            <div className="exp-figure-group-label">Award vs. Quote</div>
-            <BulletBar segmentKey="quotedTotal" actual={data.quotedTotal} target={data.awardedAmount} unit="$" lines={quotedTotalLines} />
+              <div className="exp-bullet-panel">
+                <div className="exp-figure-group-label">Award vs. Quote</div>
+                <BulletBar segmentKey="quotedTotal" actual={data.quotedTotal} target={data.awardedAmount} unit="$" lines={quotedTotalLines} />
 
-            <div className="exp-figure-group-label">Materials</div>
-            <BulletBar segmentKey="materialExpenses" actual={data.materialExpenses} target={data.quotedParts} unit="$" lines={
-              (data.materialExpenseLines || []).map((l) => (<><td>{l.poNumber}</td><td>{l.vendor ?? '-'}</td><td>{fmtDate(l.date) ?? '-'}</td><td>{fmtCurrency(l.amount)}</td></>))
-            } />
-            <BulletBar segmentKey="billedMaterials" actual={data.billedMaterials} target={data.quotedParts} unit="$" lines={billedMaterialLines} />
+                <div className="exp-figure-group-label">Materials</div>
+                {/* Target is the catalog cost of the parts that were quoted
+                    (Product2 Standard Pricebook list price x quoted qty),
+                    not Quoted Parts' own $ total -- per direction 2026-08-28,
+                    Quoted Parts bundles in quote-level markup, tax, and
+                    shipping (confirmed live against this exact job: of an
+                    $11,423.50 Quoted Parts total, only $5,453.60 was real
+                    material line items), which answers "did we bill what we
+                    quoted" but not "did our real cost track the parts we
+                    actually quoted" -- this bar answers the latter. Billed
+                    Materials below still compares against Quoted Parts
+                    itself, since that IS the right target for a revenue
+                    question. */}
+                <BulletBar segmentKey="materialExpenses" actual={data.materialExpenses} target={data.quotedPartsListCost} unit="$" targetLabel="in catalog list price for the parts quoted" lines={
+                  (data.materialExpenseLines || []).map((l) => (<><td>{l.poNumber}</td><td>{l.vendor ?? '-'}</td><td>{fmtDate(l.date) ?? '-'}</td><td>{fmtCurrency(l.amount)}</td></>))
+                } />
+                <BulletBar segmentKey="billedMaterials" actual={data.billedMaterials} target={data.quotedParts} unit="$" lines={billedMaterialLines} />
 
-            <div className="exp-figure-group-label">Labor</div>
-            <BulletBar segmentKey="billedLabor" actual={data.billedLabor} target={data.quotedLabor} unit="$" lines={billedLaborLines} />
-            <BulletBar segmentKey="technicianHours" actual={data.hasFsLink ? data.technicianHours : null} target={data.quotedTechnicianHours} unit="h" lines={technicianHoursLines} />
-            <BulletBar segmentKey="helperHours" actual={data.hasFsLink ? data.helperHours : null} target={data.quotedHelperHours} unit="h" lines={helperHoursLines} />
+                <div className="exp-figure-group-label">Labor</div>
+                <BulletBar segmentKey="billedLabor" actual={data.billedLabor} target={data.quotedLabor} unit="$" lines={billedLaborLines} />
+                <BulletBar segmentKey="technicianHours" actual={data.hasFsLink ? data.technicianHours : null} target={data.quotedTechnicianHours} unit="h" lines={technicianHoursLines} />
+                <BulletBar segmentKey="helperHours" actual={data.hasFsLink ? data.helperHours : null} target={data.quotedHelperHours} unit="h" lines={helperHoursLines} />
 
-            <div className="exp-figure-group-label">Billing</div>
-            <BulletBar segmentKey="billedTotal" actual={data.billed} target={data.awardedAmount} unit="$" lines={billedInvoiceLines} />
-            {data.overBilledBy != null && <div className="exp-none-note">Billed {fmtCurrency(data.overBilledBy)} over the Awarded Amount</div>}
-          </div>
+                <div className="exp-figure-group-label">Billing</div>
+                <BulletBar segmentKey="billedTotal" actual={data.billed} target={data.awardedAmount} unit="$" lines={billedInvoiceLines} />
+                {data.overBilledBy != null && <div className="exp-none-note">Billed {fmtCurrency(data.overBilledBy)} over the Awarded Amount</div>}
+              </div>
+            </>
+          )}
 
           <h3>Invoices</h3>
           {data.invoices.length === 0 && <div className="na">No invoices on file</div>}
@@ -8783,20 +9327,22 @@ function ExpenseJobDetail({ oppId, onBack }) {
                 </div>
               )}
               {inv.lines.length > 0 && (
-                <table className="exp-invoice-lines">
-                  <thead><tr><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th><th>Category</th></tr></thead>
-                  <tbody>
-                    {inv.lines.map((l, i) => (
-                      <tr key={i}>
-                        <td>{l.itemName ?? '-'}</td>
-                        <td>{l.qty ?? '-'}</td>
-                        <td>{fmtCurrency(l.rate) ?? '-'}</td>
-                        <td>{fmtCurrency(l.amount) ?? '-'}</td>
-                        <td>{l.category}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <div className="exp-invoice-lines-scroll">
+                  <table className="exp-invoice-lines">
+                    <thead><tr><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th><th>Category</th></tr></thead>
+                    <tbody>
+                      {inv.lines.map((l, i) => (
+                        <tr key={i}>
+                          <td>{l.itemName ?? '-'}</td>
+                          <td>{l.qty ?? '-'}</td>
+                          <td>{fmtCurrency(l.rate) ?? '-'}</td>
+                          <td>{fmtCurrency(l.amount) ?? '-'}</td>
+                          <td>{l.category}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           ))}

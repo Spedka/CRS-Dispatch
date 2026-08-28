@@ -3,6 +3,17 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
+  // Real build timestamp, baked in at build time -- per direction
+  // 2026-08-28, a quick way to confirm a deploy actually landed on a given
+  // device/browser instead of guessing from whether something visibly
+  // changed. Shown in the Account modal (App.jsx's AccountMenu). Using the
+  // machine's local build time (not UTC) since that's what reads naturally
+  // next to "did I just deploy this a minute ago."
+  define: {
+    __BUILD_TIME__: JSON.stringify(new Date().toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    })),
+  },
   plugins: [
     react(),
     VitePWA({

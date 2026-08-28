@@ -541,10 +541,9 @@ async function getReconciliationData(env, from, to, padFrom, refresh) {
   if (!data) {
       const sf = createSalesforce(env);
       const qbo = createQbo(env);
-      const [sfBilledAgg, sfRecvAgg, sfInvoices, qboInvoicesAll, qboPaymentsAll, pmRes, qboCustomers] = await Promise.all([
-        sf.query(`SELECT SUM(${inv.amount}) total FROM ${inv.sobject} WHERE ${inv.date} >= ${from} AND ${inv.date} <= ${to} AND ${inv.status} != 'Voided'`),
+      const [sfRecvAgg, sfInvoices, qboInvoicesAll, qboPaymentsAll, pmRes, qboCustomers] = await Promise.all([
         sf.query(`SELECT SUM(${inv.paymentReceived}) total FROM ${inv.sobject} WHERE ${inv.paymentReceivedDate} >= ${from} AND ${inv.paymentReceivedDate} <= ${to}`),
-        sf.query(`SELECT Id, Name, ${inv.amount}, ${inv.paymentReceived}, ${inv.date}, ${inv.status}, ${inv.paymentMethod}, ${inv.qboId}, Job__r.Name, Job__r.${f.oppType}, Job__r.RecordType.DeveloperName, Job__r.Account.Name, Job__r.Account.Parent.Name FROM ${inv.sobject} WHERE ${inv.date} >= ${padFrom} AND ${inv.date} <= ${to}`),
+        sf.query(`SELECT Id, Name, ${inv.amount}, ${inv.totalInvoice}, ${inv.paymentReceived}, ${inv.date}, ${inv.status}, ${inv.paymentMethod}, ${inv.qboId}, ${inv.qboCustomerId}, Job__r.Name, Job__r.${f.oppType}, Job__r.RecordType.DeveloperName, Job__r.Account.Name, Job__r.Account.Parent.Name FROM ${inv.sobject} WHERE ${inv.date} >= ${padFrom} AND ${inv.date} <= ${to}`),
         qbo.queryAll('Invoice', `WHERE TxnDate >= '${padFrom}'`),
         qbo.queryAll('Payment', `WHERE TxnDate >= '${padFrom}'`),
         qbo.query('SELECT * FROM PaymentMethod'),
@@ -553,6 +552,22 @@ async function getReconciliationData(env, from, to, padFrom, refresh) {
 
       const inWindow = (d) => d && d >= from && d <= to;
       const num = (v) => (typeof v === 'number' ? v : Number(v) || 0);
+      // The real final invoice total (tax/fees included) -- Invoice_Amount__c
+      // is a pre-tax subtotal (confirmed live 2026-08-28: a real invoice had
+      // Invoice_Amount__c $18,022.46 vs. Total_Invoice__c $18,854.64, the
+      // $832.18 gap being exactly that invoice's Sales_Tax__c). Comparing the
+      // subtotal against QBO's TotalAmt (which IS tax-inclusive) understated
+      // every taxed invoice's real SF amount, systematically skewing both
+      // the billed total below and the sfAmt matching used for reconciliation
+      // -- most matches still passed only because LINE_MATCH_MAX_REL_DIFF's
+      // 20% tolerance happened to absorb typical sales-tax-sized gaps.
+      // Falls back to Invoice_Amount__c when Total_Invoice__c is blank.
+      const sfTotal = (r) => num(r[inv.totalInvoice] ?? r[inv.amount]);
+      // Was a separate SOQL SUM() aggregate -- folded into summing sfInvoices
+      // (already fetched as plain rows above) instead, since sfInvoices is
+      // the row-level source of truth for the correct field anyway and this
+      // avoids a second round trip.
+      const sfBilledAgg = [{ total: sfInvoices.filter((r) => r[inv.status] !== 'Voided' && inWindow(r[inv.date])).reduce((s, r) => s + sfTotal(r), 0) }];
 
       // QBO: sent invoices only for billed + the cross-reference.
       const qboSent = qboInvoicesAll.filter((i) => i.EmailStatus === 'EmailSent');
@@ -583,7 +598,7 @@ async function getReconciliationData(env, from, to, padFrom, refresh) {
       for (const r of sfInvoices) { const k = invKey(r.Name); if (!k) continue; if (!sfByKey.has(k)) sfByKey.set(k, []); sfByKey.get(k).push(r); }
       for (const i of qboSent) { const k = invKey(i.DocNumber); if (!k) continue; if (!qboByKey.has(k)) qboByKey.set(k, []); qboByKey.get(k).push(i); }
 
-      const sfAmt = (r) => num(r[inv.amount]);
+      const sfAmt = sfTotal;
       const qbAmt = (i) => num(i.TotalAmt);
       const sameDay = (r, i) => (r[inv.date] || '') === (i.TxnDate || '');
       const sameCust = (r, i) => { const a = r.Job__r?.Account?.Name, b = i.CustomerRef?.name; return a && b && String(a).toLowerCase() === String(b).toLowerCase(); };
@@ -654,6 +669,21 @@ async function getReconciliationData(env, from, to, padFrom, refresh) {
             qboAccount: qi.CustomerRef?.name || null, qboParent: qboParentName(qi.CustomerRef?.value),
             paymentMethod: methodByInvId.get(qi.Id) || normMethod(sr[inv.paymentMethod]) || null,
             sfId: sr.Id, qboInvoiceId: qi.Id, currentQboId: sr[inv.qboId] || null,
+            // The real QBO Customer Id -- Invoicing__c.QBO_Customer_Id__c is
+            // read by invoices.js's Create Invoice customer-suggestion
+            // feature but nothing anywhere ever writes it (confirmed live
+            // 2026-08-27: suggestions never populate for any job, for
+            // exactly that reason). Piggybacking the write onto this same
+            // matching pass -- it already has the real QBO Invoice's
+            // CustomerRef in hand, no extra query needed.
+            qboCustomerId: qi.CustomerRef?.value || null, currentQboCustomerId: sr[inv.qboCustomerId] || null,
+            // Per direction 2026-08-27: distinguish a durably-linked row
+            // (QBO_Id__c already set to this exact QBO Invoice, via the
+            // qbo-id-backfill write path) from one that's only matched by
+            // this page's own live amount/date heuristic every load -- the
+            // heuristic can't drift a linked row into the wrong bucket, but
+            // it's still worth knowing which rows are confirmed vs. inferred.
+            linked: (sr[inv.qboId] || null) === qi.Id,
             // For the qbo-id-backfill line-item-similarity relaxation --
             // real Opportunity name/type/record-type, and how much of that
             // name shows up in the QBO invoice's own line text.
@@ -789,7 +819,7 @@ api.get('/finance/qbo-id-backfill', async (c) => {
     // ?refresh=1 same as before -- only an actual write forces it.
     const data = await getReconciliationData(c.env, from, to, padFrom, apply || c.req.query('refresh') === '1');
 
-    const candidates = [], lineMatchCandidates = [], alreadySet = [], conflicts = [], amountMismatch = [];
+    const candidates = [], lineMatchCandidates = [], alreadySet = [], conflicts = [], amountMismatch = [], customerIdOnly = [];
     for (const m of data.diff.matched) {
       if (!m.sfId || !m.qboInvoiceId) continue; // shouldn't happen - guard anyway
       const exact = amountsEqual(m.sfAmount, m.qboAmount);
@@ -809,7 +839,18 @@ api.get('/finance/qbo-id-backfill', async (c) => {
       const relDiff = Math.abs(m.sfAmount - m.qboAmount) / Math.max(Math.abs(m.sfAmount), Math.abs(m.qboAmount), 1);
       const viaLineMatch = !exact && isJobOrService && !isMonitoringOrInspection && m.nameLineSimilarity >= LINE_MATCH_THRESHOLD && relDiff <= LINE_MATCH_MAX_REL_DIFF;
       if (!exact && !viaLineMatch) { amountMismatch.push(m); continue; }
-      if (m.currentQboId === m.qboInvoiceId) { alreadySet.push(m); continue; }
+      if (m.currentQboId === m.qboInvoiceId) {
+        alreadySet.push(m);
+        // QBO_Id__c is already correctly linked, but per direction
+        // 2026-08-27, QBO_Customer_Id__c (read by invoices.js's Create
+        // Invoice customer-suggestion feature) has never been written by
+        // anything, ever -- confirmed live, suggestions never populate for
+        // any job. Piggyback a customer-id-only backfill onto this same
+        // pass for the already-linked backlog (the vast majority of real
+        // records), not just newly-linked ones below.
+        if (m.qboCustomerId && m.currentQboCustomerId !== m.qboCustomerId) customerIdOnly.push(m);
+        continue;
+      }
       if (m.currentQboId) { conflicts.push(m); continue; } // already set to something ELSE - don't touch
       (viaLineMatch ? lineMatchCandidates : candidates).push(m);
     }
@@ -831,11 +872,20 @@ api.get('/finance/qbo-id-backfill', async (c) => {
     let applied = null;
     if (apply) {
       const sf = createSalesforce(c.env);
-      const toWrite = [...candidates, ...lineMatchCandidates].slice(0, writeLimit);
-      applied = { succeeded: 0, failed: [], attempted: toWrite.length, remaining: Math.max(0, (candidates.length + lineMatchCandidates.length) - toWrite.length) };
-      for (const m of toWrite) {
+      // New links (QBO_Id__c + QBO_Customer_Id__c together, one update per
+      // record) go first, then customer-id-only backfill for the already-
+      // linked backlog -- both queues share the same writeLimit/remaining
+      // budget so a caller looping this can drain both without extra logic.
+      const newLinks = [...candidates, ...lineMatchCandidates].map((m) => ({
+        m, fields: { [inv.qboId]: m.qboInvoiceId, ...(m.qboCustomerId ? { [inv.qboCustomerId]: m.qboCustomerId } : {}) },
+      }));
+      const custOnly = customerIdOnly.map((m) => ({ m, fields: { [inv.qboCustomerId]: m.qboCustomerId } }));
+      const allPending = [...newLinks, ...custOnly];
+      const toWrite = allPending.slice(0, writeLimit);
+      applied = { succeeded: 0, failed: [], attempted: toWrite.length, remaining: Math.max(0, allPending.length - toWrite.length) };
+      for (const { m, fields } of toWrite) {
         try {
-          await sf.updateRecord(inv.sobject, m.sfId, { [inv.qboId]: m.qboInvoiceId });
+          await sf.updateRecord(inv.sobject, m.sfId, fields);
           applied.succeeded++;
         } catch (e) {
           applied.failed.push({ sfId: m.sfId, number: m.number, error: e.message });
@@ -851,8 +901,9 @@ api.get('/finance/qbo-id-backfill', async (c) => {
         alreadySet: alreadySet.length,
         conflicts: conflicts.length,
         amountMismatch: amountMismatch.length,
+        customerIdOnly: customerIdOnly.length,
       },
-      candidates, lineMatchCandidates, conflicts, amountMismatch,
+      candidates, lineMatchCandidates, conflicts, amountMismatch, customerIdOnly,
       applied,
     });
   } catch (e) { return c.json({ error: e.message }, 500); }
@@ -1787,6 +1838,8 @@ api.patch('/contacts/:id', async (c) => {
     }
     if ('email' in body) fields.Email = body.email || null;
     if ('phone' in body) fields.Phone = body.phone || null;
+    if ('mobile' in body) fields.MobilePhone = body.mobile || null;
+    if ('fax' in body) fields.Fax = body.fax || null;
     if ('title' in body) fields.Title = body.title || null;
     if ('accountId' in body) fields.AccountId = body.accountId || null;
 
@@ -1806,7 +1859,13 @@ api.get('/contacts', async (c) => {
     // Property_Contact_Name__c on Account is a Contact lookup - one person can be
     // the property contact for many buildings, so we group accounts by that field.
     const [contactRecords, accountRecords] = await Promise.all([
-      sf.query(`SELECT Id, FirstName, LastName, Name, Email, Phone, Title,
+      // MobilePhone/Fax added alongside Phone -- per direction 2026-08-28,
+      // "show all numbers": confirmed live these are the only two of
+      // Contact's other phone-ish fields with meaningful real fill rates
+      // (MobilePhone 26%, Fax 25.5%, out of 9,078 real Contacts) --
+      // HomePhone/OtherPhone/AssistantPhone are all under 1% and not worth
+      // the added UI clutter.
+      sf.query(`SELECT Id, FirstName, LastName, Name, Email, Phone, MobilePhone, Fax, Title,
                        AccountId, Account.Name, LastModifiedDate
                 FROM Contact ORDER BY LastName, FirstName`),
       sf.query(`SELECT Id, Name, LID__c, Property_Contact_Name__c, ParentId, Parent.Name
@@ -1829,6 +1888,8 @@ api.get('/contacts', async (c) => {
       name: r.Name,
       email: r.Email ?? null,
       phone: r.Phone ?? null,
+      mobile: r.MobilePhone ?? null,
+      fax: r.Fax ?? null,
       title: r.Title ?? null,
       company: r.Account?.Name ?? null,
       accountId: r.AccountId ?? null,

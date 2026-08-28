@@ -17,6 +17,43 @@ export const jobCost = new Hono();
 // every call site.
 const round2 = (n) => Math.round(n * 100) / 100;
 
+// Real Salesforce Product2 catalog list price (Standard Pricebook UnitPrice
+// -- NOT a field on Product2 itself, confirmed live 2026-08-28) for a set of
+// {code, qty} lines, qty x list price summed per line. Shared by Service
+// Analytics' parts cost (billed parts have no tracked PO cost) and Job
+// Analytics' quoted-parts catalog total (the quote's own $ total bundles in
+// markup/tax/shipping/non-material fee lines, not a clean parts cost) --
+// same real gap, same real fix, two different callers. A line whose code
+// doesn't resolve to a real product, or whose product has no Standard
+// Pricebook entry, contributes 0 and is flagged `matched: false` rather than
+// silently dropped, so an incomplete estimate stays visibly incomplete.
+async function computePartsListCost(sf, partsLines) {
+  const usable = partsLines.filter((l) => l.code);
+  if (usable.length === 0) return { total: 0, lines: [] };
+  const codes = [...new Set(usable.map((l) => l.code))];
+  const codeList = codes.map((code) => `'${esc(code)}'`).join(',');
+  const prods = await sf.query(`SELECT Id, ProductCode FROM Product2 WHERE ProductCode IN (${codeList})`);
+  const prodIdByCode = new Map(prods.map((p) => [p.ProductCode, p.Id]));
+  const prodIds = [...prodIdByCode.values()];
+  const listPriceByProdId = new Map();
+  if (prodIds.length > 0) {
+    const idList = prodIds.map((id) => `'${esc(id)}'`).join(',');
+    const pbes = await sf.query(`SELECT Product2Id, UnitPrice FROM PricebookEntry WHERE Product2Id IN (${idList}) AND Pricebook2.IsStandard = true AND IsActive = true`);
+    for (const e of pbes) listPriceByProdId.set(e.Product2Id, e.UnitPrice ?? 0);
+  }
+  let total = 0;
+  const lines = usable.map((l) => {
+    const prodId = prodIdByCode.get(l.code);
+    const listPrice = prodId != null ? listPriceByProdId.get(prodId) : undefined;
+    const matched = listPrice != null;
+    const qty = Number(l.qty) || 0;
+    const cost = matched ? round2(qty * listPrice) : 0;
+    if (matched) total += cost;
+    return { code: l.code, name: l.name ?? null, qty, listPrice: listPrice ?? null, cost, matched };
+  });
+  return { total: round2(total), lines };
+}
+
 // ============================================================================
 // "Jobs" filter -- Install/Project-type work, distinct from Service Call,
 // Test & Inspection, and Monitoring. Per direction 2026-08-26: RecordType is
@@ -169,17 +206,19 @@ jobCost.get('/finance/expense-jobs', async (c) => {
 
     // Real, QBO-linked invoices only -- per direction, a plain Invoicing__c
     // row with no real QBO invoice behind it (QBO_Id__c null) doesn't count
-    // as "has an invoice attached." A plain, unfiltered-by-job GROUP BY
-    // (same "aggregate the whole related table instead of an IN-list"
-    // pattern as the PO query below -- an IN-list keyed to hundreds of
-    // Opportunity ids blows past GET's URL length limit, confirmed live:
-    // "414 URI Too Long") -- checked live 2026-08-27: 39,884 real
-    // Invoicing__c rows total, but only 28 distinct jobs have one with a
-    // real QBO_Id__c (most invoices in this org still aren't QBO-linked),
-    // so the aggregate result here is tiny and the query itself is fast
-    // (~250ms) regardless of the base table's size.
+    // as "has an invoice attached." A plain, unaggregated SELECT (dedupe in
+    // JS below), not GROUP BY -- 2026-08-28: broke live ("Aggregate query
+    // does not support queryMore()") the moment the qbo-id-backfill job
+    // (routes.js) pushed real QBO_Id__c-linked distinct jobs past
+    // Salesforce's aggregate-query batch size (2,000 groups) -- true when
+    // this was a GROUP BY at "28 distinct jobs" (2026-08-27), not true once
+    // the backfill did its job. Aggregate queries can't page past that limit
+    // at all (a hard SF API restriction, not something to raise here); a
+    // plain SELECT can, via this app's own query() already following
+    // nextRecordsUrl for regular (non-aggregate) result sets. Only Job__c is
+    // ever read from these rows -- the per-job count was never used.
     const invRows = await sf.query(`
-      SELECT ${inv.job}, COUNT(Id) c FROM ${inv.sobject} WHERE ${inv.job} != null AND ${inv.qboId} != null GROUP BY ${inv.job}
+      SELECT ${inv.job} FROM ${inv.sobject} WHERE ${inv.job} != null AND ${inv.qboId} != null
     `);
     const invoicedOppIds = new Set(invRows.map((r) => r[inv.job]));
 
@@ -191,20 +230,26 @@ jobCost.get('/finance/expense-jobs', async (c) => {
     });
     if (jobs.length === 0) return c.json({ jobs: [] });
 
-    // A plain, unfiltered GROUP BY over the whole Opportunity__c table
-    // instead of an IN-list keyed to `jobs` -- that list can run into the
-    // hundreds/thousands of real Opportunities within the lookback window,
-    // and a SOQL IN-clause that long blows past GET's URL length limit
-    // (confirmed live: "414 URI Too Long"). Opportunity__c itself is a small
-    // table (2,592 rows all-time, confirmed live) so grouping the whole
-    // thing and matching client-side is both simpler and actually cheaper.
+    // A plain, unaggregated SELECT over the whole Opportunity__c table
+    // (summed per job in JS below), not GROUP BY -- instead of an IN-list
+    // keyed to `jobs`, which can run into the hundreds/thousands of real
+    // Opportunities within the lookback window and blow past GET's URL
+    // length limit (confirmed live: "414 URI Too Long"). Same aggregate-
+    // query-batch-limit risk as the Invoicing__c query above (see its
+    // comment, 2026-08-28) -- Opportunity__c isn't under active growth from
+    // a backfill the way Invoicing__c was, but there's no reason to leave
+    // the same kind of "small today" assumption sitting in a GROUP BY that
+    // can't page past 2,000 groups if it stops being small.
     const poRows = await sf.query(`
-      SELECT Opportunity_Name__c, SUM(Purchase_Order_Amount__c) total
+      SELECT Opportunity_Name__c, Purchase_Order_Amount__c
       FROM Opportunity__c
       WHERE Opportunity_Name__c != null
-      GROUP BY Opportunity_Name__c
     `);
-    const spentByOppId = new Map(poRows.map((r) => [r.Opportunity_Name__c, r.total ?? 0]));
+    const spentByOppId = new Map();
+    for (const r of poRows) {
+      const k = r.Opportunity_Name__c;
+      spentByOppId.set(k, (spentByOppId.get(k) || 0) + (r.Purchase_Order_Amount__c ?? 0));
+    }
 
     const result = jobs.map((o) => {
       const recordType = o.RecordType?.DeveloperName ?? null;
@@ -254,6 +299,16 @@ jobCost.get('/finance/job-cost/:oppId', async (c) => {
     if (!opp) return c.json({ error: 'Opportunity not found' }, 404);
 
     const awardedAmount = opp.Amount ?? 0;
+    // Service jobs don't go through the Quote process the way Job/Project
+    // work does -- confirmed live 2026-08-28 (WO 51389, a real Service -
+    // Fire call): quotedLabor/quotedParts/quotedTotal are null across the
+    // board, quoteSource is 'none'. Per direction, the frontend needs to
+    // know which kind of job this is so it can render a genuinely different
+    // view (real billed-vs-cost/margin, not quote-vs-actual) instead of a
+    // quote-shaped view that's just empty for every Service job.
+    const oppRecordType = opp.RecordType?.DeveloperName ?? null;
+    const oppTypeVal = opp[f.oppType] ?? null;
+    const jobKind = isJobType(oppRecordType, oppTypeVal) ? 'job' : (isServiceType(oppRecordType, oppTypeVal) ? 'service' : 'other');
 
     // Material Expenses -- the real "CRS Purchase Order" (Opportunity__c)
     // records themselves, not just the aggregate -- per direction, the
@@ -295,6 +350,8 @@ jobCost.get('/finance/job-cost/:oppId', async (c) => {
     let quotedLabor = null;
     let quotedParts = null;
     let quotedTotal = null;
+    let quotedPartsListCost = null;
+    let quotedPartsListCostLines = [];
     const quotedLaborLines = [];
     const quotedPartsLines = [];
     // Quoted hours, split Helper vs. Technician -- per direction 2026-08-27,
@@ -341,13 +398,29 @@ jobCost.get('/finance/job-cost/:oppId', async (c) => {
         const amt = (l.Quantity ?? 0) * (l.UnitPrice ?? 0);
         const family = l.Product2?.Family;
         const code = l.Product2?.ProductCode;
-        const lineOut = { name: l.Product2?.Name ?? null, qty: l.Quantity ?? 0, rate: l.UnitPrice ?? 0, amount: amt };
+        const lineOut = { name: l.Product2?.Name ?? null, qty: l.Quantity ?? 0, rate: l.UnitPrice ?? 0, amount: amt, code: code || null };
         if (isRealLaborLine(family, code)) {
           quotedLaborLines.push(lineOut);
           if (/^help-/i.test((code || '').trim())) quotedHelperHours += l.Quantity ?? 0;
           else quotedTechnicianHours += l.Quantity ?? 0;
         } else if (isMaterialFamily(family)) quotedPartsLines.push(lineOut);
       }
+
+      // Catalog cost of the parts that were quoted -- per direction
+      // 2026-08-28: Quoted Parts (the $ figure above) is the Quote's own
+      // header total, which bundles in markup applied at the quote level,
+      // tax, shipping, and non-material fee lines (confirmed live against
+      // JOB 53404: of an $11,423.50 Quoted Parts total, only $5,453.60 was
+      // real material line items -- the rest was markup/tax/shipping/fees).
+      // That's the right number for "did we bill what we quoted," but the
+      // wrong one for "did our real material cost track the parts we
+      // actually quoted" -- for that, this sums each quoted part's own real
+      // Product2 catalog list price x quoted qty instead, same mechanism as
+      // Service Analytics' parts cost estimate (see computePartsListCost).
+      // Computed here, before the synthetic Sales Tax/Shipping/Markup lines
+      // below get appended to quotedPartsLines -- only real material lines
+      // (the ones with a real `code`) should ever feed this.
+      ({ total: quotedPartsListCost, lines: quotedPartsListCostLines } = await computePartsListCost(sf, quotedPartsLines));
 
       // Reconcile the itemized lists against the real totals shown above --
       // per direction 2026-08-27, don't just leave the gap silently
@@ -437,21 +510,29 @@ jobCost.get('/finance/job-cost/:oppId', async (c) => {
     // labor/parts/other split and the full real line list pulled from the
     // real QBO Invoice (via QBO_Id__c) when available.
     const invoiceRows = await sf.query(`
-      SELECT Id, Name, ${inv.date}, ${inv.amount}, ${inv.status}, ${inv.qboId}
+      SELECT Id, Name, ${inv.date}, ${inv.amount}, ${inv.totalInvoice}, ${inv.status}, ${inv.qboId}
       FROM ${inv.sobject} WHERE ${inv.job} = '${esc(oppId)}'
       ORDER BY ${inv.date} DESC NULLS LAST
     `);
     const invoices = [];
     let billedLabor = 0;
     let billedMaterials = 0;
+    let billedOther = 0;
     let billed = 0;
     for (const r of invoiceRows) {
-      billed += r[inv.amount] ?? 0;
+      // The real final invoice total (tax/fees included), not the pre-tax
+      // subtotal -- Invoice_Amount__c vs. Total_Invoice__c, same real gap
+      // confirmed live 2026-08-28 (a real invoice: $18,022.46 subtotal vs.
+      // $18,854.64 true total, the $832.18 gap being exactly that invoice's
+      // Sales_Tax__c). Falls back to Invoice_Amount__c when
+      // Total_Invoice__c is blank.
+      const trueAmount = r[inv.totalInvoice] ?? r[inv.amount] ?? 0;
+      billed += trueAmount;
       const qboId = r[inv.qboId];
       const base = {
         id: r.Id,
         date: r[inv.date] ?? null,
-        amount: r[inv.amount] ?? null,
+        amount: trueAmount,
         status: r[inv.status] ?? null,
         qboId: qboId || null,
         // The real invoice/doc number ("7849879-ML" style) IS Invoicing__c's
@@ -501,6 +582,7 @@ jobCost.get('/finance/job-cost/:oppId', async (c) => {
             base.lines = lines;
             billedLabor += laborAmt;
             billedMaterials += partsAmt;
+            billedOther += otherAmt;
           }
         } catch {
           // Best-effort -- leave the split/lines empty if the QBO pull fails.
@@ -512,20 +594,59 @@ jobCost.get('/finance/job-cost/:oppId', async (c) => {
     const remainingToBill = round2(Math.max(0, awardedAmount - billed));
     const overBilledBy = billed > awardedAmount ? round2(billed - awardedAmount) : null;
 
+    // Service jobs almost never have a real CRS Purchase Order on file
+    // (confirmed live 2026-08-28 across several real Service Call jobs --
+    // hasPurchaseOrders is false on nearly all of them, since a tech
+    // grabbing parts off the truck for a small service call doesn't cut a
+    // formal PO the way Job/Project work does), so materialExpenses is
+    // almost always $0 there -- not "no cost", just untracked cost, which
+    // made every Service job's Materials Profit read as suspiciously large
+    // "profit" that was really just a data gap. Per direction 2026-08-28:
+    // for Service jobs, estimate parts cost from each billed part's own
+    // Salesforce Product2 catalog list price instead (Standard Pricebook
+    // UnitPrice, NOT a field on Product2 itself -- confirmed live there's no
+    // price field on the product record). The join key is reliable: QBO
+    // item Names are created directly from Product2.ProductCode elsewhere
+    // in this app (purchaseOrders.js), so a billed line's real itemName IS
+    // the ProductCode to look up. A part that can't be matched (no such
+    // ProductCode, or no Standard Pricebook entry) contributes nothing to
+    // the estimate and is flagged per-line so this stays honest about what
+    // it actually covers, not silently under- or over-counting.
+    const billedPartsLines = invoices.flatMap((iv) => iv.lines.filter((l) => l.category === 'parts' && l.itemName))
+      .map((l) => ({ code: l.itemName, name: l.itemName, qty: l.qty }));
+    const { total: partsListCost, lines: partsListCostLines } = await computePartsListCost(sf, billedPartsLines);
+
+    // Materials Profit -- billed materials minus material cost, the one
+    // margin this app can compute honestly. Not a whole-job profit figure --
+    // there's no tracked labor cost to net against billed labor (per-tech
+    // pay is deliberately never a dollar figure here), so this is scoped
+    // and labeled to materials specifically, not overclaimed as overall job
+    // profitability. Job/Project work uses real tracked PO spend
+    // (materialExpenses); Service work uses the catalog-list-price estimate
+    // above, since real PO spend is essentially never tracked there.
+    const materialsProfit = round2(billedMaterials - (jobKind === 'service' ? partsListCost : materialExpenses));
+
     return c.json({
       opportunity: { id: opp.Id, name: opp[f.oppName], lid: opp[f.oppLid] ?? null },
+      jobKind,
       awardedAmount,
       quotedLabor: quotedLabor != null ? round2(quotedLabor) : null,
       quotedParts: quotedParts != null ? round2(quotedParts) : null,
       quotedTotal: quotedTotal != null ? round2(quotedTotal) : null,
       quotedLaborLines,
       quotedPartsLines,
+      quotedPartsListCost,
+      quotedPartsListCostLines,
       quoteSource,
       materialExpenses,
       materialExpenseLines,
       hasPurchaseOrders: poRecords.length > 0,
+      partsListCost,
+      partsListCostLines,
       billedLabor: round2(billedLabor),
       billedMaterials: round2(billedMaterials),
+      billedOther: round2(billedOther),
+      materialsProfit,
       helperHours,
       technicianHours,
       helperBreakdown: [...helperByTech.entries()].map(([name, hours]) => ({ name, hours })).sort((a, b) => b.hours - a.hours),
