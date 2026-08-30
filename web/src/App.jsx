@@ -6150,6 +6150,60 @@ function MonthGrid({ jobs, anchor, techFilter, onJobClick, timeOff, onEditOff })
 // the calendar view can't place them at all, so they're simply omitted there.
 const quoteSortKey = (q) => q.dueDate || '9999-99-99';
 
+// Own component (not inlined in QuotesTab's .map) so each row can hold its
+// own expand state. Per direction 2026-08-30: name + type tag + status
+// dropdown + 4 action buttons/badges all crammed into one .row1 was fine on
+// desktop but started overlapping once the row narrowed on mobile -- same
+// "collapse the extras behind a tap" fix already used for Outstanding
+// Jobs' JobCard, reusing its exact .job-expand-toggle/.job-collapsible
+// mechanism (display:contents on desktop, so this is a complete no-op
+// there -- everything stays inline in .row1 exactly as before). Only the 4
+// action buttons/badges are behind the toggle -- status stays visible
+// without expanding (those were the two elements actually squeezing/
+// overlapping; status alone reads fine at full width). Meta line (account/
+// due date/review deadline) stays always-visible too, unlike JobCard --
+// per direction, overflow/info-running-off was never a problem on this
+// screen, only the buttons were.
+function QuoteRow({ quote: q, users, usersLoaded, onLoadUsers, onStatusChange, onSend, onReview }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="job">
+      <div className="stripe" data-status={statusClass(q.status)} />
+      <div className="body">
+        <div className="row1">
+          <OppLink className="jname" id={q.id} name={q.name} />
+          {q.opportunityType && <span className="quote-type">{q.opportunityType}</span>}
+          {/* Per direction 2026-08-30: status stays visible without
+              expanding -- only the 4 action buttons/badges below are what
+              actually overlapped/squeezed, so only those are behind the
+              toggle now. */}
+          <QuoteStatusSelect status={q.status} onChange={(status) => onStatusChange(q, status)} />
+          <div className={`job-collapsible ${expanded ? 'expanded' : ''}`}>
+            <div className="job-collapsible-inner">
+              <div className="quote-actions">
+                <QuoteRecipientButton quote={q} label="Ready For Review" title="Send this quote for internal review" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onReview} />
+                <QuoteRecipientButton quote={q} label="Sent" title="Send this quote for customer approval" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onSend} />
+                <QuoteSystemsButton quote={q} />
+                <QuoteDocumentsBadge quoteId={q.id} />
+              </div>
+            </div>
+          </div>
+          {/* Mobile-only (styles.css) -- desktop's .job-collapsible is
+              display:contents, so this toggle has nothing to do there. */}
+          <button type="button" className="job-expand-toggle" onClick={() => setExpanded((e) => !e)} aria-label={expanded ? 'Collapse quote actions' : 'Expand quote actions'} aria-expanded={expanded}>
+            <span className="job-expand-chevron">{expanded ? '▾' : '▸'}</span>
+          </button>
+        </div>
+        <div className="meta">
+          {q.accountName && <span><span className="ic">◍</span>{q.accountName}</span>}
+          <span className="created quote-due">{q.dueDate ? `Due ${fmtDate(q.dueDate)}` : 'No due date set'}</span>
+          {q.reviewDeadline && <span className="created quote-review-deadline">Review by {fmtDateTime(q.reviewDeadline)}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, onSend, onReview, users, usersLoaded, onLoadUsers }) {
   const [mode, setMode] = useState('list');
   const [calMode, setCalMode] = useState('month');
@@ -6266,27 +6320,16 @@ function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, 
         ) : (
           <div className="jobs">
             {sorted.map((q) => (
-              <div className="job" key={q.id}>
-                <div className="stripe" data-status={statusClass(q.status)} />
-                <div className="body">
-                  <div className="row1">
-                    <OppLink className="jname" id={q.id} name={q.name} />
-                    {q.opportunityType && <span className="quote-type">{q.opportunityType}</span>}
-                    <QuoteStatusSelect status={q.status} onChange={(status) => onStatusChange(q, status)} />
-                    <div className="quote-actions">
-                      <QuoteRecipientButton quote={q} label="Ready For Review" title="Send this quote for internal review" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onReview} />
-                      <QuoteRecipientButton quote={q} label="Sent" title="Send this quote for customer approval" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onSend} />
-                      <QuoteSystemsButton quote={q} />
-                      <QuoteDocumentsBadge quoteId={q.id} />
-                    </div>
-                  </div>
-                  <div className="meta">
-                    {q.accountName && <span><span className="ic">◍</span>{q.accountName}</span>}
-                    <span className="created quote-due">{q.dueDate ? `Due ${fmtDate(q.dueDate)}` : 'No due date set'}</span>
-                    {q.reviewDeadline && <span className="created quote-review-deadline">Review by {fmtDateTime(q.reviewDeadline)}</span>}
-                  </div>
-                </div>
-              </div>
+              <QuoteRow
+                key={q.id}
+                quote={q}
+                users={users}
+                usersLoaded={usersLoaded}
+                onLoadUsers={onLoadUsers}
+                onStatusChange={onStatusChange}
+                onSend={onSend}
+                onReview={onReview}
+              />
             ))}
           </div>
         )
@@ -6361,32 +6404,76 @@ function QuotesMonthGrid({ quotes, anchor, onQuoteClick }) {
   const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
   return (
-    <div className="month">
-      {WD.map((w) => <div className="wd" key={w}>{w}</div>)}
-      {cells.map((d) => {
-        const iso = isoOf(d);
-        const out = d.getMonth() !== month;
-        const items = byDate[iso] || [];
-        return (
-          <div className={`daycell ${out ? 'out' : ''} ${iso === todayIso ? 'today' : ''}`} key={iso}>
-            <div className="daynum">{d.getDate()}</div>
-            {items.map(({ quote: q, kind }) => (
-              <div
-                className="dayjob"
-                data-kind={kind}
-                key={`${q.id}-${kind}`}
-                title={kind === 'review' ? `Review deadline ${fmtDateTime(q.reviewDeadline)}: ${q.name}` : `Due ${fmtDate(q.dueDate)}: ${q.name}`}
-                onClick={() => onQuoteClick(q)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => e.key === 'Enter' && onQuoteClick(q)}
-              >
-                <span className="jn"><OppLink id={q.id} name={q.name} /></span>
-              </div>
-            ))}
-          </div>
-        );
-      })}
+    <>
+      <div className="month sched-desktop">
+        {WD.map((w) => <div className="wd" key={w}>{w}</div>)}
+        {cells.map((d) => {
+          const iso = isoOf(d);
+          const out = d.getMonth() !== month;
+          const items = byDate[iso] || [];
+          return (
+            <div className={`daycell ${out ? 'out' : ''} ${iso === todayIso ? 'today' : ''}`} key={iso}>
+              <div className="daynum">{d.getDate()}</div>
+              {items.map(({ quote: q, kind }) => (
+                <div
+                  className="dayjob"
+                  data-kind={kind}
+                  key={`${q.id}-${kind}`}
+                  title={kind === 'review' ? `Review deadline ${fmtDateTime(q.reviewDeadline)}: ${q.name}` : `Due ${fmtDate(q.dueDate)}: ${q.name}`}
+                  onClick={() => onQuoteClick(q)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => e.key === 'Enter' && onQuoteClick(q)}
+                >
+                  <span className="jn"><OppLink id={q.id} name={q.name} /></span>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      <QuotesAgendaList cells={cells} byDate={byDate} todayIso={todayIso} onQuoteClick={onQuoteClick} />
+    </>
+  );
+}
+
+// Mobile-only stand-in for the 7-column .month/.week grid above -- per
+// direction 2026-08-30, same problem (and same fix) as Tech Schedule's own
+// desktop grid: 7 columns squeeze unreadably on a phone. Skips days with
+// nothing on them entirely (a month view otherwise mostly empty cells) --
+// mirrors TechWeekList's own entries-only approach, not a padded grid.
+function QuotesAgendaList({ cells, byDate, todayIso, onQuoteClick }) {
+  const dayLabel = (iso) => {
+    if (iso === todayIso) return 'Today';
+    return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'numeric', day: 'numeric' });
+  };
+  const days = useMemo(() => cells
+    .map((d) => { const iso = isoOf(d); return { iso, items: byDate[iso] || [] }; })
+    .filter((d) => d.items.length > 0)
+  , [cells, byDate]);
+
+  return (
+    <div className="quote-agenda-list">
+      {days.length === 0 && <div className="tech-week-empty">Nothing due or in review this range.</div>}
+      {days.map(({ iso, items }) => (
+        <div key={iso} className={`quote-agenda-day ${iso === todayIso ? 'today' : ''}`}>
+          <div className="quote-agenda-day-label">{dayLabel(iso)}</div>
+          {items.map(({ quote: q, kind }) => (
+            <div
+              key={`${q.id}-${kind}`}
+              className="quote-agenda-row"
+              data-kind={kind}
+              onClick={() => onQuoteClick(q)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => e.key === 'Enter' && onQuoteClick(q)}
+            >
+              <span className="quote-agenda-kind">{kind === 'review' ? 'Review' : 'Due'}</span>
+              <span className="quote-agenda-name">{q.name}</span>
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
@@ -6416,32 +6503,35 @@ function QuotesWeekGrid({ quotes, anchor, onQuoteClick }) {
   const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
   return (
-    <div className="month">
-      {WD.map((w) => <div className="wd" key={w}>{w}</div>)}
-      {cells.map((d) => {
-        const iso = isoOf(d);
-        const items = byDate[iso] || [];
-        return (
-          <div className={`daycell ${iso === todayIso ? 'today' : ''}`} key={iso}>
-            <div className="daynum">{d.getDate()}</div>
-            {items.map(({ quote: q, kind }) => (
-              <div
-                className="dayjob"
-                data-kind={kind}
-                key={`${q.id}-${kind}`}
-                title={kind === 'review' ? `Review deadline ${fmtDateTime(q.reviewDeadline)}: ${q.name}` : `Due ${fmtDate(q.dueDate)}: ${q.name}`}
-                onClick={() => onQuoteClick(q)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => e.key === 'Enter' && onQuoteClick(q)}
-              >
-                <span className="jn"><OppLink id={q.id} name={q.name} /></span>
-              </div>
-            ))}
-          </div>
-        );
-      })}
-    </div>
+    <>
+      <div className="month sched-desktop">
+        {WD.map((w) => <div className="wd" key={w}>{w}</div>)}
+        {cells.map((d) => {
+          const iso = isoOf(d);
+          const items = byDate[iso] || [];
+          return (
+            <div className={`daycell ${iso === todayIso ? 'today' : ''}`} key={iso}>
+              <div className="daynum">{d.getDate()}</div>
+              {items.map(({ quote: q, kind }) => (
+                <div
+                  className="dayjob"
+                  data-kind={kind}
+                  key={`${q.id}-${kind}`}
+                  title={kind === 'review' ? `Review deadline ${fmtDateTime(q.reviewDeadline)}: ${q.name}` : `Due ${fmtDate(q.dueDate)}: ${q.name}`}
+                  onClick={() => onQuoteClick(q)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => e.key === 'Enter' && onQuoteClick(q)}
+                >
+                  <span className="jn"><OppLink id={q.id} name={q.name} /></span>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      <QuotesAgendaList cells={cells} byDate={byDate} todayIso={todayIso} onQuoteClick={onQuoteClick} />
+    </>
   );
 }
 

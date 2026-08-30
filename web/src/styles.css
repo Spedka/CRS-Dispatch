@@ -55,6 +55,7 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
    duplicate (App.jsx, JobCard) stays hidden there. */
 .job-collapsible-status-row{display:none;}
 .tech-week-list{display:none;}
+.quote-agenda-list{display:none;}
 
 /* Locked app-shell (no page bounce/zoom, each screen scrolls internally
    instead of the page) -- mobile/PWA-install only. Desktop keeps the
@@ -200,6 +201,17 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
      whatever didn't fit instead of wrapping it. */
   .assignrow{flex-wrap:wrap;}
 
+  /* Quotes (QuoteRow) -- status + 4 action buttons/badges now live inside
+     .job-collapsible-inner (mobile) instead of squeezed into .row1
+     alongside the name, per direction 2026-08-30. Even with the whole
+     row's width to itself, 4 buttons in a row with no wrap could still
+     overlap on a narrow phone -- flex-wrap lets them break onto a second
+     line instead. margin-left:auto (desktop: pushes the group to the right
+     edge of .row1) is meaningless once this is a full-width block in a
+     column layout instead of a flex row item -- reset to avoid an
+     unpredictable cross-axis nudge. */
+  .quote-actions{flex-wrap:wrap;margin-left:0;}
+
   /* .jname still ran off the right of the card -- a flex item's default
      min-width is auto (its own content width), not 0, so it never actually
      shrunk to the row's available space; it just kept rendering on one line
@@ -265,6 +277,14 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
      not worth risking a fourth silent no-op here. */
   .sched-desktop{display:none !important;}
   .tech-week-list{display:flex !important;flex-direction:column;gap:9px;padding:0 0 18px;}
+
+  /* Quotes calendar -> agenda list, same problem and same fix as Tech
+     Schedule's own grid just above (7 columns unreadable on a phone). Per
+     direction 2026-08-30. .grid-wrap already carries .sched-desktop here
+     (App.jsx, QuotesMonthGrid/QuotesWeekGrid) so the hide side of the swap
+     is already covered by the rule above -- only the agenda list's own
+     display needs setting. */
+  .quote-agenda-list{display:flex !important;flex-direction:column;gap:14px;padding:0 0 18px;}
 
   /* Contacts -> each table row becomes a stacked card instead of a 5-column
      row that only ever showed the name before you had to scroll. CSS-only
@@ -455,6 +475,19 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
 .tech-week-row-day{font-size:11px;font-weight:600;color:var(--ink-soft);flex-shrink:0;width:56px;}
 .tech-week-row-time{font-size:12px;font-weight:600;color:var(--ink);flex-shrink:0;width:42px;font-family:'IBM Plex Mono',monospace;}
 .tech-week-row-info{flex:1;min-width:0;font-size:13px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* Quotes mobile agenda list (QuotesAgendaList) -- mirrors .tech-week-*
+   directly above, same card-per-group/row-per-item shape. Due/review color
+   coding matches the desktop grid's .dayjob[data-kind=...]. */
+.quote-agenda-day{border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden;}
+.quote-agenda-day-label{padding:10px 14px;font-size:12px;font-weight:700;color:var(--ink-soft);background:var(--surface-2);border-bottom:1px solid var(--line);}
+.quote-agenda-day.today .quote-agenda-day-label{color:var(--brand);}
+.quote-agenda-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border:none;border-left:3px solid var(--scheduled);border-bottom:1px solid var(--line);background:transparent;cursor:pointer;text-align:left;font:inherit;width:100%;}
+.quote-agenda-row:last-child{border-bottom:none;}
+.quote-agenda-row[data-kind=review]{border-left-color:var(--needs);}
+.quote-agenda-kind{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-faint);flex-shrink:0;width:44px;}
+.quote-agenda-name{flex:1;min-width:0;font-size:13px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
 .state{padding:48px;text-align:center;color:var(--ink-soft);}
 .state.err{color:var(--emergency);background:var(--emergency-bg);border-radius:var(--radius);}
 .state small{color:var(--ink-faint);}
