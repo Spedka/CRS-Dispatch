@@ -286,6 +286,82 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
      display needs setting. */
   .quote-agenda-list{display:flex !important;flex-direction:column;gap:14px;padding:0 0 18px;}
 
+  /* Billing reconciliation -- per direction 2026-08-30: the densest page in
+     the app (an 8-9 column SF-vs-QBO-vs-Δ comparison table, for Billed AND
+     Received, plus a 2-column side-by-side Discrepancies view) was either
+     compressed unreadably or relying on .recon-scroll's horizontal scroll,
+     neither acceptable per the "no scrolling as the fix, no compression"
+     direction already applied to every other screen. Same table->stacked-
+     card treatment as Contacts/Accounts (.recon-screen, mirroring
+     .contacts-screen/.accounts-screen), with data-label captions (App.jsx)
+     since these are bare numbers, not self-labeled content -- and since
+     several columns share a bare metric name (SF/QBO/Δ appears twice, once
+     under Billed and once under Received), the labels themselves are
+     compound ("Billed SF", "Received SF", ...) rather than trying to nest
+     a group caption above a metric caption. */
+  .recon-controls{flex-wrap:wrap;}
+  /* .usage-range (the grouping chip row, .recon-head-ctrls -- 5 options:
+     No grouping/SF account/SF parent/QBO account/QBO parent) had no wrap of
+     its own -- .recon-head-ctrls wrapping around it didn't help, since the
+     whole chip row counted as one wide item from its parent's perspective.
+     Safe to make unconditional for the class rather than scoping it to
+     just the recon usage -- the other places this class shows up (quick
+     date-range chips, 3 short options) just won't need to wrap. */
+  .usage-range{flex-wrap:wrap;}
+  .recon-cols{grid-template-columns:1fr;}
+  .recon-totals{min-width:0 !important;}
+  .recon-screen{display:block;}
+  .recon-screen tbody{display:flex;flex-direction:column;gap:12px;}
+  /* thead and the tfoot's own repeated header rows (.recon-foot-grp/-lbl)
+     are redundant with each cell's own data-label caption once stacked --
+     the grouped-column headers ("Billed"/"Received" spanning 3 columns
+     each) especially wouldn't make sense outside a real table layout. The
+     tfoot's actual Total *row* (.recon-total) stays -- real data, not a
+     header. */
+  .recon-screen thead,
+  .recon-screen tfoot .recon-foot-grp,
+  .recon-screen tfoot .recon-foot-lbl{display:none;}
+  .recon-screen tfoot{display:block;}
+  .recon-screen tr{
+    display:block;
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:12px;
+    box-shadow:var(--shadow);
+    padding:12px 14px;
+  }
+  .recon-screen .recon-total{background:var(--surface-2);border-color:var(--line-strong);}
+  .recon-screen td,
+  .recon-screen th{
+    display:block;
+    text-align:left !important;
+    padding:6px 0;
+    border:none !important;
+  }
+  .recon-screen td[data-label]{padding-top:10px;border-top:1px solid var(--line) !important;}
+  .recon-screen td[data-label]::before{
+    content:attr(data-label);
+    display:block;
+    font-size:10.5px;
+    font-weight:700;
+    text-transform:uppercase;
+    letter-spacing:.4px;
+    color:var(--ink-faint);
+    margin-bottom:3px;
+  }
+  /* recon-num (the identity column -- group name, or invoice # with its
+     linked/unlinked mark) is the card's own "title", same convention as
+     Contacts/Accounts' first column -- no caption, larger and bolder than
+     the labeled fields below it. */
+  .recon-screen .recon-num,
+  .recon-screen tbody tr > td:first-child,
+  .recon-screen tfoot tr > td:first-child{font-size:14px;font-weight:600;color:var(--ink);}
+  /* .recon-scroll's horizontal scroll (desktop-only fallback for the
+     matched-invoices table) is meaningless once the table is display:block
+     stacked cards with no forced min-width -- explicitly neutralized
+     rather than left as an inert-but-confusing leftover. */
+  .recon-scroll{overflow-x:visible;}
+
   /* Contacts -> each table row becomes a stacked card instead of a 5-column
      row that only ever showed the name before you had to scroll. CSS-only
      transform (no JSX/component duplication) -- Contacts' own cell content

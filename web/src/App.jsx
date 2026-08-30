@@ -8459,17 +8459,17 @@ function ReconList({ title, rows, groupBy }) {
       <div className="recon-list-head"><h4>{title}</h4><span className="recon-count">{rows.length} · {money(total)}</span></div>
       {rows.length === 0 && <div className="recon-empty">None</div>}
       {!groupBy && rows.length > 0 && (
-        <table className="recon-table"><tbody>
+        <table className="recon-table recon-screen"><tbody>
           {rows.map((r, i) => (
-            <tr key={i}><td className="recon-num">{r.number}{r.dup && <span className="recon-dup" title="Duplicate invoice # - paired by amount"> dup</span>}</td><td>{r.date}</td><td className="recon-amt">{money(r.amount)}</td><td className="recon-cust">{r.customer || '-'}</td><td className="recon-pm">{r.paymentMethod || ''}</td></tr>
+            <tr key={i}><td className="recon-num">{r.number}{r.dup && <span className="recon-dup" title="Duplicate invoice # - paired by amount"> dup</span>}</td><td data-label="Date">{r.date}</td><td className="recon-amt" data-label="Amount">{money(r.amount)}</td><td className="recon-cust" data-label="Customer">{r.customer || '-'}</td><td className="recon-pm" data-label="Payment Method">{r.paymentMethod || ''}</td></tr>
           ))}
         </tbody></table>
       )}
       {groupBy && groups && groups.map(([g, e]) => (
         <details key={g} className="recon-group"><summary>{g} <span className="recon-count">{e.rows.length} · {money(e.total)}</span></summary>
-          <table className="recon-table"><tbody>
+          <table className="recon-table recon-screen"><tbody>
             {e.rows.map((r, i) => (
-              <tr key={i}><td className="recon-num">{r.number}{r.dup && <span className="recon-dup" title="Duplicate invoice # - paired by amount"> dup</span>}</td><td>{r.date}</td><td className="recon-amt">{money(r.amount)}</td><td className="recon-cust">{r.customer || '-'}</td><td className="recon-pm">{r.paymentMethod || ''}</td></tr>
+              <tr key={i}><td className="recon-num">{r.number}{r.dup && <span className="recon-dup" title="Duplicate invoice # - paired by amount"> dup</span>}</td><td data-label="Date">{r.date}</td><td className="recon-amt" data-label="Amount">{money(r.amount)}</td><td className="recon-cust" data-label="Customer">{r.customer || '-'}</td><td className="recon-pm" data-label="Payment Method">{r.paymentMethod || ''}</td></tr>
             ))}
           </tbody></table>
         </details>
@@ -8505,7 +8505,7 @@ function ReconMatched({ rows, groupBy }) {
   if (rows.length === 0) return <div className="recon-list"><div className="recon-empty">No matched invoices in range</div></div>;
   return (
     <div className="recon-list recon-scroll">
-      <table className="recon-matched">
+      <table className="recon-matched recon-screen">
         {groupBy ? (
           <>
             <thead>
@@ -8515,18 +8515,18 @@ function ReconMatched({ rows, groupBy }) {
             <tbody>
               {groups.map(([k, e]) => (
                 <tr key={k}>
-                  <td className="recon-cust">{k}</td><td>{e.rows.length} <span className="recon-linked-count" title={`${e.linked} of ${e.rows.length} durably linked (QBO_Id__c set)`}>({e.linked}✓)</span></td>
-                  <td className="recon-amt">{money(e.sf)}</td><td className="recon-amt">{money(e.qbo)}</td><td className={gapCls(e.qbo - e.sf)}>{money(e.qbo - e.sf)}</td>
-                  <td className="recon-amt">{money(e.sfR)}</td><td className="recon-amt">{money(e.qboR)}</td><td className={gapCls(e.qboR - e.sfR)}>{money(e.qboR - e.sfR)}</td>
+                  <td className="recon-cust">{k}</td><td data-label="Invoices">{e.rows.length} <span className="recon-linked-count" title={`${e.linked} of ${e.rows.length} durably linked (QBO_Id__c set)`}>({e.linked}✓)</span></td>
+                  <td className="recon-amt" data-label="Billed SF">{money(e.sf)}</td><td className="recon-amt" data-label="Billed QBO">{money(e.qbo)}</td><td className={gapCls(e.qbo - e.sf)} data-label="Billed Δ">{money(e.qbo - e.sf)}</td>
+                  <td className="recon-amt" data-label="Received SF">{money(e.sfR)}</td><td className="recon-amt" data-label="Received QBO">{money(e.qboR)}</td><td className={gapCls(e.qboR - e.sfR)} data-label="Received Δ">{money(e.qboR - e.sfR)}</td>
                 </tr>
               ))}
             </tbody>
             <tfoot>
               <tr className="recon-foot-grp"><th></th><th></th><th colSpan={3} className="recon-grp">Billed</th><th colSpan={3} className="recon-grp">Received</th></tr>
               <tr className="recon-foot-lbl"><th>{label}</th><th>#</th><th>SF</th><th>QBO</th><th>Δ</th><th>SF</th><th>QBO</th><th>Δ</th></tr>
-              <tr className="recon-total"><td>Total</td><td>{rows.length}</td>
-                <td className="recon-amt">{money(tot.sf)}</td><td className="recon-amt">{money(tot.qbo)}</td><td className="recon-amt">{money(tot.qbo - tot.sf)}</td>
-                <td className="recon-amt">{money(tot.sfR)}</td><td className="recon-amt">{money(tot.qboR)}</td><td className="recon-amt">{money(tot.qboR - tot.sfR)}</td>
+              <tr className="recon-total"><td>Total</td><td data-label="Invoices">{rows.length}</td>
+                <td className="recon-amt" data-label="Billed SF">{money(tot.sf)}</td><td className="recon-amt" data-label="Billed QBO">{money(tot.qbo)}</td><td className="recon-amt" data-label="Billed Δ">{money(tot.qbo - tot.sf)}</td>
+                <td className="recon-amt" data-label="Received SF">{money(tot.sfR)}</td><td className="recon-amt" data-label="Received QBO">{money(tot.qboR)}</td><td className="recon-amt" data-label="Received Δ">{money(tot.qboR - tot.sfR)}</td>
               </tr>
             </tfoot>
           </>
@@ -8544,18 +8544,18 @@ function ReconMatched({ rows, groupBy }) {
                       ? <span className="recon-linked" title="QBO_Id__c is set to this exact QBO invoice — durably linked, not just matched by this page's own amount/date heuristic">✓ </span>
                       : <span className="recon-unlinked" title="Matched here by amount/date, but QBO_Id__c isn't set to this invoice yet — re-computed live every load">○ </span>}
                     {r.number}{r.dup && <span className="recon-dup" title="Duplicate invoice # - paired by amount"> dup</span>}
-                  </td><td className="recon-cust">{r.sfAccount || r.qboAccount || '-'}</td><td className="recon-date-cell">{r.qboDate || r.sfDate || ''}</td>
-                  <td className="recon-amt">{money(r.sfAmount)}</td><td className="recon-amt">{money(r.qboAmount)}</td><td className={gapCls(N(r.qboAmount) - N(r.sfAmount))}>{money(N(r.qboAmount) - N(r.sfAmount))}</td>
-                  <td className="recon-amt">{money(r.sfReceived)}</td><td className="recon-amt">{money(r.qboReceived)}</td><td className={gapCls(N(r.qboReceived) - N(r.sfReceived))}>{money(N(r.qboReceived) - N(r.sfReceived))}</td>
+                  </td><td className="recon-cust" data-label="Customer">{r.sfAccount || r.qboAccount || '-'}</td><td className="recon-date-cell" data-label="Date">{r.qboDate || r.sfDate || ''}</td>
+                  <td className="recon-amt" data-label="Billed SF">{money(r.sfAmount)}</td><td className="recon-amt" data-label="Billed QBO">{money(r.qboAmount)}</td><td className={gapCls(N(r.qboAmount) - N(r.sfAmount))} data-label="Billed Δ">{money(N(r.qboAmount) - N(r.sfAmount))}</td>
+                  <td className="recon-amt" data-label="Received SF">{money(r.sfReceived)}</td><td className="recon-amt" data-label="Received QBO">{money(r.qboReceived)}</td><td className={gapCls(N(r.qboReceived) - N(r.sfReceived))} data-label="Received Δ">{money(N(r.qboReceived) - N(r.sfReceived))}</td>
                 </tr>
               ))}
             </tbody>
             <tfoot>
               <tr className="recon-foot-grp"><th></th><th></th><th></th><th colSpan={3} className="recon-grp">Billed</th><th colSpan={3} className="recon-grp">Received</th></tr>
               <tr className="recon-foot-lbl"><th>Invoice</th><th>Customer</th><th className="recon-date-col">Date</th><th>SF</th><th>QBO</th><th>Δ</th><th>SF</th><th>QBO</th><th>Δ</th></tr>
-              <tr className="recon-total"><td>Total ({rows.length})</td><td></td><td></td>
-                <td className="recon-amt">{money(tot.sf)}</td><td className="recon-amt">{money(tot.qbo)}</td><td className="recon-amt">{money(tot.qbo - tot.sf)}</td>
-                <td className="recon-amt">{money(tot.sfR)}</td><td className="recon-amt">{money(tot.qboR)}</td><td className="recon-amt">{money(tot.qboR - tot.sfR)}</td>
+              <tr className="recon-total"><td>Total ({rows.length})</td><td data-label="Customer"></td><td data-label="Date"></td>
+                <td className="recon-amt" data-label="Billed SF">{money(tot.sf)}</td><td className="recon-amt" data-label="Billed QBO">{money(tot.qbo)}</td><td className="recon-amt" data-label="Billed Δ">{money(tot.qbo - tot.sf)}</td>
+                <td className="recon-amt" data-label="Received SF">{money(tot.sfR)}</td><td className="recon-amt" data-label="Received QBO">{money(tot.qboR)}</td><td className="recon-amt" data-label="Received Δ">{money(tot.qboR - tot.sfR)}</td>
               </tr>
             </tfoot>
           </>
@@ -8612,7 +8612,7 @@ function BillingReconciliation() {
     <section className="usage recon">
       <div className="view-head usage-head">
         <div><h2>Billing reconciliation</h2><p className="recon-sub">QuickBooks vs Salesforce · QBO billed counts sent invoices only</p></div>
-        <div className="usage-controls">
+        <div className="usage-controls recon-controls">
           <div className="recon-date">From <DatePicker value={from} onChange={setFrom} placeholder="From" clearable={false} /></div>
           <div className="recon-date">To <DatePicker value={to} onChange={setTo} placeholder="To" clearable={false} /></div>
           <div className="usage-range">{[30, 90, 365].map((d) => (
@@ -8630,46 +8630,58 @@ function BillingReconciliation() {
           <div className="recon-xref-head">
             <h3 className="recon-toggle" onClick={() => toggle('totals')}>{caret('totals')} Totals</h3>
           </div>
-          {open.totals && (
-            <table className="recon-totals">
+          {/* Cascade/LazyCascade (App.jsx) -- per direction 2026-08-30, same
+              "flowy, not clunky" treatment as every other expand/collapse in
+              the app. Totals is always small (3 rows), plain Cascade;
+              Matched/Discrepancies use LazyCascade since their tables could
+              genuinely be large depending on the date range -- no reason to
+              mount them before they're ever opened. */}
+          <Cascade open={open.totals}>
+            <table className="recon-totals recon-screen">
               <thead><tr><th></th><th>Billed</th><th>Received</th></tr></thead>
               <tbody>
                 {totals.map(([label, b, r], i) => (
                   <tr key={label} className={i === 2 ? 'recon-delta' : ''}>
-                    <td>{label}</td><td>{money(b)}</td><td>{money(r)}</td>
+                    <td>{label}</td><td data-label="Billed">{money(b)}</td><td data-label="Received">{money(r)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          )}
+          </Cascade>
           {loading && <LoadingDots label="Updating…" inline />}
 
           <div className="recon-xref-head">
             <h3 className="recon-toggle" onClick={() => toggle('matched')}>{caret('matched')} Matched invoices <span className="recon-count">{matchedShown.length}{matchQuery.trim() ? ` of ${matchedRows.length}` : ''} · SF vs QBO{matchGroup ? ' by account' : ' per invoice'}</span></h3>
-            {open.matched && <div className="recon-head-ctrls">
-              <input className="recon-filter" placeholder="Filter #" value={matchQuery} onChange={(e) => setMatchQuery(e.target.value)} />
-              <div className="usage-range">{RECON_GROUPS.map(([v, l]) => (
-                <button key={v} className={`chip ${matchGroup === v ? 'on' : ''}`} onClick={() => setMatchGroup(v)}>{l}</button>
-              ))}</div>
-            </div>}
+            <Cascade open={open.matched}>
+              <div className="recon-head-ctrls">
+                <input className="recon-filter" placeholder="Filter #" value={matchQuery} onChange={(e) => setMatchQuery(e.target.value)} />
+                <div className="usage-range">{RECON_GROUPS.map(([v, l]) => (
+                  <button key={v} className={`chip ${matchGroup === v ? 'on' : ''}`} onClick={() => setMatchGroup(v)}>{l}</button>
+                ))}</div>
+              </div>
+            </Cascade>
           </div>
-          {open.matched && <ReconMatched rows={matchedShown} groupBy={matchGroup} />}
+          <LazyCascade open={open.matched}>
+            <ReconMatched rows={matchedShown} groupBy={matchGroup} />
+          </LazyCascade>
 
           <div className="recon-xref-head">
             <h3 className="recon-toggle" onClick={() => toggle('discrep')}>{caret('discrep')} Discrepancies <span className="recon-count">{qboOnlyShown.length + sfOnlyShown.length}{discrepQuery.trim() ? ` of ${qboOnly.length + sfOnly.length}` : ''}</span></h3>
-            {open.discrep && <div className="recon-head-ctrls">
-              <input className="recon-filter" placeholder="Filter #" value={discrepQuery} onChange={(e) => setDiscrepQuery(e.target.value)} />
-              <div className="usage-range">{RECON_GROUPS.map(([v, l]) => (
-                <button key={v} className={`chip ${groupBy === v ? 'on' : ''}`} onClick={() => setGroupBy(v)}>{l}</button>
-              ))}</div>
-            </div>}
+            <Cascade open={open.discrep}>
+              <div className="recon-head-ctrls">
+                <input className="recon-filter" placeholder="Filter #" value={discrepQuery} onChange={(e) => setDiscrepQuery(e.target.value)} />
+                <div className="usage-range">{RECON_GROUPS.map(([v, l]) => (
+                  <button key={v} className={`chip ${groupBy === v ? 'on' : ''}`} onClick={() => setGroupBy(v)}>{l}</button>
+                ))}</div>
+              </div>
+            </Cascade>
           </div>
-          {open.discrep && (
+          <LazyCascade open={open.discrep}>
             <div className="recon-cols">
               <ReconList title="In QBO (sent), not in SF" rows={qboOnlyShown} groupBy={groupBy} />
               <ReconList title="In SF, not in QBO" rows={sfOnlyShown} groupBy={groupBy} />
             </div>
-          )}
+          </LazyCascade>
         </>
       )}
     </section>
