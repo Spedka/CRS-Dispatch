@@ -100,17 +100,25 @@ const TECH_NAME_RE = /\b[a-z]+,\s*[a-z]\./i;
 // thing): per-tech items (with or without a "Fire Alarm -" prefix -- see
 // TECH_NAME_RE above), "Helper", and the Install/Project invoice shape's
 // lump-sum "Technician" are labor; the lump-sum "Materials" item is parts;
-// "Truck Charges", "Shipping:Shipping", "MISC" are other; everything else
-// unmatched defaults to parts (a real, unrecognized part SKU is far more
-// likely than an unrecognized "other" -- confirmed live: a real part SKU,
-// "NOT-BG12LX", would otherwise have wrongly fallen into "other"). Not
-// authoritative -- flagged as an estimate in the UI.
+// "Truck Charges", "Shipping:Shipping", "MISC", and Retainage are other;
+// everything else unmatched defaults to parts (a real, unrecognized part SKU
+// is far more likely than an unrecognized "other" -- confirmed live: a real
+// part SKU, "NOT-BG12LX", would otherwise have wrongly fallen into "other").
+// Retainage added 2026-08-30 -- found live showing up under Material
+// Expenses/Billed Materials, which it obviously isn't (it's held-back
+// payment on billed work, not a part) -- it was hitting the same
+// catch-all default every other unrecognized item does. Matched with
+// includes(), not an exact match like the other "other" terms -- unlike
+// those (fixed catalog item names), retainage lines commonly carry a
+// percentage or descriptor in the actual item name ("Retainage 10%",
+// "Retainage Held"), and there's no real part SKU this could plausibly
+// collide with. Not authoritative -- flagged as an estimate in the UI.
 function categorizeLine(itemName) {
   const n = (itemName || '').trim();
   const nLower = n.toLowerCase();
   if (nLower === 'helper' || nLower === 'technician' || TECH_NAME_RE.test(n)) return 'labor';
   if (nLower === 'materials') return 'parts';
-  if (nLower === 'truck charges' || nLower === 'shipping:shipping' || nLower === 'misc') return 'other';
+  if (nLower === 'truck charges' || nLower === 'shipping:shipping' || nLower === 'misc' || nLower.includes('retainage')) return 'other';
   return 'parts';
 }
 

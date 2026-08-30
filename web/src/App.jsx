@@ -8803,6 +8803,27 @@ const POPOVER_MAX_LINES = 8;
 const POPOVER_OPEN_DELAY = 400;
 const POPOVER_CLOSE_DELAY = 500;
 
+// Real hardware hover support (a mouse), not just "an onMouseEnter handler
+// happened to fire" -- found live 2026-08-30, the actual cause of "hover
+// popups open on click and stay open for a bit" on mobile: iOS/Android
+// browsers simulate a single mouseenter/mouseleave pair on tap for any
+// element carrying hover handlers, so BulletBar/JobDonutRings' own
+// onMouseEnter (which schedules the popover open after POPOVER_OPEN_DELAY)
+// fired right alongside their onClick (which opens SegmentDetailModal
+// immediately) -- both were reacting to the same tap. matchMedia
+// '(hover: hover)' is the standard way to ask "can this input device
+// genuinely hover," rather than trying to distinguish real vs.
+// touch-simulated mouse events after the fact. Read once at mount (a
+// device's hover capability doesn't change mid-session) and used to gate
+// the hover-popover open/close handlers entirely in both components below
+// -- on a non-hover-capable device they become no-ops, leaving onClick's
+// modal as the only thing that happens on tap, which is what was already
+// built and already clean.
+function useHoverCapable() {
+  const [capable] = useState(() => typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(hover: hover)').matches);
+  return capable;
+}
+
 // unit: '$' (default, via fmtCurrency) or 'h' (hours -- BulletBar's Hours
 // rows use this, since fmtCurrency would wrongly format an hours figure as
 // a dollar amount). `full`: the modal's real estate, not the tight 260px
@@ -8871,6 +8892,7 @@ function SegmentDetailModal({ segmentKey, total, lines, unit = '$', onClose }) {
 // cost/expense/awarded figures instead), so hardcoding "quoted" there would
 // just be wrong, not merely imprecise.
 function BulletBar({ segmentKey, actual, target, unit = '$', lines, targetLabel = 'quoted' }) {
+  const hoverCapable = useHoverCapable();
   const [hovered, setHovered] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const wrapRef = useRef(null);
@@ -8917,6 +8939,7 @@ function BulletBar({ segmentKey, actual, target, unit = '$', lines, targetLabel 
   // only after it's genuinely lingered -- a quick mouse pass-through no
   // longer flashes a popover open and shut.
   const handleEnter = () => {
+    if (!hoverCapable) return;
     cancelClose();
     if (hovered) return;
     cancelOpen();
@@ -8928,6 +8951,7 @@ function BulletBar({ segmentKey, actual, target, unit = '$', lines, targetLabel 
   // this, the popover vanished the instant the cursor left the bar, before
   // it could ever be read or scrolled.
   const handleLeave = () => {
+    if (!hoverCapable) return;
     cancelOpen();
     cancelClose();
     closeTimerRef.current = setTimeout(() => setHovered(false), POPOVER_CLOSE_DELAY);
@@ -9011,6 +9035,7 @@ function JobDonutRings({
   quotedLaborLines = [], quotedPartsLines = [],
   size = 200,
 }) {
+  const hoverCapable = useHoverCapable();
   const [hovered, setHovered] = useState(null);
   const [modalKey, setModalKey] = useState(null);
   const wrapRef = useRef(null);
@@ -9116,6 +9141,7 @@ function JobDonutRings({
   const cancelOpen = () => { if (openTimerRef.current) { clearTimeout(openTimerRef.current); openTimerRef.current = null; } };
   const scheduleClose = () => { cancelOpen(); cancelClose(); closeTimerRef.current = setTimeout(() => setHovered(null), POPOVER_CLOSE_DELAY); };
   const handleHover = (key) => {
+    if (!hoverCapable) return;
     if (key) {
       cancelClose();
       if (hovered === key) return;
@@ -9430,16 +9456,24 @@ function ExpenseJobDetail({ oppId, onBack }) {
               )}
               {inv.lines.length > 0 && (
                 <div className="exp-invoice-lines-scroll">
-                  <table className="exp-invoice-lines">
+                  {/* Shows on both breakpoints (a small heading above the
+                      table is harmless on desktop), but it's mobile
+                      (styles.css) that actually needs it -- once the table
+                      below stacks into individual line-item cards, this is
+                      what visibly ties them back to the invoice summary
+                      above instead of reading as their own unrelated
+                      cards. */}
+                  <div className="exp-invoice-lines-label">Line Items</div>
+                  <table className="exp-invoice-lines recon-screen">
                     <thead><tr><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th><th>Category</th></tr></thead>
                     <tbody>
                       {inv.lines.map((l, i) => (
                         <tr key={i}>
                           <td>{l.itemName ?? '-'}</td>
-                          <td>{l.qty ?? '-'}</td>
-                          <td>{fmtCurrency(l.rate) ?? '-'}</td>
-                          <td>{fmtCurrency(l.amount) ?? '-'}</td>
-                          <td>{l.category}</td>
+                          <td data-label="Qty">{l.qty ?? '-'}</td>
+                          <td data-label="Rate">{fmtCurrency(l.rate) ?? '-'}</td>
+                          <td data-label="Amount">{fmtCurrency(l.amount) ?? '-'}</td>
+                          <td data-label="Category">{l.category}</td>
                         </tr>
                       ))}
                     </tbody>

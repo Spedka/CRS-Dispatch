@@ -299,7 +299,13 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
      under Billed and once under Received), the labels themselves are
      compound ("Billed SF", "Received SF", ...) rather than trying to nest
      a group caption above a metric caption. */
-  .recon-controls{flex-wrap:wrap;}
+  /* Generic, not just Billing -- .usage-controls is the same header-controls
+     row shared by Expense Tracking (search/type-filter/sort) and Usage
+     (days/app filter/refresh); all three overflowed the same way with no
+     wrap. .recon-controls was the original Billing-specific class this
+     rule targeted; kept as a harmless extra class on that element, but the
+     fix itself now covers the shared class directly. */
+  .usage-controls{flex-wrap:wrap;}
   /* .usage-range (the grouping chip row, .recon-head-ctrls -- 5 options:
      No grouping/SF account/SF parent/QBO account/QBO parent) had no wrap of
      its own -- .recon-head-ctrls wrapping around it didn't help, since the
@@ -310,7 +316,11 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
   .usage-range{flex-wrap:wrap;}
   .recon-cols{grid-template-columns:1fr;}
   .recon-totals{min-width:0 !important;}
-  .recon-screen{display:block;}
+  /* Generic reset, not just .recon-totals above -- .recon-screen is reused
+     by Expense Tracking's invoice-lines table too (.exp-invoice-lines,
+     min-width:480px on its own base rule), and any future table this class
+     gets applied to would hit the same trap otherwise. */
+  .recon-screen{display:block;min-width:0 !important;}
   .recon-screen tbody{display:flex;flex-direction:column;gap:12px;}
   /* thead and the tfoot's own repeated header rows (.recon-foot-grp/-lbl)
      are redundant with each cell's own data-label caption once stacked --
@@ -361,6 +371,110 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
      stacked cards with no forced min-width -- explicitly neutralized
      rather than left as an inert-but-confusing leftover. */
   .recon-scroll{overflow-x:visible;}
+
+  /* Expense Tracking -- per direction 2026-08-30, "information flows off to
+     the right, requiring scrolling." Three separate spots: */
+  /* 1. List row (ExpenseJobRow) -- donut + name/meta + figures side by side
+     in one flex row; the figures block (Awarded Amount/Material Expenses,
+     each with a real text label) was flex-shrink:0, never actually
+     shrinking, forcing the row wider than the screen. Same "let it wrap to
+     its own line" fix as Outstanding Jobs' .assignrow -- width:100% inside
+     a wrapped flex row forces it onto a new line rather than being
+     squeezed alongside the donut/name. */
+  .exp-row{flex-wrap:wrap;}
+  .exp-row-figures{flex-shrink:1;width:100%;text-align:left;margin-top:8px;padding-top:8px;border-top:1px solid var(--line);}
+  /* 2. Detail view's ring + figures row -- a 240px ring alongside a text
+     column never fit a phone width. Stacks vertically; the ring itself
+     (an <svg width height> pair, not CSS-sized) shrinks via width:100%/
+     height:auto overriding those presentation attributes (standard CSS-
+     beats-SVG-attribute behavior, no !important needed) with a sensible
+     cap so it doesn't dominate the screen at full container width. */
+  .exp-detail-donut-row{flex-direction:column;align-items:stretch;gap:16px;padding:16px;}
+  .job-donut-rings-wrap{width:100% !important;max-width:200px;height:auto !important;margin:0 auto;}
+  .job-donut-rings{width:100%;height:auto;}
+  /* 3. Invoice line-items table (.exp-invoice-lines, min-width:480px) --
+     already handled generically via .recon-screen (App.jsx now carries
+     that class on this table too) plus the min-width reset a few lines up;
+     just neutralizing the now-meaningless horizontal-scroll fallback here,
+     same reasoning as .recon-scroll above. */
+  .exp-invoice-lines-scroll{overflow-x:visible;}
+  /* Defensive -- .exp-figure-row (Awarded Amount, Quoted Labor, etc.
+     throughout the detail view) is a label-left/value-right flex row with
+     no wrap; values are usually short enough to never need it, but nothing
+     stops a real one from running long. Same proactive wrap already
+     applied to every other flex row this pass rather than waiting for a
+     specific report on this one too. */
+  .exp-figure-row{flex-wrap:wrap;}
+
+  /* Invoices section (ExpenseJobDetail) -- real bug, found live 2026-08-30:
+     .invoice-detail is a 2-COLUMN CSS grid (Invoice#+Date side by side,
+     Amount+Status side by side, ...), which the flex-wrap fix from the
+     previous round didn't address at all -- each row still only had HALF
+     the screen to work with, so wrapping a label/value pair inside an
+     already-narrow column made things More cramped, not less, and
+     genuinely unclear which value belonged to which label. Single column
+     here so every row gets the full row width. Each invoice (.exp-invoice)
+     also gets a real card boundary now -- before this it was only a 12px
+     margin and a thin top border, so once its own line-items table became
+     a stack of small bordered cards (.recon-screen, previous round), there
+     was nothing visually tying those cards back to the invoice summary
+     above them, especially with multiple invoices stacked in sequence. */
+  /* Real bug #1, found live 2026-08-30 from a screenshot: this rule never
+     actually applied. .invoice-detail's base rule (styles.css, unconditional,
+     grid-template-columns:repeat(2,1fr)) sits LATER in the file than this
+     media query -- same specificity (one class each), so at equal
+     specificity the later rule wins by source order regardless of the
+     query being active. Same trap this file has hit repeatedly all
+     session; !important this time instead of relying on staying below
+     wherever the base rule happens to live. */
+  .invoice-detail{grid-template-columns:1fr !important;}
+  /* Real bug #2: .exp-invoice and .invoice-detail are TWO CLASSES ON THE
+     SAME DIV (App.jsx: className="invoice-detail exp-invoice"), not nested
+     elements -- .exp-invoice-lines-scroll (the whole "Line Items" block,
+     heading + line-item cards) is a DIRECT CHILD of this one div, meaning
+     it was a GRID ITEM inside the same 2-column grid as Invoice#/Date/
+     Amount/Status, landing in whichever column grid auto-flow happened to
+     place it -- that's what put it "beside" the cost breakdown instead of
+     below it. Once grid-template-columns is actually 1fr (fixed above),
+     EVERY child -- the label/value rows AND the line-items block -- only
+     has one column to go in, which is exactly "stack everything, full
+     width, in DOM order" i.e. underneath. */
+  .exp-invoice{
+    border:1px solid var(--line);
+    border-radius:12px;
+    background:var(--surface);
+    box-shadow:var(--shadow);
+    /* !important -- .invoice-detail's own base rule (same element, see
+       above) also sets padding (8px 0) and sits later in the file; same
+       source-order conflict as grid-template-columns/border-top above,
+       caught proactively this time rather than after another screenshot. */
+    padding:4px 14px 14px !important;
+  }
+  /* Same same-element mistake as directly above -- `.exp-invoice
+     .invoice-detail` (a space) is a descendant combinator requiring TWO
+     different nested elements; since both classes are on the one div, this
+     selector never matched anything. Also needs !important for the same
+     source-order reason as the grid-columns fix. */
+  .invoice-detail{border-top:none !important;}
+  /* Full row width now (single column, above) makes most values fit fine,
+     but the Labor/Parts/Other row ("$X / $Y / $Z") or a real invoice # long
+     enough to combine with its QuickBooks link can still genuinely run
+     long -- defensive wrap, left-aligning once wrapped since right-aligned
+     text floating alone on its own line under a left-aligned label reads
+     oddly. */
+  .invoice-detail-row{flex-wrap:wrap;}
+  .invoice-detail-row .invoice-detail-value{text-align:left !important;}
+  /* Lighter touch for the nested line-items cards -- full border/shadow/
+     radius on those (same as every other .recon-screen use) reads as
+     "another independent card" once already inside the invoice's own
+     card; a flatter, indented treatment reads as "these belong to the
+     card they're inside" instead. (.exp-invoice-lines-label's own style is
+     unconditional, styles.css -- shows on desktop too, harmlessly.) */
+  .exp-invoice-lines-scroll .recon-screen tr{
+    box-shadow:none;
+    border-color:var(--line);
+    background:var(--surface-2);
+  }
 
   /* Contacts -> each table row becomes a stacked card instead of a 5-column
      row that only ever showed the name before you had to scroll. CSS-only
@@ -1687,6 +1801,7 @@ td.open{background:var(--open-bg);}
 .exp-hours-people{display:flex;flex-direction:column;gap:2px;margin:4px 0 2px 4px;}
 .exp-hours-person{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--ink-soft);max-width:280px;}
 .exp-invoice{margin-bottom:12px;}
+.exp-invoice-lines-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-faint);margin:10px 0 4px;}
 .exp-invoice-lines-scroll{overflow-x:auto;margin-top:8px;}
 .exp-invoice-lines{width:100%;min-width:480px;border-collapse:collapse;font-size:12px;}
 .exp-invoice-lines th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--ink-faint);padding:4px 8px;border-bottom:1px solid var(--line-strong);}
