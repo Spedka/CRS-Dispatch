@@ -216,6 +216,19 @@ export const api = {
       body: JSON.stringify(body),
     }).then(j),
 
+  // ---- Create PO from a Field Squared material req (Service Call / Service
+  // Stock paths) ----
+  // Broader than getJobs() on purpose -- includes Service Call Opportunities
+  // regardless of board status, since a material req/PO is routinely made
+  // after a service call has already closed out. See materialReqs.js.
+  getServiceCallOpportunities: () => fetch('/api/finance/service-call-opportunities').then(j),
+
+  getMaterialReqs: (oppId) => fetch(`/api/finance/material-reqs/${oppId}`).then(j),
+
+  getMaterialReqLines: (oppId, docId) => fetch(`/api/finance/material-reqs/${oppId}/${docId}/lines`).then(j),
+
+  getPoCustomerSuggestions: (oppId) => fetch(`/api/finance/po-customer-suggestions/${oppId}`).then(j),
+
   // ---- Create Invoice (QBO invoicing from FS SERVICE_ACK data) ----
   getServiceAcks: (oppId) => fetch(`/api/finance/service-acks/${oppId}`).then(j),
 

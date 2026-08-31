@@ -450,6 +450,28 @@ const JobCard = React.memo(function JobCard({
   );
   const invoiceWarnToast = invoiceWarn && <div className="toast">{invoiceWarn}</div>;
 
+  // "Create PO" reachable right from a service call's own row -- per
+  // direction 2026-08-31, never assume the PO path/type, so this still opens
+  // the full 3-way picker (job.id pre-filled into the Service Call/Service
+  // Stock paths' opp selection, Job path unaffected). Job-type jobs already
+  // have a PO entry point via the Parts tab's own Quote-driven flow, so this
+  // row button is scoped to service calls, where a PO is otherwise a detour
+  // through Parts to find the right service call again.
+  const [showPOModal, setShowPOModal] = useState(false);
+  const showPOBtn = isConfirmedServiceJob(job);
+  const poBtn = showPOBtn && (
+    <button type="button" className="fs-badge inv-badge job-row-po-btn" title="Create a Purchase Order for this service call" onClick={() => setShowPOModal(true)}>+ PO</button>
+  );
+  // No `jobs`/`serviceStock` prop threaded in here on purpose -- JobCard is
+  // React.memo'd and rendered once per row of a potentially long list, so
+  // passing the whole top-level jobs array down would defeat that
+  // memoization on every refresh for every row, just to serve the rare click
+  // that opens this modal. CreatePOPathPicker fetches both itself when not
+  // handed them (e.g. from PartsTab, which already has them loaded).
+  const poModal = showPOModal && (
+    <CreatePOPathPicker initialOppId={job.id} onClose={() => setShowPOModal(false)} />
+  );
+
   if (readOnly) {
     return (
       <div className="job ro">
@@ -464,6 +486,7 @@ const JobCard = React.memo(function JobCard({
             <FsDriftBadge job={job} />
             <span className={`badge ${statusClass(job.status)}`}>{job.status}</span>
             {invoiceBtn}
+            {poBtn}
             {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
             {/* Mobile-only (styles.css) -- desktop always shows everything
                 below already, this toggle is a no-op there. Per direction
@@ -493,6 +516,7 @@ const JobCard = React.memo(function JobCard({
           </div>
         </div>
         {invoiceModal}
+        {poModal}
         {invoiceWarnToast}
       </div>
     );
@@ -522,6 +546,7 @@ const JobCard = React.memo(function JobCard({
             ariaLabel="Job status"
           />
           {invoiceBtn}
+          {poBtn}
           {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
           {/* Mobile-only (styles.css) -- see the readOnly branch above for
               the full reasoning. The FS-attach panel below is deliberately
@@ -696,6 +721,7 @@ const JobCard = React.memo(function JobCard({
         </div>
       </div>
       {invoiceModal}
+      {poModal}
       {invoiceWarnToast}
     </div>
   );
@@ -6999,7 +7025,7 @@ function PartsTab({ groups, loading, jobs, techs, catalog, serviceStock, onRefre
         />
       )}
       {creatingPO && (
-        <CreatePOModal
+        <CreatePOPathPicker
           jobs={jobs}
           serviceStock={serviceStock}
           onClose={() => setCreatingPO(false)}
@@ -7466,7 +7492,7 @@ const PO_STEP_ORDER = ['opps', 'quotes', 'projects', 'lines', 'preview'];
 // legitimately draw lines from several jobs at once, each needing its own
 // Project (QBO's per-job sub-Customer) stamped on its own lines -- see the
 // purchase-order plan for the full design rationale.
-function CreatePOModal({ jobs, serviceStock, onClose }) {
+function CreatePOModal({ jobs, serviceStock, onBack, onClose }) {
   const [step, setStep] = useState('opps');
   const [oppIds, setOppIds] = useState([]);
   const [poSource, setPoSource] = useState(null);
@@ -7872,10 +7898,575 @@ function CreatePOModal({ jobs, serviceStock, onClose }) {
           {err && <div className="modal-form-error">{err}</div>}
         </div>
         <div className="modal-footer">
+          {/* On the very first step there's nothing to step back to within
+              this wizard -- Back instead returns to the Job/Service Call/
+              Service Stock picker (CreatePOPathPicker) that launched it, so
+              picking the wrong PO type isn't a Cancel-and-start-over. */}
+          {step === 'opps' && step !== 'done' && onBack && <button className="modal-cancel-btn" onClick={onBack} disabled={busy}>Back</button>}
           {step !== 'opps' && step !== 'done' && <button className="modal-cancel-btn" onClick={goBack} disabled={busy}>Back</button>}
           {step === 'opps' && <button className="modal-save-btn" onClick={loadQuotes} disabled={busy || oppIds.length === 0}>{busy ? <LoadingDots inline /> : 'Next'}</button>}
           {step === 'quotes' && <button className="modal-save-btn" onClick={() => setStep('projects')} disabled={!quotesReady}>Next</button>}
           {step === 'projects' && <button className="modal-save-btn" onClick={loadLines} disabled={busy || !projectsReady}>{busy ? <LoadingDots inline /> : 'Next'}</button>}
+          {step === 'lines' && <button className="modal-save-btn" onClick={() => setStep('preview')} disabled={!linesValid || !qboVendorId || !costCenterId}>Next</button>}
+          {step === 'preview' && <button className="modal-save-btn" onClick={create} disabled={busy}>{busy ? 'Creating…' : 'Create Purchase Order'}</button>}
+          {step === 'done'
+            ? <button className="modal-save-btn" onClick={onClose}>Done</button>
+            : <button className="modal-cancel-btn" onClick={onClose} disabled={busy}>Cancel</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===================== Create PO -- 3-way entry picker =====================
+// Per direction 2026-08-31: "Create PO" opens a picker first -- Job / Service
+// Call / Service Stock -- rather than assuming the path from context, even
+// when launched from a specific service call's own row. Job mounts today's
+// CreatePOModal unchanged; Service Call and Service Stock both mount
+// CreatePOMaterialReqModal below (a shared wizard, since their line-sourcing
+// and lines/preview steps are nearly identical -- only the destination-
+// resolution step differs).
+function CreatePOPathPicker({ jobs, serviceStock, initialOppId, onClose }) {
+  const [path, setPath] = useState(null); // 'job' | 'serviceCall' | 'serviceStock' | null (still picking)
+  // This picker is meant to be mountable from anywhere a PO could start
+  // (Parts tab, a job's own row, ...), not just screens that already have
+  // jobs/Service Stock loaded -- fetch either locally rather than trust the
+  // prop being populated. A prop from a caller that already has it (e.g.
+  // Parts tab) is used as the initial value so there's no loading flash when
+  // it's already known; JobCard deliberately passes neither (see its own
+  // comment) since it's rendered once per row of a long, memoized list.
+  const [jobsList, setJobsList] = useState(jobs || null);
+  useEffect(() => {
+    if (!jobs) api.getJobs().then(setJobsList).catch(() => {});
+  }, [jobs]);
+  const [stock, setStock] = useState(serviceStock || null);
+  useEffect(() => {
+    if (!serviceStock) api.getServiceStock().then(setStock).catch(() => {});
+  }, [serviceStock]);
+
+  // onBack returns to this picker's own 3-option screen (below) rather than
+  // Cancel-ing the whole thing -- per direction 2026-08-31, picking the
+  // wrong PO type shouldn't mean starting over from scratch.
+  const backToPicker = () => setPath(null);
+  if (path === 'job') return <CreatePOModal jobs={jobsList || []} serviceStock={stock} onBack={backToPicker} onClose={onClose} />;
+  // Service Call / Service Stock source their own opp list independently
+  // (CreatePOMaterialReqModal fetches GET /finance/service-call-opportunities
+  // itself -- see its own comment) rather than reusing `jobs` here, since the
+  // board's list is scoped to outstanding statuses and would miss any
+  // service call that's already closed out.
+  if (path === 'serviceCall') return <CreatePOMaterialReqModal mode="serviceCall" serviceStock={stock} initialOppId={initialOppId} onBack={backToPicker} onClose={onClose} />;
+  if (path === 'serviceStock') return <CreatePOMaterialReqModal mode="serviceStock" serviceStock={stock} initialOppId={initialOppId} onBack={backToPicker} onClose={onClose} />;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Create PO</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          <p className="po-step-hint">What's this PO for?</p>
+          <div className="po-path-options">
+            <button type="button" className="po-path-option" onClick={() => setPath('job')}>
+              <span className="po-path-option-title">Job</span>
+              <span className="po-path-option-desc">Sourced from a Quote, billed to that job's own QBO Project. Today's normal PO.</span>
+            </button>
+            <button type="button" className="po-path-option" onClick={() => setPath('serviceCall')}>
+              <span className="po-path-option-title">Service Call</span>
+              <span className="po-path-option-desc">Sourced from that service call's own material req(s). Billed to the real customer account, since this part is for this service and only this service.</span>
+            </button>
+            <button type="button" className="po-path-option" onClick={() => setPath('serviceStock')}>
+              <span className="po-path-option-title">Service Stock</span>
+              <span className="po-path-option-desc">Sourced from one or more service calls' material req(s), pooled freely. Always replenishes the shared Service Stock pool, not a specific customer.</span>
+            </button>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <div className="modal-footer-spacer" />
+          <button className="modal-cancel-btn" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// "+ Create PO" for Service Call / Service Stock -- sources lines from a
+// Field Squared material req (Data.DTBL34, structurally near-identical to
+// SERVICE_ACK's own EQUIPMENT_MATERIALS -- confirmed live 2026-08-31, see
+// materialReqs.js) instead of a Salesforce Quote. Shares the lines/preview
+// step shape with CreatePOModal (same line-row fields, same item-pick/create-
+// new-item UI, same vendor/cost-center suggestion), but the destination step
+// differs by mode:
+//   - serviceCall: ONE opportunity only ("this part is for this service and
+//     only this service," per direction) -- billed to a real top-level QBO
+//     Customer, suggested via the exact same suggest-from-invoice-history
+//     logic Create Invoice uses (GET /finance/po-customer-suggestions),
+//     labeled "Billing customer account." No QBO Project involved.
+//   - serviceStock: any number of opportunities, material reqs pooled freely
+//     (every one of these POs targets the same fixed destination regardless
+//     of source, so there's no "which account" ambiguity to resolve) --
+//     billed to the Service Stock Opportunity's own fixed QBO Project. No
+//     picker/step for this at all (per the original design -- "no project/
+//     customer step, fixed target") -- resolved silently via the po-source
+//     crosswalk (falling back to SERVICE_STOCK_QBO_CUSTOMER_ID server-side
+//     the very first time, see purchaseOrders.js). A dedicated "project"
+//     step existed briefly during 2026-08-31 testing as a safety net for
+//     that first-time fallback, but since it always resolves automatically
+//     now, showing it was just an extra click confirming nothing to decide
+//     -- removed per direction the same day.
+function CreatePOMaterialReqModal({ mode, serviceStock, initialOppId, onBack, onClose }) {
+  const isStock = mode === 'serviceStock';
+  const STEP_ORDER = isStock
+    ? ['opps', 'docs', 'lines', 'preview']
+    : ['opp', 'docs', 'customer', 'lines', 'preview'];
+  const [step, setStep] = useState(STEP_ORDER[0]);
+  const [oppIds, setOppIds] = useState(initialOppId ? [initialOppId] : []);
+  const [oppDocs, setOppDocs] = useState({}); // oppId -> docs[]
+  const [selectedDocs, setSelectedDocs] = useState([]); // [{oppId, oppName, docId, tech, jobWoNum}]
+  const [lines, setLines] = useState([]);
+  const [qboVendors, setQboVendors] = useState([]);
+  const [qboVendorId, setQboVendorId] = useState('');
+  const [sfdcVendors, setSfdcVendors] = useState([]);
+  const [sfdcVendorId, setSfdcVendorId] = useState('');
+  const [costCenters, setCostCenters] = useState([]);
+  const [costCenterId, setCostCenterId] = useState('');
+  const [qboItems, setQboItems] = useState([]);
+  // Service Call only -- billing customer suggestion/override.
+  const [customerSuggestions, setCustomerSuggestions] = useState([]);
+  const [customerId, setCustomerId] = useState('');
+  const [qboParents, setQboParents] = useState([]);
+  // Service Stock only -- the fixed opportunity's own QBO Project id,
+  // resolved silently (see po-source's fallback, purchaseOrders.js). No
+  // picker state needed -- there's never a choice to make here.
+  const [stockOpp, setStockOpp] = useState(null); // {id, name, qboProjectId, accountName, address} from po-source
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [result, setResult] = useState(null);
+
+  // Deliberately NOT sourced from the `jobs` prop (the dispatch board's own
+  // GET /jobs list) -- that's scoped to currently-outstanding statuses plus a
+  // recency window, correct for the board but wrong here: a material req/PO
+  // is routinely created after a service call has already closed out and
+  // dropped off the board (found live 2026-08-31 -- searching a real,
+  // already-serviced call in this picker came back "no matches"). Fetches
+  // the broader GET /finance/service-call-opportunities list instead, same
+  // fix jobCost.js's expense-jobs route already made for the same reason.
+  const [serviceCallOpps, setServiceCallOpps] = useState([]);
+  useEffect(() => {
+    api.getServiceCallOpportunities().then(setServiceCallOpps).catch(() => {});
+  }, []);
+  const serviceCallOptions = useMemo(
+    () => serviceCallOpps.map((o) => [o.id, o.lid ? `${o.name} - LID ${o.lid}` : o.name]),
+    [serviceCallOpps]
+  );
+  const oppById = useMemo(() => {
+    const m = new Map(serviceCallOpps.map((o) => [o.id, o]));
+    if (serviceStock) m.set(serviceStock.id, serviceStock);
+    return m;
+  }, [serviceCallOpps, serviceStock]);
+  const itemOptions = useMemo(() => qboItems.map((i) => [i.id, i.sku ? `${i.sku} - ${i.name}` : i.name]), [qboItems]);
+
+  useEffect(() => {
+    api.getQboVendors().then(setQboVendors).catch(() => {});
+    api.getSfdcVendors().then(setSfdcVendors).catch(() => {});
+    api.getCostCenters().then(setCostCenters).catch(() => {});
+    api.getQboItems().then(setQboItems).catch(() => {});
+    // Only the Service Call path needs the top-level Customer list -- Service
+    // Stock's destination is always fixed, resolved via po-source instead.
+    if (!isStock) api.getQboProjects().then((d) => setQboParents(d.parents || [])).catch(() => {});
+  }, [isStock]);
+
+  // Same vendor/cost-center suggestion effects as CreatePOModal, verbatim.
+  useEffect(() => {
+    if (!qboVendorId || sfdcVendorId || sfdcVendors.length === 0) return;
+    const qboVendorName = qboVendors.find((v) => v.id === qboVendorId)?.name;
+    const suggested = suggestMatch(qboVendorName, sfdcVendors, (v) => v.name);
+    if (suggested) setSfdcVendorId(suggested.id);
+  }, [qboVendorId, sfdcVendors, qboVendors, sfdcVendorId]);
+
+  useEffect(() => {
+    if (costCenterId || costCenters.length === 0) return;
+    const sfdcVendorName = sfdcVendors.find((v) => v.id === sfdcVendorId)?.name;
+    const qboVendorName = qboVendors.find((v) => v.id === qboVendorId)?.name;
+    const suggested = suggestMatch(sfdcVendorName, costCenters, (c) => c.name)
+      || suggestMatch(qboVendorName, costCenters, (c) => c.name);
+    if (suggested) setCostCenterId(suggested.id);
+  }, [sfdcVendorId, qboVendorId, costCenters, sfdcVendors, qboVendors, costCenterId]);
+
+  const goBack = () => setStep((s) => STEP_ORDER[Math.max(0, STEP_ORDER.indexOf(s) - 1)]);
+
+  // opp(s) step -> Next: pull each selected opportunity's real material-req
+  // docs, plus (serviceCall only) billing-customer suggestions, (serviceStock
+  // only) the fixed opportunity's own Project id, fetched silently -- there's
+  // no picker/step for it (see the component's own header comment).
+  //
+  // Service Stock is the one path where zero opportunities is a legitimate,
+  // expected choice, not a fallback -- per direction 2026-08-31, this PO is
+  // for PURCHASING stock, which routinely covers work that hasn't happened
+  // (or even been scheduled) yet, not just replenishing what a real material
+  // req already used. Skips straight past the (necessarily empty) docs step
+  // AND on to lines in that case -- there's nothing to fetch or pick in
+  // either of the two steps in between.
+  const loadDocs = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const results = await Promise.all(oppIds.map((oid) => api.getMaterialReqs(oid)));
+      const next = {};
+      oppIds.forEach((oid, i) => { next[oid] = results[i].docs || []; });
+      setOppDocs(next);
+      if (isStock) {
+        const src = await api.getPoSource([serviceStock.id]);
+        setStockOpp(src[0] || null);
+        if (oppIds.length === 0) { await loadLines(); return; }
+        setStep('docs');
+      } else {
+        api.getPoCustomerSuggestions(oppIds[0]).then((d) => {
+          setCustomerSuggestions(d.suggestions || []);
+          if (d.suggestions?.[0]) setCustomerId((cur) => cur || d.suggestions[0].qboCustomerId);
+        }).catch(() => {});
+        setStep('docs');
+      }
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Launched from a specific job's own row (initialOppId set) -- skip
+  // straight past manual opp selection into loading that job's material
+  // reqs, so the office doesn't have to re-pick the record they're already
+  // looking at. Still fully editable via Back. Stock mode waits for
+  // serviceStock to resolve (CreatePOPathPicker fetches it independently)
+  // before firing, since loadDocs needs its id.
+  useEffect(() => {
+    if (!initialOppId) return;
+    if (isStock && !serviceStock) return;
+    loadDocs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialOppId, isStock, serviceStock]);
+
+  const toggleDoc = (oid, oname, d) => {
+    setSelectedDocs((sd) => {
+      const exists = sd.some((x) => x.oppId === oid && x.docId === d.docId);
+      if (exists) return sd.filter((x) => !(x.oppId === oid && x.docId === d.docId));
+      return [...sd, { oppId: oid, oppName: oname, docId: d.docId, tech: d.tech, jobWoNum: d.jobWoNum }];
+    });
+  };
+
+  // Pools every selected material req's real lines (same shape
+  // GET /finance/quotes/:quoteId/lines returns, so this line-row build is
+  // identical to CreatePOModal's loadLines) -- opportunityId is the actual
+  // PO target (the single service call for serviceCall mode, always the
+  // fixed Service Stock id for serviceStock mode), sourceOpportunityId/-Name
+  // track which real service call the material req itself came from, for
+  // display only -- never sent to the backend.
+  const loadLines = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const results = await Promise.all(selectedDocs.map((d) => api.getMaterialReqLines(d.oppId, d.docId)));
+      const pooled = [];
+      selectedDocs.forEach((d, i) => {
+        for (const l of (results[i].lines || [])) pooled.push({ ...l, sourceOpportunityId: d.oppId, sourceOpportunityName: d.oppName });
+      });
+      const targetOppId = isStock ? serviceStock.id : oppIds[0];
+      setLines(pooled.map((l) => ({
+        key: crypto.randomUUID(),
+        opportunityId: targetOppId,
+        sourceOpportunityId: l.sourceOpportunityId,
+        sourceOpportunityName: l.sourceOpportunityName,
+        sourceCode: l.code,
+        sourceName: l.name,
+        sourceVendor: l.vendor,
+        description: l.description,
+        quantity: l.quantity || 1,
+        unitCost: '',
+        itemId: l.itemId || '',
+        itemName: l.itemName || '',
+        newItem: l.itemId ? null : { productId: l.productId, code: l.code || '', description: l.description },
+        searchingItem: false,
+        takenFrom: l.takenFrom || null,
+        existingPoNum: l.existingPoNum || null,
+      })));
+
+      const vendorCounts = new Map();
+      for (const l of pooled) if (l.vendor) vendorCounts.set(l.vendor, (vendorCounts.get(l.vendor) || 0) + 1);
+      const topVendor = [...vendorCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (topVendor) {
+        const suggested = suggestMatch(topVendor, qboVendors, (x) => x.name);
+        if (suggested) setQboVendorId((cur) => cur || suggested.id);
+      }
+      setStep('lines');
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addManualLine = () => setLines((ls) => [...ls, {
+    key: crypto.randomUUID(),
+    opportunityId: isStock ? serviceStock.id : (oppIds[0] || ''),
+    sourceOpportunityId: null, sourceOpportunityName: null,
+    sourceCode: null, sourceName: null, sourceVendor: null,
+    description: '', quantity: 1, unitCost: '', itemId: '', itemName: '', newItem: null, searchingItem: true,
+    takenFrom: null, existingPoNum: null,
+  }]);
+  const updateLine = (key, field, value) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, [field]: value } : l)));
+  const updateLineItem = (key, itemId) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, itemId, itemName: qboItems.find((i) => i.id === itemId)?.name || '', newItem: itemId ? null : l.newItem } : l)));
+  const updateLineNewItem = (key, field, value) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, newItem: { ...l.newItem, [field]: value } } : l)));
+  const toggleSearchItem = (key) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, searchingItem: !l.searchingItem } : l)));
+  const removeLine = (key) => setLines((ls) => ls.filter((l) => l.key !== key));
+
+  const linesValid = lines.length > 0 && lines.every((l) => {
+    if (!l.opportunityId || !l.description.trim() || !(Number(l.quantity) > 0) || !(Number(l.unitCost) >= 0)) return false;
+    if (!l.itemId && l.newItem && !l.newItem.code?.trim()) return false;
+    return true;
+  });
+
+  // Always the one fixed Service Stock QBO Customer id -- no picker/lookup
+  // needed, see the component's own header comment.
+  const projectLabelFor = () => stockOpp?.qboProjectId || '-';
+
+  const grandTotal = lines.reduce((sum, l) => sum + Number(l.quantity || 0) * Number(l.unitCost || 0), 0);
+
+  const create = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      trackUsage(isStock ? 'create_po_service_stock' : 'create_po_service_call');
+      // Should always be populated by now (po-source's own fallback, see
+      // purchaseOrders.js) -- guarded rather than silently sending an
+      // incomplete line, since there's no picker step left to fall back to.
+      if (isStock && !stockOpp?.qboProjectId) throw new Error('Service Stock has no QBO project configured. Contact an admin.');
+      const body = {
+        vendorId: qboVendorId,
+        sfdcVendorId: sfdcVendorId || undefined,
+        costCenterId: costCenterId || undefined,
+        lines: lines.map((l) => {
+          const base = {
+            opportunityId: l.opportunityId, description: l.description.trim(), quantity: Number(l.quantity), unitCost: Number(l.unitCost),
+            itemId: l.itemId || undefined, itemName: l.itemName || undefined,
+            newItem: (!l.itemId && l.newItem)
+              ? { productId: l.newItem.productId, code: l.newItem.code?.trim(), description: l.newItem.description?.trim() || undefined }
+              : undefined,
+          };
+          return isStock ? { ...base, projectId: stockOpp.qboProjectId } : { ...base, customerId };
+        }),
+      };
+      const res = await api.createPurchaseOrder(body);
+      setResult(res);
+      setStep('done');
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={() => !busy && onClose()}>
+      <div className="modal modal-po" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">Create PO: {isStock ? 'Service Stock' : 'Service Call'}</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={busy}>×</button>
+        </div>
+        <div className="modal-body">
+
+          {step === 'opp' && (
+            <label className="req-field req-field-wide">
+              <span className="req-field-label">Service call</span>
+              <SearchableSelect value={oppIds[0] || ''} onChange={(v) => setOppIds(v ? [v] : [])} options={serviceCallOptions} placeholder="Search service calls…" />
+            </label>
+          )}
+
+          {step === 'opps' && (
+            <label className="req-field req-field-wide">
+              <span className="req-field-label">Service calls (optional; any number, all pool into the same PO)</span>
+              <OppMultiSelect value={oppIds} onChange={setOppIds} options={serviceCallOptions} placeholder="Search & select service calls…" />
+              <p className="po-step-hint">
+                This PO is for purchasing stock, not just reimbursing what's already been used. Leave this empty for a straight restock covering work that hasn't happened yet, or pick specific service calls to pull their material req lines in automatically.
+              </p>
+            </label>
+          )}
+
+          {step === 'docs' && (
+            <>
+              {isStock && oppIds.length === 0 ? (
+                <p className="po-step-hint">No service calls selected. Add lines manually on the next step.</p>
+              ) : (
+                <p className="po-step-hint">
+                  Pick which material req(s) to build lines from{isStock ? '' : ' for this service call'} (or skip and add lines manually on the next step).
+                </p>
+              )}
+              {oppIds.map((oid) => {
+                const opp = oppById.get(oid);
+                const docs = oppDocs[oid];
+                return (
+                  <div key={oid} className="po-doc-group">
+                    {isStock && <div className="po-doc-group-label">{opp?.name}</div>}
+                    {docs === undefined && <LoadingDots label="Loading material reqs…" inline />}
+                    {docs && docs.length === 0 && <div className="na">No material req found for this service call.</div>}
+                    {docs && docs.map((d) => {
+                      const selected = selectedDocs.some((x) => x.oppId === oid && x.docId === d.docId);
+                      return (
+                        <button key={d.docId} type="button" className={`inv-doc-pick ${selected ? 'on' : ''}`} onClick={() => toggleDoc(oid, opp?.name, d)} disabled={busy}>
+                          <div className="inv-doc-dates">{d.tech || 'Unknown tech'}{d.jobWoNum ? ` · WO ${d.jobWoNum}` : ''}</div>
+                          <div className="inv-doc-meta">{d.lineCount} line{d.lineCount === 1 ? '' : 's'}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </>
+          )}
+
+          {step === 'customer' && (
+            <label className="req-field req-field-wide">
+              <span className="req-field-label">Billing customer account</span>
+              {customerSuggestions.length > 0 && (
+                <div className="inv-customer-suggestions">
+                  {customerSuggestions.map((s) => (
+                    <button key={s.qboCustomerId} type="button" className={`inv-suggest-chip ${customerId === s.qboCustomerId ? 'on' : ''}`} onClick={() => setCustomerId(s.qboCustomerId)}>
+                      {s.name} <span className="ct">×{s.count}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <SearchableSelect value={customerId} onChange={setCustomerId} options={qboParents.map((p) => [p.id, p.name])} placeholder="Search QBO customers…" />
+            </label>
+          )}
+
+          {step === 'lines' && (
+            <>
+              <p className="po-step-hint">Every line from the selected material req(s) is listed below - remove any that don't belong on this PO, then enter each one's cost.</p>
+
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">QBO Vendor for this PO</span>
+                <SearchableSelect value={qboVendorId} onChange={setQboVendorId} options={qboVendors.map((v) => [v.id, v.name])} placeholder="Search QBO vendors…" />
+              </label>
+
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Salesforce Vendor (CRS Purchase Order record) - optional</span>
+                <SearchableSelect value={sfdcVendorId} onChange={setSfdcVendorId} options={sfdcVendors.map((v) => [v.id, v.name])} placeholder="Search Salesforce vendors…" />
+              </label>
+
+              <label className="req-field req-field-wide">
+                <span className="req-field-label">Cost Center (CRS Purchase Order record)</span>
+                <SearchableSelect value={costCenterId} onChange={setCostCenterId} options={costCenters.map((c) => [c.id, c.name])} placeholder="Search cost centers…" />
+              </label>
+
+              {lines.map((l) => (
+                <div className="po-line" key={l.key}>
+                  <div className="po-line-source-row">
+                    <span className={`po-line-source ${l.sourceName ? '' : 'po-line-source-manual'}`}>
+                      {l.sourceName ? (
+                        <>
+                          <span className="po-line-source-tag">From material req{l.sourceOpportunityName ? ` · ${l.sourceOpportunityName}` : ''}</span>
+                          {l.sourceCode && <span className="po-line-source-code">{l.sourceCode}</span>}
+                          <span className="po-line-source-name">{l.sourceName}</span>
+                          {l.takenFrom && <span className="po-line-source-vendor">Taken from: {l.takenFrom}</span>}
+                          {l.existingPoNum && <span className="po-line-source-vendor">Tech noted PO#: {l.existingPoNum}</span>}
+                        </>
+                      ) : 'Manual line - no source product'}
+                    </span>
+                    <span className="po-line-arrow" aria-hidden>→</span>
+                    <div className="po-line-item">
+                      {l.itemId || l.searchingItem ? (
+                        <>
+                          <SearchableSelect value={l.itemId} onChange={(v) => updateLineItem(l.key, v)} options={itemOptions} placeholder="Search QBO item / SKU…" />
+                          {!l.itemId && l.newItem && (
+                            <button type="button" className="po-suggest" onClick={() => toggleSearchItem(l.key)}>Back to creating a new item</button>
+                          )}
+                        </>
+                      ) : l.newItem ? (
+                        <div className="po-line-newitem">
+                          <div className="po-line-newitem-prompt">No QBO item found - create it?</div>
+                          <input className="req-note-input" type="text" placeholder="SKU / part #" value={l.newItem.code} onChange={(e) => updateLineNewItem(l.key, 'code', e.target.value)} />
+                          <input className="req-note-input" type="text" placeholder="Description" value={l.newItem.description} onChange={(e) => updateLineNewItem(l.key, 'description', e.target.value)} />
+                          <button type="button" className="po-suggest" onClick={() => toggleSearchItem(l.key)}>Already exists in QBO? Search instead</button>
+                        </div>
+                      ) : (
+                        <SearchableSelect value={l.itemId} onChange={(v) => updateLineItem(l.key, v)} options={itemOptions} placeholder="Search QBO item / SKU to add…" />
+                      )}
+                    </div>
+                  </div>
+                  <div className="po-line-row">
+                    <input className="req-note-input po-line-desc" type="text" placeholder="Description" value={l.description} onChange={(e) => updateLine(l.key, 'description', e.target.value)} />
+                    <input className="req-note-input po-line-qty" type="number" min="0" placeholder="Qty" value={l.quantity} onChange={(e) => updateLine(l.key, 'quantity', e.target.value)} />
+                    <input className="req-note-input po-line-cost" type="number" min="0" step="0.01" placeholder="Unit cost" value={l.unitCost} onChange={(e) => updateLine(l.key, 'unitCost', e.target.value)} />
+                    <button type="button" className="req-btn" onClick={() => removeLine(l.key)}>Remove</button>
+                  </div>
+                  {!l.itemId && !l.newItem && (
+                    <div className="po-line-hint">No QBO item selected - this line will post to the generic "Materials" account instead of a specific part. Search above to pick or create one.</div>
+                  )}
+                </div>
+              ))}
+              <button type="button" className="req-btn" onClick={addManualLine}>+ Add line</button>
+            </>
+          )}
+
+          {step === 'preview' && (
+            <>
+              <div className="po-preview-vendor">Vendor: <strong>{qboVendors.find((v) => v.id === qboVendorId)?.name}</strong></div>
+              {!isStock && <div className="po-preview-vendor">Billing customer: <strong>{customerSuggestions.find((s) => s.qboCustomerId === customerId)?.name || qboParents.find((p) => p.id === customerId)?.name || customerId}</strong></div>}
+              <div className="po-scroll">
+                <table className="po-preview-table">
+                  <thead>
+                    <tr><th>{isStock ? 'Source job' : 'Job'}</th><th>QBO Item</th><th>Description</th><th>Qty</th><th>Unit cost</th><th>Total</th><th>{isStock ? 'Project' : 'Billed to'}</th></tr>
+                  </thead>
+                  <tbody>
+                    {lines.map((l) => {
+                      const label = isStock ? projectLabelFor() : (customerSuggestions.find((s) => s.qboCustomerId === customerId)?.name || qboParents.find((p) => p.id === customerId)?.name || '-');
+                      return (
+                        <tr key={l.key}>
+                          <td>{isStock ? (l.sourceOpportunityName || '-') : oppById.get(l.opportunityId)?.name}</td>
+                          <td>
+                            {l.itemName
+                              ? l.itemName
+                              : l.newItem
+                              ? <span className="po-new-badge">NEW - {l.newItem.code}</span>
+                              : <span className="po-new-badge">Materials (generic)</span>}
+                          </td>
+                          <td>{l.description}</td>
+                          <td>{l.quantity}</td>
+                          <td>${Number(l.unitCost || 0).toFixed(2)}</td>
+                          <td>${(Number(l.quantity || 0) * Number(l.unitCost || 0)).toFixed(2)}</td>
+                          <td>{isStock && label.startsWith('NEW -') ? <span className="po-new-badge">{label}</span> : label}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr><td colSpan={5}>Total</td><td colSpan={2}>${grandTotal.toFixed(2)}</td></tr>
+                  </tfoot>
+                </table>
+              </div>
+            </>
+          )}
+
+          {step === 'done' && result && (
+            <div className="po-done">
+              <p>Purchase Order <strong>{result.docNumber || `#${result.id}`}</strong> created in QuickBooks.</p>
+              {result.sfWriteWarning && <div className="inv-caution">{result.sfWriteWarning}</div>}
+              <a className="modal-save-btn po-done-link" href={`https://qbo.intuit.com/app/purchaseorder?txnId=${result.id}`} target="_blank" rel="noreferrer">Open in QuickBooks</a>
+            </div>
+          )}
+
+          {err && <div className="modal-form-error">{err}</div>}
+        </div>
+        <div className="modal-footer">
+          {/* Same "Back to PO type picker" affordance as CreatePOModal -- see
+              its own comment. */}
+          {step === STEP_ORDER[0] && step !== 'done' && onBack && <button className="modal-cancel-btn" onClick={onBack} disabled={busy}>Back</button>}
+          {step !== STEP_ORDER[0] && step !== 'done' && <button className="modal-cancel-btn" onClick={goBack} disabled={busy}>Back</button>}
+          {step === (isStock ? 'opps' : 'opp') && <button className="modal-save-btn" onClick={loadDocs} disabled={busy || (!isStock && oppIds.length === 0) || (isStock && !serviceStock)}>{busy ? <LoadingDots inline /> : 'Next'}</button>}
+          {step === 'docs' && !isStock && <button className="modal-save-btn" onClick={() => setStep('customer')} disabled={busy}>Next</button>}
+          {step === 'docs' && isStock && <button className="modal-save-btn" onClick={loadLines} disabled={busy}>{busy ? <LoadingDots inline /> : 'Next'}</button>}
+          {step === 'customer' && <button className="modal-save-btn" onClick={loadLines} disabled={busy || !customerId}>{busy ? <LoadingDots inline /> : 'Next'}</button>}
           {step === 'lines' && <button className="modal-save-btn" onClick={() => setStep('preview')} disabled={!linesValid || !qboVendorId || !costCenterId}>Next</button>}
           {step === 'preview' && <button className="modal-save-btn" onClick={create} disabled={busy}>{busy ? 'Creating…' : 'Create Purchase Order'}</button>}
           {step === 'done'
@@ -8039,7 +8630,7 @@ function CreateInvoiceModal({ job, onClose, onSaved }) {
         </div>
         <div className="modal-body">
           {notConfirmedService && (
-            <div className="inv-caution">Invoice feature has not yet been designed for Jobs, T&I, or Monitoring -- this job isn't confirmed Service type. You can still try, but review carefully before sending.</div>
+            <div className="inv-caution">Invoice feature has not yet been designed for Jobs, T&I, or Monitoring: this job isn't confirmed Service type. You can still try, but review carefully before sending.</div>
           )}
 
           {step === 'docs' && (
@@ -8104,7 +8695,7 @@ function CreateInvoiceModal({ job, onClose, onSaved }) {
               ))}
 
               {!draft.partsRecorded && (
-                <div className="inv-parts-none">No parts recorded on this visit -- confirm none were used before sending.</div>
+                <div className="inv-parts-none">No parts recorded on this visit. Confirm none were used before sending.</div>
               )}
               {partsLines.length > 0 && (
                 <div className="inv-parts">
@@ -8164,7 +8755,7 @@ function CreateInvoiceModal({ job, onClose, onSaved }) {
                   <tfoot><tr><td colSpan={3}>Total</td><td>${grandTotal.toFixed(2)}</td></tr></tfoot>
                 </table>
               </div>
-              <p className="po-step-hint">Tax follows each line's QBO item default and is editable in QBO before sending. This tool never sends the invoice -- it's created unsent for office review.</p>
+              <p className="po-step-hint">Tax follows each line's QBO item default and is editable in QBO before sending. This tool never sends the invoice: it's created unsent for office review.</p>
             </>
           )}
 
@@ -8383,7 +8974,9 @@ const EVENT_LABELS = {
   part_checkout: 'Checked out parts',
   fs_link: 'Linked a Field Squared task',
   login: 'Logged in',
-  create_po: 'Created a purchase order',
+  create_po: 'Created a purchase order (Job)',
+  create_po_service_call: 'Created a purchase order (Service Call)',
+  create_po_service_stock: 'Created a purchase order (Service Stock)',
   create_invoice: 'Created an invoice',
   job_detail_open: 'Opened a job from the calendar',
   opp_link_click: 'Opened an Opportunity in Salesforce',
@@ -9273,9 +9866,9 @@ function ServiceJobAnalytics({ data, billedInvoiceLines }) {
           <span className="exp-profit-label">Materials {isProfit ? 'Profit' : 'Loss'}</span>
           <span className="exp-profit-amount">{isProfit ? '+' : '−'}{fmtCurrency(Math.abs(materialsProfit))}</span>
         </div>
-        <div className="exp-profit-note">Billed Materials − Parts Catalog Cost (Product2 Standard Pricebook list price × qty for each billed part). Materials only, not overall job profit -- labor cost isn't tracked anywhere in this system.</div>
-        {hasUnmatchedParts && <div className="exp-none-note">One or more billed parts couldn't be matched to a real catalog product/list price -- this estimate is a floor, real cost may be higher</div>}
-        {!data.hasPurchaseOrders && <div className="exp-none-note">No CRS Purchase Orders recorded for this job -- cost estimated from catalog list price instead</div>}
+        <div className="exp-profit-note">Billed Materials − Parts Catalog Cost (Product2 Standard Pricebook list price × qty for each billed part). Materials only, not overall job profit; labor cost isn't tracked anywhere in this system.</div>
+        {hasUnmatchedParts && <div className="exp-none-note">One or more billed parts couldn't be matched to a real catalog product/list price. This estimate is a floor; real cost may be higher</div>}
+        {!data.hasPurchaseOrders && <div className="exp-none-note">No CRS Purchase Orders recorded for this job; cost estimated from catalog list price instead</div>}
         {!data.hasFsLink && <div className="exp-none-note">No Field Squared data for this job</div>}
       </div>
 
@@ -9392,7 +9985,7 @@ function ExpenseJobDetail({ oppId, onBack }) {
                   <div className="exp-figure-row"><span className="exp-dot exp-dot-quoted-labor" />Quoted Labor <strong>{fmtCurrency(data.quotedLabor) ?? '-'}</strong></div>
                   <div className="exp-figure-row"><span className="exp-dot exp-dot-quoted-parts" />Quoted Parts <strong>{fmtCurrency(data.quotedParts) ?? '-'}</strong></div>
                   <div className="exp-figure-row">Quoted Total <strong>{fmtCurrency(data.quotedTotal) ?? '-'}</strong></div>
-                  {!(data.quotedTotal > 0) && <div className="exp-none-note">No quote data for this job -- the ring above shows relative to billed/expense totals instead</div>}
+                  {!(data.quotedTotal > 0) && <div className="exp-none-note">No quote data for this job; the ring above shows relative to billed/expense totals instead</div>}
                   {!data.hasPurchaseOrders && <div className="exp-none-note">No CRS Purchase Orders recorded for this job yet</div>}
                   {!data.hasFsLink && <div className="exp-none-note">No Field Squared data for this job</div>}
                 </div>

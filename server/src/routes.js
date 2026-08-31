@@ -10,6 +10,7 @@ import { scheduleRequests } from './scheduleRequests.js';
 import { parts } from './parts.js';
 import { purchaseOrders } from './purchaseOrders.js';
 import { invoices } from './invoices.js';
+import { materialReqs } from './materialReqs.js';
 import { jobCost, isJobType, isServiceType } from './jobCost.js';
 import { notifyTech } from './notifyBoard.js';
 import { notifyTv } from './notifyTv.js';
@@ -246,6 +247,7 @@ api.route('/', scheduleRequests);
 api.route('/', parts);
 api.route('/', purchaseOrders);
 api.route('/', invoices);
+api.route('/', materialReqs);
 api.route('/', jobCost);
 
 // ---- Office/dispatch auth ----

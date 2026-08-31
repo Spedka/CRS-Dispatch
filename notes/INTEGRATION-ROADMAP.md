@@ -151,6 +151,60 @@ the recurring shape of everything on this list.
     never blocks.
   - No role gate, same convention as Create PO.
 
+- **Job/Project cost tracking** (Expense Tracking admin tab, `server/src/jobCost.js`) - deployed
+  2026-08-27 (commit `1cbc85b`). This is the "In progress" item described lower in this doc as of
+  2026-08-26, shipped the very next day - **but via a different technical approach than the one
+  sketched below**, worth noting since the plan section under "Parked/In progress" is now stale on
+  the *how*, even though the *what* (per-Opportunity quoted vs. actual cost) matches:
+  - The "real technical constraint" noted below (`CustomerRef` not a top-level queryable field on
+    `PurchaseOrder`/`Bill`, so per-Project spend can't be a server-side QBO filter) turned out
+    moot - material expense per job reads from this app's **own** `Opportunity__c` ("CRS Purchase
+    Order") mirror records (the SF write-back Create PO already does on every PO it creates), not
+    a live QBO query filtered by `QBO_Project_Id__c` at all. Sidesteps the constraint entirely
+    rather than solving it.
+  - Quoted labor/parts/total read straight from real Quote header fields
+    (`Total_Due__c`/`TOTAL_QLI_Labor__c`/`Sales_Tax__c`/`ShippingHandling2__c`), not summed from
+    QuoteLineItems - an earlier line-summing approach silently dropped fee/permit/tax/shipping
+    lines, traced to a real reported mismatch on a specific quote.
+  - Billed labor/parts/other is read live from real QBO Invoice lines (categorized by item-name
+    heuristic), not from the SF `Invoicing__c` mirror.
+  - FS-logged tech hours come from `SERVICE_ACK` documents (reusing `invoices.js`'s own
+    `DTBL5`-row parsing), same source Create Invoice already reads.
+  - Service Call material cost (almost never has a real PO on file, confirmed live) is
+    *estimated* from Product2 Standard Pricebook list price instead of read as $0.
+  - Per-tech pay is deliberately hours-only, never dollars - "per-tech pay is sensitive," per
+    direction.
+  - Also shipped the same week: **Billing Reconciliation** (admin "Billing" tab,
+    `/finance/reconciliation`) - already described as shipped 2026-08-21 above; both share the
+    same `quickbooks.js` client.
+
+- **Create PO — Service Call / Service Stock paths** (`server/src/materialReqs.js`, extended
+  `purchaseOrders.js`, `CreatePOPathPicker`/`CreatePOMaterialReqModal` in App.jsx) - deployed
+  2026-08-31. Extends the original Job-only Create PO (above) into a 3-way picker shown before any
+  wizard starts, reachable from the Parts tab and from a service call's own row in Outstanding
+  Jobs (a `+ PO` quick-action next to the existing `+ Invoice` one):
+  - **Service Call** - sources lines from that one service call's real Field Squared
+    `MATERIAL_REQ` document(s) instead of a Quote (confirmed live 2026-08-31: a genuine, separate
+    structured FS document type, `Data.DTBL34` line items - structurally almost identical to
+    `SERVICE_ACK`'s own material rows). Billed to a real top-level QBO Customer (not a Project),
+    suggested via the same suggest-from-invoice-history logic Create Invoice already uses -
+    "this part is for this service and only this service," per direction.
+  - **Service Stock** - pools `MATERIAL_REQ` docs from any number of different service calls into
+    one PO, always billed to the fixed Service Stock Opportunity's own QBO Project - safe to pool
+    across sources specifically because every line resolves to the same destination regardless of
+    which service call it came from, unlike a genuine multi-customer PO. No hard gate: a Service
+    Stock PO can be made with zero source service calls at all (proactive restocking ahead of
+    unplanned work is a real, expected case, not just a fallback). The QBO Project crosswalk on
+    the Service Stock Opportunity started out blank (Service Stock had never gone through a real
+    PO before this feature) - resolved via a one-time env-var fallback
+    (`SERVICE_STOCK_QBO_CUSTOMER_ID`) that self-heals onto the real Salesforce field the first
+    time a Service Stock PO is actually created, same write-back mechanism the Job path already
+    used.
+  - This is `INTEGRATION-ROADMAP.md`'s own "Material requests - same pattern as POs" open question
+    from `PROCESS-ADOPTION.md` #2, now substantially answered on the tooling side: material reqs
+    turned out to be real, structured, FS-native data, not a PDF-only dead end - see
+    `parts-warehouse.md`'s superseded assumption, corrected in `CLAUDE.md`.
+
 ## Parked (validated feasible, not built - deliberately paused to expand scope first)
 
 - **"Documentation" window** - cross-references billed invoices against FS `SERVICE_ACK`/
@@ -161,46 +215,29 @@ the recurring shape of everything on this list.
 
 ## In progress - vision described, not yet built
 
-### Job/Project cost tracking (QBO Projects as the real job-costing container)
-Goal: per-Opportunity view of quoted vs. actual cost - what got spent (PO/Bill activity against
-that job's QBO Project) alongside what got invoiced (Create Invoice, shipped above) and what FS
-says actually happened (hours/completion) - closing the loop the pipeline diagram at the top of
-this doc has always described.
+### Job/Project cost tracking - SHIPPED 2026-08-27, see "Shipped" above
+The planning below (2026-08-26) is kept for its still-relevant technical findings, but the
+actual build (`jobCost.js`/Expense Tracking, "Shipped" section above) **sidestepped the
+QBO-Projects approach entirely** rather than solving the constraint it identified - worth reading
+if a *live* QBO-Project-filtered PO/Bill view is ever wanted for something else:
 
-**Different in kind from Create PO/Create Invoice, not just another feature in the same
-vein.** Checked directly with the user 2026-08-26: QBO Projects have **never really been adopted**
-in this org - POs/Bills/Invoices have always mostly gone straight to the parent customer, not
-through a Project. Create PO/Create Invoice each replaced a manual data-entry habit that already
-existed; this would be the first time Projects get used for their real purpose *at all*. That
-would normally be the exact failure mode `PROCESS-ADOPTION.md` warns about - a new discipline
-that requires the office to remember to do something differently.
-
-**Why it might actually work anyway:** Create PO already creates a Project automatically the
-first time a PO is made for a job, and stamps the crosswalk (`Opportunity.QBO_Project_Id__c`)
-with zero extra step from office staff - the Project is a byproduct of a tool they're already
-using, not a new habit to adopt. If that holds, real Project-tagged POs start accumulating
-without anyone having to be told to do anything new. Worth treating as a real, if unproven,
-exception to the usual adoption problem - not a given, since it depends on Create PO itself
-staying in regular use.
-
-**Real technical constraint found live 2026-08-26, changes the build shape:** `CustomerRef` (the
-Project link) is **not a top-level queryable field** on `PurchaseOrder` or `Bill` -
-`SELECT * FROM PurchaseOrder WHERE CustomerRef = 'X'` fails outright
-(`QueryValidationError: Property CustomerRef not found for Entity PurchaseOrder`). It only exists
-per-line (a single PO/Bill can span multiple Projects). So "every PO/Bill for Project X" can't be
-a server-side filter - needs the same pull-then-filter-client-side pattern already used elsewhere
-in this app (e.g. `parts.js`'s inventory grouping), not a new pattern.
-
-**Also found live**: one real Opportunity (WO 53515) had a live `QBO_Project_Id__c` pointing at a
-Project that's since been deleted in QBO - leftover contamination from Create PO's own build-time
-verification testing, not real usage. Flagged to the user for confirmation before clearing it -
-a reminder that this crosswalk field needs to tolerate (or periodically reconcile against) a
-Project having vanished on the QBO side, not just assume a stored Id is always still valid.
-
-**Not started.** Real, existing QBO Projects (838, most pre-dating this app) do exist to validate
-patterns against, but per the "never adopted" finding, don't assume their historical data
-represents a clean model to build on - Create PO's own future usage is the real source of truth
-going forward.
+- Checked 2026-08-26: QBO Projects have **never really been adopted** in this org - POs/Bills/
+  Invoices have always mostly gone straight to the parent customer, not through a Project. Making
+  Job cost tracking depend on Project data at all would've been the exact new-discipline failure
+  mode `PROCESS-ADOPTION.md` warns about.
+- **Real technical constraint, still true**: `CustomerRef` (the Project link) is **not a
+  top-level queryable field** on `PurchaseOrder` or `Bill` -
+  `SELECT * FROM PurchaseOrder WHERE CustomerRef = 'X'` fails outright
+  (`QueryValidationError: Property CustomerRef not found for Entity PurchaseOrder`). It only
+  exists per-line, so "every PO/Bill for Project X" can never be a server-side QBO filter -
+  would need the same pull-then-filter-client-side pattern used elsewhere in this app.
+- One real Opportunity (WO 53515) was found with a live `QBO_Project_Id__c` pointing at a
+  since-deleted QBO Project - leftover from Create PO's own build-time testing. A reminder the
+  crosswalk field needs to tolerate a Project having vanished on the QBO side, not assume a
+  stored Id is always still valid.
+- What shipped instead reads material expense from this app's own `Opportunity__c` ("CRS
+  Purchase Order") mirror records - the SF write-back Create PO already does on every PO - never
+  a live QBO Project query at all. See the "Shipped" entry above for the real build.
 
 ### Vendor price sync (ADI, Potter, others) - IN PROGRESS, blocked on ADI
 Goal: keep `Product2`/`PricebookEntry` pricing (and, per the Create PO fixes above,

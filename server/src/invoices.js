@@ -135,7 +135,7 @@ function extractMaterials(doc) {
 // always user-confirmed -- most useful exactly on single-tenant Accounts
 // where one name dominates, still honest (not misleading) on multi-tenant
 // ones since the office can tell which real tenant this specific job is for.
-async function suggestCustomersForAccount(env, sf, accountId) {
+export async function suggestCustomersForAccount(env, sf, accountId) {
   if (!inv.qboCustomerId || !accountId) return [];
   let rows;
   try {

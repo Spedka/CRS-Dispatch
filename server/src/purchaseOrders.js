@@ -108,7 +108,15 @@ purchaseOrders.get('/finance/po-source', async (c) => {
       name: o[f.oppName],
       lid: o[f.oppLid] ?? null,
       jobNumber: o[f.oppJobNumber] ?? null,
-      qboProjectId: o[f.oppQboProjectId] || null,
+      // Service Stock's crosswalk starts out blank -- nothing has ever
+      // written it, since Service Stock hadn't gone through a real PO
+      // before this feature. Falls back to the already-known real QBO
+      // Customer id (env var, wrangler.toml) instead of leaving the
+      // frontend to think no Project exists and offer to create a
+      // redundant new one. The very next Service Stock PO created writes
+      // this back onto the real field via the normal write-back path below,
+      // so the fallback is only ever exercised until that first write lands.
+      qboProjectId: o[f.oppQboProjectId] || (o.Id === c.env.SERVICE_STOCK_OPPORTUNITY_ID ? (c.env.SERVICE_STOCK_QBO_CUSTOMER_ID || null) : null),
       accountName: o[f.oppAccountRelationship]?.Name ?? null,
       address: {
         street: o[f.addrStreet] ?? null,
@@ -341,15 +349,24 @@ async function nextDocNumber(qbo) {
 //   { vendorId, lines: [{ opportunityId, description, quantity, unitCost,
 //                          itemId?, itemName?,
 //                          newItem?: { productId, code, description },
+//                          customerId?,
 //                          projectId?, newProject?: { parentCustomerId, displayName } }] }
+// Each line needs exactly one of: customerId (a real top-level QBO Customer
+// -- the Service Call PO path, added 2026-08-31, no Project involved at
+// all), projectId (an existing Job:true sub-Customer), or newProject (create
+// one). The Service Stock PO path uses projectId/newProject like any other
+// job -- its Opportunity is just always the fixed Service Stock id.
 // Order of operations, in one request:
 //   1. For each distinct opportunityId needing a new Project (no projectId
-//      given), create it in QBO, then upsert QBO_Project_Id__c on that
-//      Opportunity -- so the NEXT PO against the same job resolves instantly
-//      via the stored crosswalk instead of re-matching or duplicating.
+//      given, and no customerId either), create it in QBO, then upsert
+//      QBO_Project_Id__c on that Opportunity -- so the NEXT PO against the
+//      same job resolves instantly via the stored crosswalk instead of
+//      re-matching or duplicating.
 //   2. Also upsert QBO_Project_Id__c for opportunities that resolved to an
 //      EXISTING project the user picked manually (idempotent either way --
-//      memoizes the match regardless of how it was found).
+//      memoizes the match regardless of how it was found). A line carrying
+//      customerId skips this entirely -- it was never a Project, so there's
+//      nothing to memoize; every Service Call PO re-suggests fresh.
 //   3. For each distinct newItem (deduped by productId, so two lines for the
 //      same Salesforce product don't create two QBO Items), create it as a
 //      real Item -- per direction: an unmatched part gets a proper
@@ -379,31 +396,56 @@ purchaseOrders.post('/finance/purchase-orders', async (c) => {
       : [];
     if (clean.length === 0) return c.json({ error: 'At least one line is required' }, 400);
 
-    // Step 1/2 -- resolve one Project per distinct opportunityId in the line set.
+    // Step 1/2 -- resolve one QBO CustomerRef per distinct opportunityId in
+    // the line set. Two shapes, per line:
+    //   - `customerId` -- a real, TOP-LEVEL QBO Customer, no Project involved
+    //     at all. This is the Service Call PO path: posts directly against a
+    //     real customer (chosen via the same suggest-from-invoice-history
+    //     logic Create Invoice uses, GET /finance/po-customer-suggestions/:oppId
+    //     -- see materialReqs.js), never resolved/created as a Job:true
+    //     sub-Customer, and never written back to QBO_Project_Id__c -- it was
+    //     never a Project, so there's nothing to memoize; every Service Call
+    //     PO re-suggests fresh next time. Per direction 2026-08-31.
+    //   - `projectId` / `newProject` -- the original Job-PO behavior,
+    //     unchanged: resolve/create a Job:true sub-Customer and memoize the
+    //     crosswalk. Also what the Service Stock path uses under the hood
+    //     (its Opportunity is always the fixed Service Stock id, resolved the
+    //     same way any other job's Project is).
+    // A single opportunityId's lines are assumed to agree on which shape
+    // they use -- the frontend only ever produces one shape per opportunity
+    // per PO, same convention as the original per-opp project resolution.
     const oppIds = [...new Set(clean.map((l) => l.opportunityId))];
-    const resolvedProjectId = new Map(); // opportunityId -> QBO Customer Id
+    const resolvedCustomerRef = new Map(); // opportunityId -> QBO Customer Id (a Project OR a plain top-level Customer)
+    const projectOppIds = []; // subset of oppIds that actually went through Project resolution -- only these get the SF crosswalk write below
 
     for (const oppId of oppIds) {
       const line = clean.find((l) => l.opportunityId === oppId);
+      if (line.customerId) {
+        resolvedCustomerRef.set(oppId, line.customerId);
+        continue;
+      }
+      projectOppIds.push(oppId);
       if (line.projectId) {
-        resolvedProjectId.set(oppId, line.projectId);
+        resolvedCustomerRef.set(oppId, line.projectId);
         continue;
       }
       if (!line.newProject?.parentCustomerId || !line.newProject?.displayName) {
-        return c.json({ error: `Line for Opportunity ${oppId} has neither an existing projectId nor a complete newProject` }, 400);
+        return c.json({ error: `Line for Opportunity ${oppId} has none of customerId, an existing projectId, or a complete newProject` }, 400);
       }
       const created = await qbo.create('customer', {
         DisplayName: line.newProject.displayName,
         Job: true,
         ParentRef: { value: line.newProject.parentCustomerId },
       });
-      resolvedProjectId.set(oppId, created.Id);
+      resolvedCustomerRef.set(oppId, created.Id);
     }
 
-    // Memoize every resolution (existing-match or newly-created) back onto
-    // the Opportunity, regardless of source -- an idempotent write.
+    // Memoize every Project resolution (existing-match or newly-created) back
+    // onto the Opportunity -- an idempotent write. Only for opportunities
+    // that went through Project resolution at all; a direct customerId line
+    // never touches QBO_Project_Id__c.
     await Promise.all(
-      oppIds.map((oppId) => sf.updateRecord('Opportunity', oppId, { [f.oppQboProjectId]: resolvedProjectId.get(oppId) }))
+      projectOppIds.map((oppId) => sf.updateRecord('Opportunity', oppId, { [f.oppQboProjectId]: resolvedCustomerRef.get(oppId) }))
     );
 
     // Step 3 -- default expense account. Needed both as the account newly
@@ -444,7 +486,7 @@ purchaseOrders.post('/finance/purchase-orders', async (c) => {
     if (resolvedItemId.size) await invalidateItemsCache(c.env);
 
     const poLines = clean.map((l) => {
-      const customerRef = { value: resolvedProjectId.get(l.opportunityId) };
+      const customerRef = { value: resolvedCustomerRef.get(l.opportunityId) };
       const newItemResolved = l.newItem ? resolvedItemId.get(l.newItem.productId || l.newItem.code) : null;
       const itemId = l.itemId || newItemResolved?.id;
       const itemName = l.itemName || newItemResolved?.name;

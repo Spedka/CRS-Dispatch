@@ -55,6 +55,21 @@ NEW_WO_OPPORTUNITY_ID   = "006Uh00000v5szqIAA"
 # routes return a clear 500 rather than failing silently while this is unset.
 SERVICE_STOCK_OPPORTUNITY_ID = "006Uh00000xQHpfIAG"
 
+# The QBO Customer the Service Stock Opportunity's own PO destination
+# (Opportunity.QBO_Project_Id__c crosswalk) should resolve to — already a
+# real, existing top-level QBO Customer, not a Job:true sub-customer to be
+# created through the usual "new Project" flow. Per direction 2026-08-31:
+# the crosswalk field on the Service Stock Opportunity itself starts out
+# blank (nothing has written it yet, since Service Stock hasn't gone through
+# a real PO before), which made the Create PO wizard think no Project
+# existed and offer to create a redundant new one. GET /finance/po-source
+# falls back to this value whenever that field is empty specifically for
+# SERVICE_STOCK_OPPORTUNITY_ID — the very next Service Stock PO created then
+# writes it back onto the real Salesforce field via the same write-back path
+# every other Project resolution already uses (purchaseOrders.js), so this
+# fallback is only ever needed once, live.
+SERVICE_STOCK_QBO_CUSTOMER_ID = "5766"
+
 # Public URL of the chalkboard app — magic links from POST /api/tech-link point here.
 CHALKBOARD_APP_URL = "https://chalkboard.crsbas.workers.dev"
 
