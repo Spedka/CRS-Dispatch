@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
 import { api } from './routes.js';
 import { tv, internal } from './tv.js';
+import { tasks } from './tasks.js';
 import { runFsSync } from './fsSync.js';
+import { rollupUsage, purgeOldUsageEvents } from './usageRollup.js';
 import { getAuthSecret, resolveDeviceToken } from './auth.js';
 
 const app = new Hono();
@@ -22,6 +24,7 @@ app.use('/api/*', async (c, next) => {
 
 app.route('/api', api);
 app.route('/api', tv);
+app.route('/api', tasks);
 app.route('/internal', internal);
 
 export { TvChannel } from './tvChannel.js';
@@ -30,11 +33,20 @@ export default {
   // HTTP requests - handled by Hono as before.
   fetch: app.fetch.bind(app),
 
-  // Cron trigger - fires every 5 minutes (configure in wrangler.toml).
-  // Links unlinked FS tasks, syncs assignments, and refreshes the FS status
-  // snapshot the board's drift badge reads. No longer writes a status to
-  // either side - see statusMap.js header.
+  // Cron triggers (wrangler.toml [triggers]): "*/5 * * * *" runs both jobs
+  // below every tick; "0 3 * * *" additionally runs the daily usage purge,
+  // distinguished via event.cron since one scheduled() handler covers every
+  // configured pattern.
   async scheduled(event, env, ctx) {
+    // Links unlinked FS tasks, syncs assignments, and refreshes the FS
+    // status snapshot the board's drift badge reads. No longer writes a
+    // status to either side - see statusMap.js header.
     ctx.waitUntil(runFsSync(env));
+    // Idempotent recompute of the last 2 hours into usage_hourly_summary --
+    // see usageRollup.js. Cheap enough to run on every 5-minute tick.
+    ctx.waitUntil(rollupUsage(env));
+    // Trims raw usage_events past its retention window -- once/day only,
+    // see usageRollup.js's RETENTION_DAYS comment for why 120 days.
+    if (event.cron === '0 3 * * *') ctx.waitUntil(purgeOldUsageEvents(env));
   },
 };

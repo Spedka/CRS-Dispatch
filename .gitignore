@@ -17,10 +17,10 @@ npm-debug.log*
 .DS_Store
 .vscode/
 .idea/
-CLAUDE.md
-TODO.md
 _mock_preview.mjs
 .dev.vars
+# Stale entries -- none of these three exist anymore (verified 2026-09-01),
+# left as harmless no-ops rather than guessing whether removing them matters.
 fs-documents-investigation/
 TODO Dispatch Chalkboard.md
 CRS-Board-Docs/

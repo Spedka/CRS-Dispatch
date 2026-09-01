@@ -33,6 +33,10 @@ h1,h2{margin:0;}
 .tab{border:none;background:none;cursor:pointer;font:inherit;font-size:13.5px;font-weight:500;color:var(--ink-soft);padding:13px 16px 12px;border-bottom:2px solid transparent;margin-bottom:-1px;}
 .tab:hover{color:var(--ink);}
 .tab.active{color:var(--ink);border-bottom-color:var(--brand);font-weight:600;}
+/* CRS Schedule's own unresponded-task-invites count -- the amber "needs"
+   pairing (not the red emergency one) reads as "something's waiting on you"
+   without implying anything's actually wrong. */
+.tab-count-badge{display:inline-flex;align-items:center;justify-content:center;min-width:17px;height:17px;padding:0 5px;margin-left:6px;border-radius:999px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:700;color:var(--needs);background:var(--needs-bg);}
 
 main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
 
@@ -56,6 +60,7 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
 .job-collapsible-status-row{display:none;}
 .tech-week-list{display:none;}
 .quote-agenda-list{display:none;}
+.month-agenda-list{display:none;}
 
 /* Locked app-shell (no page bounce/zoom, each screen scrolls internally
    instead of the page) -- mobile/PWA-install only. Desktop keeps the
@@ -289,6 +294,26 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
      is already covered by the rule above -- only the agenda list's own
      display needs setting. */
   .quote-agenda-list{display:flex !important;flex-direction:column;gap:14px;padding:0 0 18px;}
+
+  /* CRS Schedule's Month view -> agenda list, same fix again (found live
+     2026-09-01 -- this one had no mobile treatment at all, .month never
+     even carried .sched-desktop, so it just rendered the full 7-column
+     grid squeezed into a phone width -- illegible pill fragments). */
+  .month-agenda-list{display:flex !important;flex-direction:column;gap:14px;padding:0 0 18px;}
+
+  /* CRS Schedule's toolbar (.crs-schedbar scopes this to that one schedbar
+     -- .schedbar/.fsel-wrap/.schedbar-daterow are all shared with the
+     Quotes tab's own calendar toolbar, untouched here). The filter picklist
+     used to only wrap to its own line once its label got too long to fit
+     next to the date ("All" fit, any real name didn't), landing wherever
+     flex-wrap happened to break -- and forcing the picklist itself to
+     flex-basis:100% (an earlier version of this fix) pushed the Week/Month
+     toggle down to a third row instead of letting it share the picklist's
+     row. Forcing the break on .schedbar-daterow instead gets both: nav
+     arrows + date always share row 1, and the picklist + toggle always
+     share row 2 together, left-aligned, since neither is wide enough to
+     need the row to itself. */
+  .crs-schedbar .schedbar-daterow{flex-basis:100%;}
 
   /* Billing reconciliation -- per direction 2026-08-30: the densest page in
      the app (an 8-9 column SF-vs-QBO-vs-Δ comparison table, for Billed AND
@@ -679,8 +704,40 @@ main{padding:24px 26px 60px;max-width:1500px;margin:0 auto;}
 .quote-agenda-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border:none;border-left:3px solid var(--scheduled);border-bottom:1px solid var(--line);background:transparent;cursor:pointer;text-align:left;font:inherit;width:100%;}
 .quote-agenda-row:last-child{border-bottom:none;}
 .quote-agenda-row[data-kind=review]{border-left-color:var(--needs);}
-.quote-agenda-kind{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-faint);flex-shrink:0;width:44px;}
+.quote-agenda-kind{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-faint);flex-shrink:0;white-space:nowrap;}
 .quote-agenda-name{flex:1;min-width:0;font-size:13px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* CRS Schedule's own row kinds within MonthAgendaList (App.jsx) -- job/off/
+   task share the row shape above but need the same per-kind color language
+   the desktop grid already uses (.dayjob[data-status]/.dayoff/.dayjob.task
+   etc.), not the due/review coloring those two rules above are for. A full
+   tinted background (not just the border-left every other kind here gets)
+   -- found live 2026-09-01, job/off rows read flat/identical next to each
+   other without it, nothing like how bold .dayoff/.offchip already look
+   elsewhere in this app. The kind label picks up the same color so it
+   reads as one clearly-colored unit instead of gray text floating next to
+   the WO name.
+   .agenda-job, not the bare .job every job card in Outstanding Jobs already
+   uses -- found live 2026-09-01, that collision was silently overriding
+   .quote-agenda-row's own display:flex with .job's display:grid;grid-
+   template-columns:4px 1fr (a completely unrelated 4px-stripe-plus-content
+   layout), squeezing the "Job" label into an unreadable 4px column with
+   the WO name painted over it. Exactly the kind of generic-class-name
+   collision this file's other comments already warn about. */
+.quote-agenda-row.agenda-job[data-status=emergency]{background:var(--emergency-bg);border-left-color:var(--emergency);}
+.quote-agenda-row.agenda-job[data-status=emergency] .quote-agenda-kind{color:var(--emergency);}
+.quote-agenda-row.agenda-job[data-status=needs]{background:var(--needs-bg);border-left-color:var(--needs);}
+.quote-agenda-row.agenda-job[data-status=needs] .quote-agenda-kind{color:var(--needs);}
+.quote-agenda-row.agenda-job[data-status=scheduled]{background:var(--scheduled-bg);border-left-color:var(--scheduled);}
+.quote-agenda-row.agenda-job[data-status=scheduled] .quote-agenda-kind{color:var(--scheduled);}
+.quote-agenda-row.agenda-job[data-status=dispatched]{background:var(--dispatched-bg);border-left-color:var(--dispatched);}
+.quote-agenda-row.agenda-job[data-status=dispatched] .quote-agenda-kind{color:var(--dispatched);}
+.quote-agenda-row.off{background:#EDE4F7;border-left-color:#B98FE0;}
+.quote-agenda-row.off .quote-agenda-kind{color:#6B3FA0;}
+.quote-agenda-row.task{background:var(--dispatched-bg);border-left-color:var(--dispatched);}
+.quote-agenda-row.task .quote-agenda-kind{color:var(--dispatched);}
+.quote-agenda-row.task.needs-response{background:var(--needs-bg);border-left-color:var(--needs);}
+.quote-agenda-row.task.needs-response .quote-agenda-kind{color:var(--needs);}
 
 .state{padding:48px;text-align:center;color:var(--ink-soft);}
 .state.err{color:var(--emergency);background:var(--emergency-bg);border-radius:var(--radius);}
@@ -807,6 +864,13 @@ td.open{background:var(--open-bg);}
 
 /* schedule toolbar */
 .schedbar{display:flex;align-items:center;gap:14px;margin-bottom:16px;flex-wrap:wrap;}
+/* Groups the nav arrows + date so the two can be forced onto their own
+   mobile row together (see the max-width:768px override) without also
+   dragging the filter picklist/Week-Month toggle down onto a third row --
+   see CRS Schedule's own .crs-schedbar comment there. Plain display:flex
+   here (not a bespoke layout) so desktop looks byte-identical to before
+   this wrapper existed. */
+.schedbar-daterow{display:flex;align-items:center;gap:14px;}
 .navbtns{display:flex;align-items:center;gap:6px;}
 .navbtn{font:inherit;font-size:13px;font-weight:600;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:6px 12px;cursor:pointer;color:var(--ink-soft);}
 .navbtn:hover{border-color:var(--ink-faint);color:var(--ink);}
@@ -934,6 +998,50 @@ td.open{background:var(--open-bg);}
 .done-toggle-mini:hover{color:var(--ink-soft);border-color:var(--ink-faint);}
 .done-toggle-mini[aria-expanded=true]{background:var(--surface-2);}
 
+/* CRS Schedule tasks (Dispatch_Task__c) -- office-user-only, same visual
+   grammar as the job chips/tiles above but a distinct accent (--dispatched,
+   otherwise unused as a base color here) so a task never reads as a job at
+   a glance, even collapsed to initials in Month view. needs-response is the
+   per-chip flag on the signed-in user's OWN pinned/highlighted items (see
+   WeekGrid/MonthGrid) -- the whole in-app half of task notifications, no
+   separate list UI. */
+.jchip.task{border-left:3px solid var(--dispatched);}
+.jchip.task .jtime{color:var(--dispatched);background:var(--dispatched-bg);}
+.jchip.task.needs-response{background:var(--needs-bg);border-color:var(--needs);}
+.jchip.task.needs-response .jtime{color:var(--needs);background:var(--surface);}
+.jchip.task.declined{opacity:.6;text-decoration:line-through;}
+
+.dayjob.task{border-left-color:var(--dispatched);}
+.dayjob.task.mine{background:var(--dispatched-bg);}
+.dayjob.task.needs-response{background:var(--needs-bg);border-left-color:var(--needs);}
+
+.tech-week-row.task{border-left-color:var(--dispatched);}
+.tech-week-row.task.needs-response{background:var(--needs-bg);border-left-color:var(--needs);}
+.tech-week-row.task.declined{opacity:.6;}
+
+/* Row-level "this is you" marker (WeekGrid's pinned row, TechWeekList's
+   matching card) -- just the purple tint, no separate "You" tag; position
+   (pinned to the top of Week view) already carries the meaning. */
+.mine-row .techcol,
+.tech-week-card.mine-row{background:var(--dispatched-bg);}
+
+/* Month view's own task-mine marking (no row to tint, so the tile itself
+   carries it -- .dayjob.task.mine above). */
+.dayjob.mine{border-left-width:4px;}
+
+.task-respond-row{display:flex;align-items:center;gap:10px;background:var(--needs-bg);border:1px solid var(--needs);border-radius:9px;padding:10px 12px;margin-bottom:14px;}
+.task-respond-label{flex:1;font-size:13px;font-weight:600;color:var(--needs);}
+
+.task-assignee-list{display:flex;flex-direction:column;gap:6px;margin:4px 0 14px;}
+.task-assignee-row{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;background:var(--surface-2);border-radius:7px;padding:6px 10px;}
+.task-assignee-row .task-assignee-status{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;color:var(--ink-faint);}
+.task-assignee-row.accepted .task-assignee-status{color:var(--open);}
+.task-assignee-row.declined .task-assignee-status{color:var(--emergency);}
+.task-assignee-row.invited .task-assignee-status{color:var(--needs);}
+
+.task-notes{margin-top:4px;}
+.notes-task-link{font-style:italic;}
+
 .dayoff{display:flex;align-items:center;gap:6px;font-size:11px;background:#EDE4F7;border-left:3px solid #B98FE0;border-radius:5px;padding:3px 7px;cursor:pointer;}
 .dayoff:hover{background:#E1D3F5;}
 .dayoff .jn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:#6B3FA0;}
@@ -1004,6 +1112,11 @@ td.open{background:var(--open-bg);}
 .notes-pop-title{font-size:13px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;}
 .notes-pop-job-tag{font-size:10.5px;font-weight:600;color:var(--scheduled);background:var(--scheduled-bg);border-radius:999px;padding:2px 8px;flex-shrink:0;white-space:nowrap;}
 .notes-pop-preview{font-size:12px;color:var(--ink-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* JobNotesBadge's own "+ Add note" footer row -- always present (unlike the
+   list above it, which can be empty), so a job/quote with zero notes still
+   has a one-click way to add its first one straight from the badge. */
+.notes-pop-add{flex-shrink:0;font:inherit;font-size:12.5px;font-weight:600;color:var(--brand);background:var(--surface);border:none;border-top:1px solid var(--line);padding:10px 12px;cursor:pointer;text-align:left;}
+.notes-pop-add:hover{background:var(--surface-2);}
 
 .modal.modal-notes{max-width:640px;}
 .modal.modal-notes .modal-body{gap:14px;}
@@ -1068,9 +1181,33 @@ td.open{background:var(--open-bg);}
    on children here and only the group as a whole gets the auto margin. */
 .quote-actions{display:flex;gap:8px;margin-left:auto;}
 .quote-actions .job-notes-wrap{margin-left:0;}
+
+/* Outstanding Jobs row -- +Invoice / +PO / Notes as one flush-right cluster,
+   same reasoning/technique AND same gap value as .quote-actions above (each
+   of the three otherwise carries its own margin-left:auto via
+   .inv-badge/.job-notes-wrap, which splits the row's free space three ways
+   instead of grouping them) -- per direction 2026-08-31, matched byte-for-
+   byte to .quote-actions rather than an arbitrary tighter value. */
+.job-row-actions{display:flex;align-items:center;gap:8px;margin-left:auto;}
+.job-row-actions .job-row-invoice-btn,
+.job-row-actions .job-row-po-btn,
+.job-row-actions .job-notes-wrap{margin-left:0;}
+/* Second most important thing on a quote row after its own name -- per
+   direction 2026-08-31, deliberately NOT the same small muted style as the
+   rest of .meta's secondary details (due date, review deadline, account) --
+   sits directly next to .jname instead, sized/weighted close to it and
+   colored to stand out at a glance. */
+.quote-quoted-by-badge{font-size:13.5px;font-weight:700;color:var(--brand);background:#E6F4EC;border:1px solid #A9D9BF;border-radius:7px;padding:3px 11px;flex-shrink:0;}
 /* Same due/review color coding as the Quotes calendar's .dayjob[data-kind=...]. */
 .quote-due{color:var(--scheduled);}
 .quote-review-deadline{color:var(--needs);}
+/* Read-only mirror of the real Ready_For_Review__c/Sent_To_Customer__c
+   checkbox fields, per direction 2026-08-31 -- state only, not directly
+   editable (see the comment above each usage in App.jsx for why). Checked
+   state still reads clearly even though the input itself is disabled. */
+.quote-checkbox-field{display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink-faint);cursor:default;}
+.quote-checkbox-field input[type="checkbox"]{accent-color:var(--brand);cursor:default;}
+.quote-checkbox-field:has(input:checked){color:var(--ink-soft);}
 /* Calendar-mode-only key explaining the due/review dot colors above the grid. */
 .quote-cal-legend{display:flex;gap:16px;margin-bottom:10px;font-size:12px;color:var(--ink-soft);}
 .quote-cal-legend-item{display:inline-flex;align-items:center;gap:6px;}
@@ -1876,3 +2013,103 @@ td.open{background:var(--open-bg);}
    fine there, so it keeps the familiar tabular layout instead of stacking. */
 .donut-popover-lines.full{table-layout:auto;font-size:13px;}
 .donut-popover-lines.full td{padding:6px 8px;border-bottom:1px solid var(--line);color:var(--ink-soft);word-break:normal;overflow-wrap:break-word;}
+
+/* Print: Tech Schedule (App.jsx's Schedule/WeekGrid/MonthGrid). Everything
+   else here -- header, tab bar, schedbar's own controls, the unscheduled-
+   opportunities side panel -- is app chrome that has no business on a
+   printed page. This is what actually determines what prints, whether it's
+   triggered by the Schedule tab's own "Print" button (window.print(), no
+   special handling needed) or a bare Ctrl/Cmd+P with no button involved at
+   all -- browsers apply @media print on any print trigger regardless of
+   source. Scoped to whichever grid (Week or Month) happens to be mounted;
+   only one ever is (Schedule's own mode ? WeekGrid : MonthGrid), so there's
+   nothing to hide/show between them here. */
+@media print {
+  /* THE likely cause of a schedule getting cut off rather than spanning
+     multiple pages: the mobile locked-shell rule above pins html/body/#root
+     to overflow:hidden + position:fixed + height:100% under max-width:768px.
+     Some print engines evaluate non-print media queries against the actual
+     window width even while rendering a print job -- if that lock is
+     active, anything past one screen-height of content is clipped, not
+     paginated, no matter how tall the real content is. Print must always
+     get plain, unconstrained page flow regardless of what the screen-only
+     lock is doing, so this unconditionally overrides it. */
+  html, body, #root {
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    position: static !important;
+  }
+  #root { display: block !important; }
+  main { overflow: visible !important; }
+
+  .topline, header.bar, nav.tabs, .view-head-actions,
+  .navbtns, .schedbar .fsel-trigger, .schedbar .seg,
+  .closed-months-panel, .toast { display: none !important; }
+
+  body, main { background: #fff; }
+  main { padding: 0; max-width: none; margin: 0; }
+
+  .schedule-layout { display: block; }
+  .schedule-main { width: 100%; }
+
+  .rangelabel { font-size: 20px; }
+
+  /* Force the desktop table regardless of the print engine's own notion of
+     viewport width -- printing shouldn't silently fall back to the mobile
+     one-card-per-tech list (.tech-week-list, hidden here) just because the
+     window happened to be narrow when Ctrl+P was pressed. Same !important
+     posture as the mobile media query's own swap of these two, above. */
+  .sched-desktop { display: block !important; }
+  .tech-week-list { display: none !important; }
+
+  .grid-wrap { border: none; box-shadow: none; overflow: visible; height: auto !important; max-height: none !important; }
+
+  /* Fixed layout instead of content-sized columns: with enough techs or
+     jobs, letting a column grow to fit its widest content (a long job name,
+     several stacked chips) can push the whole table wider than the printed
+     page, clipping the rightmost day(s) off the page entirely instead of
+     wrapping. A fixed width per column forces every cell's content to wrap
+     within its own column instead, however full it gets. */
+  .sched { width: 100%; table-layout: fixed; }
+  .techcol { position: static; width: 100px; } /* sticky is meaningless once there's no scroll container to stick within, and can misplace the column when printed; narrower than screen's 150px min to leave more room for the 7 day columns */
+  .sched td, .sched th { overflow-wrap: break-word; padding: 6px 7px; }
+
+  /* .jchip/.offchip are a flex ROW on screen (time badge beside the job
+     text) -- fine there since the column is however wide it needs to be,
+     but a fixed print column has nowhere near enough width for both side by
+     side, so the text was getting squeezed into the sliver left over and
+     wrapping one word (sometimes one syllable) per line. Stacking the badge
+     above the text instead gives the text the column's FULL width to wrap
+     into, which is what was actually needed, not a smaller font or a
+     narrower badge. */
+  .jchip, .offchip {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 4px 6px;
+    font-size: 10.5px;
+    line-height: 1.3;
+  }
+
+  /* Repeats the day-of-week header row on every printed page, not just the
+     first -- without this a schedule that spans more than one page loses
+     its column headers past page 1. */
+  .sched thead { display: table-header-group; }
+
+  /* Status/today/time-off cell backgrounds (.todaycol, .offcol, etc.) only
+     print at all if the browser's own "background graphics" print option is
+     on -- can't force that from CSS, but this at least stops the browser's
+     own color-simplification from overriding it when the option IS on. */
+  .sched th, .sched td { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  /* Keeps one row's content together where possible, but this is a best-
+     effort hint, not a hard constraint -- a single row taller than a full
+     page (an extreme edge case) still flows/overflows onto the next page
+     rather than clipping, per spec engines fall back to breaking when a row
+     genuinely can't fit on any one page. Both properties set for the widest
+     print-engine support. */
+  tr { break-inside: avoid; page-break-inside: avoid; }
+
+  @page { size: landscape; margin: 12mm; }
+}

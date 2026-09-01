@@ -14,7 +14,10 @@ not_found_handling = "single-page-application"
 run_worker_first = ["/api/*", "/internal/*"]
 
 [triggers]
-crons = ["*/5 * * * *"]
+# "*/5 * * * *": FS sync + usage-summary rollup, every 5 min (worker.js's
+# scheduled()). "0 3 * * *": additionally runs the daily raw usage_events
+# retention purge (usageRollup.js) on that same tick.
+crons = ["*/5 * * * *", "0 3 * * *"]
 
 # Holds a live WebSocket per connected /tv screen so job/assignment/request
 # changes push an instant "refresh" instead of relying on the TV's own poll

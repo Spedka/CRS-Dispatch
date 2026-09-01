@@ -4,7 +4,7 @@
 // change-password + a fire-and-forget usage tracker.
 
 const TOKEN_KEY = 'dispatch_token';
-const USER_KEY = 'dispatch_user'; // JSON: { name, email, isAdmin }
+const USER_KEY = 'dispatch_user'; // JSON: { id, name, email, isAdmin }
 
 export const getToken = () => localStorage.getItem(TOKEN_KEY);
 export const getUser = () => {
@@ -14,8 +14,23 @@ export const isAdmin = () => !!getUser()?.isAdmin;
 
 const setSession = (data) => {
   localStorage.setItem(TOKEN_KEY, data.token);
-  localStorage.setItem(USER_KEY, JSON.stringify({ name: data.name, email: data.email, isAdmin: data.isAdmin }));
+  localStorage.setItem(USER_KEY, JSON.stringify({ id: data.id, name: data.name, email: data.email, isAdmin: data.isAdmin }));
 };
+
+// Self-heals a session stored before `id` was added to the login response
+// (found live 2026-09-01 -- every "is this me" comparison since had been
+// silently comparing against undefined) without forcing a re-login. Cheap
+// to call unconditionally on app load; no-ops once `id` is already present.
+export async function refreshUserId() {
+  const user = getUser();
+  if (!user || user.id) return;
+  try {
+    const res = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${getToken() ?? ''}` } });
+    if (!res.ok) return;
+    const me = await res.json();
+    localStorage.setItem(USER_KEY, JSON.stringify({ id: me.id, name: me.name, email: me.email, isAdmin: me.isAdmin }));
+  } catch { /* best-effort -- next real login fixes it regardless */ }
+}
 
 // Patch window.fetch ONCE so relative /api + /auth requests attach the token,
 // and an expired/revoked token (401) drops the session and returns to login.

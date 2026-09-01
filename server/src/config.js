@@ -96,6 +96,15 @@ export const config = {
     // DateTime field - internal review deadline, shown alongside oppBidDate
     // and used to place a second calendar entry for a quote.
     oppReviewDeadline: 'Review_Deadline__c',
+    // Lookup -> User, label "Quoted By" (real field, confirmed live 2026-08-31
+    // via Opportunity describe -- not something this app previously knew
+    // about). Used only by the Quotes tab. 100% filled on every real
+    // quote-pipeline Opportunity sampled (2,259/2,259 on the legacy
+    // Project_Status__c field) -- Service Call's own quote-stage bucket is
+    // too small a sample to confirm the same fill rate there, so the
+    // frontend still treats a null value as a normal, expected case.
+    oppQuotedBy: 'Quoted_By__c',
+    oppQuotedByRelationship: 'Quoted_By__r',
 
     // ---- Field Squared integration ----
     // External ID field on Opportunity - Text(50), External ID, Unique.
@@ -191,7 +200,7 @@ export const config = {
     resultingAssignment: 'Resulting_Assignment__c',
   },
 
-  // ---- Dispatch_Note__c (shared team notes, optionally linked to a job) ----
+  // ---- Dispatch_Note__c (shared team notes, optionally linked to a job or a task) ----
   dispatchNote: {
     sobject: 'Dispatch_Note__c',
     body: 'Body__c',
@@ -200,6 +209,50 @@ export const config = {
     // Mirrors whether `opportunity` is set - driven entirely by the picker in
     // the UI (see NoteEditModal in App.jsx), never toggled independently.
     opportunitySpecific: 'Opportunity_Specific__c',
+    task: 'Task__c',                           // lookup -> Dispatch_Task__c
+    taskRelationship: 'Task__r',
+  },
+
+  // ---- Dispatch_Task__c (CRS Schedule's office task/event system) ----
+  dispatchTask: {
+    sobject: 'Dispatch_Task__c',
+    name: 'Name',                    // the task's own title, Text not Auto Number
+    description: 'Description__c',
+    startDate: 'Start_Date__c',
+    startTime: 'Start_Time__c',
+    endDate: 'End_Date__c',
+    endTime: 'End_Time__c',
+    status: 'Status__c',             // picklist: Open | Completed | Cancelled
+    opportunity: 'Opportunity__c',   // lookup -> Opportunity, optional
+    opportunityRelationship: 'Opportunity__r',
+    // Checkbox, default unchecked -- added 2026-09-01. Doesn't add a new
+    // date/time field of its own; when true, Start_Date__c/Start_Time__c
+    // are reused as "Due Date"/"Time Due" and End_Date__c/End_Time__c are
+    // just never set (see AddTaskModal/TaskDetailModal in App.jsx) -- purely
+    // a display-mode flag, not a new field to add on the SF side beyond
+    // itself.
+    timeSensitive: 'Time_Sensitive__c',
+  },
+
+  // ---- Dispatch_Task_Assignee__c (one row per office user invited to a task) ----
+  taskAssignee: {
+    sobject: 'Dispatch_Task_Assignee__c',
+    task: 'Task__c',
+    // Child Relationship Name on the Task__c lookup, used from the
+    // Dispatch_Task__c side (a subquery, listing a task's own assignees) -
+    // confirmed live 2026-09-01 the real org left this at Salesforce's own
+    // auto-generated default (Dispatch_Task_Assignees__r) rather than the
+    // shorter Task_Assignees__r originally asked for in Setup - fixed here
+    // instead of asking for a Setup change, since the name itself is
+    // arbitrary either way. taskParentRelationship is the reverse direction
+    // (the default name either way, so nothing to confirm there) - from an
+    // assignee row up to its one task, used by GET /tasks/my-invites.
+    taskChildRelationship: 'Dispatch_Task_Assignees__r',
+    taskParentRelationship: 'Task__r',
+    user: 'User__c',                 // lookup -> User
+    userRelationship: 'User__r',
+    responseStatus: 'Response_Status__c', // picklist: Invited | Accepted | Declined
+    respondedAt: 'Responded_At__c',
   },
 
   // ---- Account (the building/property Accounts tab reads/writes) ----

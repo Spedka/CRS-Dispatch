@@ -128,11 +128,11 @@ export const api = {
 
   getNotes: () => fetch('/api/notes').then(j),
 
-  addNote: (text, opportunityId) =>
+  addNote: (text, opportunityId, taskId) =>
     fetch('/api/notes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, opportunityId: opportunityId || null }),
+      body: JSON.stringify({ text, opportunityId: opportunityId || null, taskId: taskId || null }),
     }).then(j),
 
   updateNote: (id, fields) =>
@@ -278,5 +278,41 @@ export const api = {
     for (const [k, v] of Object.entries(opts)) if (v != null && v !== '') p.set(k, String(v));
     return fetch(`/api/finance/reconciliation?${p}`).then(j);
   },
+
+  // ---- CRS Schedule: office tasks/events (Dispatch_Task__c) ----
+  // Lean {id, name, email, isAdmin} list, no admin gate, no password -- the
+  // task-assignee picker's data source. Distinct from getOfficeUsers() above
+  // (admin-only, includes passwords, for the Manage panel).
+  getOfficeUserDirectory: () => fetch('/api/office-users/directory').then(j),
+
+  getTasks: (start, end) =>
+    fetch(`/api/tasks?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`).then(j),
+
+  createTask: (body) =>
+    fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(j),
+
+  updateTask: (id, body) =>
+    fetch(`/api/tasks/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(j),
+
+  cancelTask: (id) => fetch(`/api/tasks/${id}`, { method: 'DELETE' }).then(j),
+
+  respondToTask: (id, response) =>
+    fetch(`/api/tasks/${id}/respond`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ response }),
+    }).then(j),
+
+  // Drives the CRS Schedule tab badge -- see tasks.js's own comment on why
+  // there's no separate "Invites" list UI consuming this.
+  getMyTaskInvites: () => fetch('/api/tasks/my-invites').then(j),
 
 };

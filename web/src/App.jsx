@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from './api.js';
-import { getUser, login as authLogin, logout as authLogout, changePassword as authChangePassword, track as trackUsage } from './auth.js';
+import { getUser, refreshUserId, login as authLogin, logout as authLogout, changePassword as authChangePassword, track as trackUsage } from './auth.js';
 
 // Map your real status strings to a color treatment. Unknown -> neutral.
 const STATUS_CLASS = {
@@ -39,6 +39,25 @@ const loadViewState = () => {
 // comes from Field Squared; "Project Complete" can also be set from the dropdown
 // below (see ASSIGNABLE_STATUSES).
 const TERMINAL_STATUSES = ['Billing Complete', 'Project Complete'];
+
+// A handful of real status values are the same underlying concept, spelled
+// differently across two different live Salesforce picklists (legacy/Job/
+// Work_Order's Project_Status__c vs Service_Call's Service_Status__c /
+// Test_Inspection's Inspection_Status__c) -- not just a casing difference
+// (like "Ready to be Scheduled" vs "Ready to be scheduled", handled by the
+// plain .toLowerCase() grouping below on its own) but a genuinely different
+// word. Per direction 2026-08-31: "Installation Completed" (Project_Status__c)
+// and "Completed" (Service_Status__c/Inspection_Status__c) both mean the job
+// is done, so the Outstanding Jobs status filter groups them into one chip.
+// Purely a display/filter-grouping concern -- the real stored SF value on
+// any given job is untouched.
+const STATUS_ALIASES = {
+  'installation completed': 'completed',
+};
+const canonicalStatusKey = (status) => {
+  const lower = (status || '').toLowerCase();
+  return STATUS_ALIASES[lower] || lower;
+};
 
 // Everything that stays on the board (mirrors config.jobStatusValues) - for
 // legacy / Job / Work_Order jobs on Project_Status__c.
@@ -130,6 +149,15 @@ function jobCategory(job) {
   if (rt) return rt;                                        // real record type wins
   return OPP_TYPE_CATEGORY[job.opportunityType] || 'Job';   // else explicit map, default Job
 }
+
+// CRS Schedule's MonthAgendaList kind label -- a real Job reads "Job", a
+// Service Call reads "WO" (that's what the office actually calls them,
+// same "WO ####" naming already in every job's own Name), Test & Inspection
+// reads "T&I". Monitoring/Other fall back to "Job" -- neither should
+// realistically reach the schedule (Monitoring is excluded from the board
+// query entirely, Other isn't a field-visit type), but a plain default
+// beats a blank label if one somehow does.
+const AGENDA_JOB_KIND_LABEL = { 'Job': 'Job', 'Service Call': 'WO', 'Test & Inspection': 'T&I' };
 
 // Display label for a subtype inside the Type filter's submenu. Service Call
 // subtypes strip the redundant "Service - " / "Service/" prefix so they read
@@ -300,6 +328,11 @@ const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); retur
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 const startOfWeek = (d) => { const x = startOfDay(d); x.setDate(x.getDate() - x.getDay()); return x; }; // Sunday start
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+// CRS Schedule tasks can span multiple days (Start_Date__c..End_Date__c) --
+// this walks that range one ISO day at a time so a multi-day task gets a
+// chip on each day it covers, same "one entry per real day" idea the rest
+// of this grid already uses for jobs (which are always single-day).
+const addIsoDays = (iso, n) => isoOf(addDays(new Date(`${iso}T00:00:00`), n));
 const dateOnlyISO = (iso) => iso && typeof iso === 'string' ? iso.slice(0, 10) : null;
 const initials = (name) => name ? name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase() : '?';
 
@@ -416,7 +449,7 @@ function SyncedAgo({ lastSync }) {
 // App, and fsLinkForJob/pendingAddForJob collapse to `null` for every row
 // except the one with a panel open (see the .map() call site in App).
 const JobCard = React.memo(function JobCard({
-  job, readOnly, techs, fsLinkForJob, pendingAddForJob, jobNotes, onOpenNote, onDeleteNote,
+  job, readOnly, techs, fsLinkForJob, pendingAddForJob, jobNotes, onOpenNote, onDeleteNote, onNewNote,
   onToggleDone, onAssignmentDateChange, onAssignmentTimeChange, onAssignmentEndTimeChange, onUnassign, onAssign,
   onSetStatus, onOpenFsLink, onCloseFsLink, onFsLinkChange, onPendingAddChange,
   onSearchFs, onConfirmFsLink,
@@ -485,9 +518,17 @@ const JobCard = React.memo(function JobCard({
               : <span className="fs-badge unlinked" title="No Field Squared task linked">⬡ FS</span>}
             <FsDriftBadge job={job} />
             <span className={`badge ${statusClass(job.status)}`}>{job.status}</span>
-            {invoiceBtn}
-            {poBtn}
-            {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
+            {/* Grouped so the three cluster together flush right, in this
+                left-to-right order, instead of each fighting over its own
+                margin-left:auto (three auto margins split the row's free
+                space three ways instead of pushing the group together as a
+                unit) -- per direction 2026-08-31. Same technique QuotesTab's
+                .quote-actions already uses. */}
+            <div className="job-row-actions">
+              {invoiceBtn}
+              {poBtn}
+              {onNewNote && <JobNotesBadge notes={jobNotes || []} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} opportunityId={job.id} opportunityName={job.name} onNewNote={onNewNote} />}
+            </div>
             {/* Mobile-only (styles.css) -- desktop always shows everything
                 below already, this toggle is a no-op there. Per direction
                 2026-08-28: show just the name/status "top part" of a job
@@ -545,9 +586,11 @@ const JobCard = React.memo(function JobCard({
             triggerClassName={`statussel-pill job-row-status ${statusClass(job.status)}`}
             ariaLabel="Job status"
           />
-          {invoiceBtn}
-          {poBtn}
-          {jobNotes?.length > 0 && <JobNotesBadge notes={jobNotes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} />}
+          <div className="job-row-actions">
+            {invoiceBtn}
+            {poBtn}
+            {onNewNote && <JobNotesBadge notes={jobNotes || []} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} opportunityId={job.id} opportunityName={job.name} onNewNote={onNewNote} />}
+          </div>
           {/* Mobile-only (styles.css) -- see the readOnly branch above for
               the full reasoning. The FS-attach panel below is deliberately
               kept OUTSIDE .job-collapsible -- it's rendered from a user just
@@ -733,6 +776,12 @@ const JobCard = React.memo(function JobCard({
 // app cleanly; logging out unmounts it.
 export default function App() {
   const [user, setUser] = useState(() => getUser());
+  // Backfills `id` into a session stored before the login response carried
+  // it (see auth.js) -- a no-op once it's already present, so safe to fire
+  // unconditionally on every mount rather than only right after login.
+  useEffect(() => {
+    if (user && !user.id) refreshUserId().then(() => setUser(getUser()));
+  }, [user]);
   if (!user) return <DispatchLogin onLoggedIn={() => setUser(getUser())} />;
   return <DispatchApp user={user} onLoggedOut={() => { authLogout(); setUser(null); }} />;
 }
@@ -825,6 +874,12 @@ function DispatchApp({ user, onLoggedOut }) {
   const [jobs, setJobs] = useState([]);
   const [techs, setTechs] = useState([]);
   const [notes, setNotes] = useState([]);
+  // CRS Schedule's tab badge -- the signed-in user's own unresponded task
+  // invites, independent of whatever date range Schedule itself has visible
+  // (unlike Schedule's own `tasks` state, which is range-scoped and lives
+  // entirely inside that component). See tasks.js's own comment on why this
+  // drives a plain badge count instead of a dedicated list UI.
+  const [myInvites, setMyInvites] = useState([]);
   const [editingNote, setEditingNote] = useState(null);
   const [filter, setFilter] = useState(() => loadViewState().filter ?? 'all');
   const [query, setQuery] = useState(() => loadViewState().query ?? '');
@@ -911,6 +966,17 @@ function DispatchApp({ user, onLoggedOut }) {
     }
   }, []);
 
+  // Same fire-and-forget, console-only-on-failure posture as loadNotes above
+  // -- a badge count is ancillary, shouldn't take down the primary load.
+  const loadMyInvites = useCallback(async () => {
+    try {
+      const { invites } = await api.getMyTaskInvites();
+      setMyInvites(invites);
+    } catch (e) {
+      console.error('[tasks] my-invites load failed', e);
+    }
+  }, []);
+
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     setError(null);
@@ -925,7 +991,8 @@ function DispatchApp({ user, onLoggedOut }) {
       if (!silent) setLoading(false);
     }
     loadNotes();
-  }, [loadNotes]);
+    loadMyInvites();
+  }, [loadNotes, loadMyInvites]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -942,11 +1009,31 @@ function DispatchApp({ user, onLoggedOut }) {
     return m;
   }, [notes]);
 
+  // Same idea, keyed by task instead of job -- CRS Schedule's TaskDetailModal.
+  const notesByTaskId = useMemo(() => {
+    const m = new Map();
+    for (const n of notes) {
+      if (!n.taskId) continue;
+      if (!m.has(n.taskId)) m.set(n.taskId, []);
+      m.get(n.taskId).push(n);
+    }
+    return m;
+  }, [notes]);
+
   // Single shared NoteEditModal instance -- both the header Notes menu and
   // each job card's notes badge open the same note-editing flow through this
   // one piece of state, rather than each owning its own modal.
-  const openNewNote = useCallback((opportunityId, opportunityName) => {
-    setEditingNote({ id: null, text: '', opportunityId: opportunityId || null, opportunityName: opportunityName || null, isNew: true });
+  // taskId/taskName are optional and additive -- every existing caller (job
+  // notes badges, the header Notes menu) still calls this with just the
+  // first two args, leaving a task-linked note untouched, same "one shared
+  // modal, driven by whatever state it's opened with" shape as the
+  // Opportunity link already has. See CRS Schedule's TaskDetailModal.
+  const openNewNote = useCallback((opportunityId, opportunityName, taskId, taskName) => {
+    setEditingNote({
+      id: null, text: '', isNew: true,
+      opportunityId: opportunityId || null, opportunityName: opportunityName || null,
+      taskId: taskId || null, taskName: taskName || null,
+    });
   }, []);
   const openNote = useCallback((note) => { setEditingNote({ ...note, isNew: false }); }, []);
   const afterNoteChange = useCallback(() => { setEditingNote(null); loadNotes(); }, [loadNotes]);
@@ -1608,10 +1695,28 @@ function DispatchApp({ user, onLoggedOut }) {
     });
   }, [jobs, query, jobTech, jobType, jobFsStatus, closedFrom, closedTo]);
 
+  // Grouped by canonicalStatusKey -- the same conceptual status can have two
+  // different real spellings across record types (a casing difference like
+  // "Ready to be scheduled" vs "Ready to be Scheduled", or a genuinely
+  // different word like "Installation Completed" vs "Completed" -- see
+  // STATUS_ALIASES above) -- shown as one filter chip instead of two
+  // near-identical ones. `key` is what filter/setFilter actually store;
+  // `label` keeps whichever real spelling sorts first, purely for display,
+  // so the chip text doesn't flicker between the two depending on which job
+  // happened to load first.
   const statuses = useMemo(() => {
-    const set = new Map();
-    filteredJobs.forEach((j) => set.set(j.status, (set.get(j.status) || 0) + 1));
-    return [['all', filteredJobs.length], ...set.entries()];
+    const set = new Map(); // canonical key -> { label, count }
+    filteredJobs.forEach((j) => {
+      const key = canonicalStatusKey(j.status);
+      const cur = set.get(key);
+      if (cur) {
+        cur.count++;
+        if (j.status < cur.label) cur.label = j.status;
+      } else {
+        set.set(key, { label: j.status, count: 1 });
+      }
+    });
+    return [['all', filteredJobs.length, 'All outstanding'], ...[...set.entries()].map(([key, v]) => [key, v.count, v.label])];
   }, [filteredJobs]);
 
   const viewingTerminal = TERMINAL_STATUSES.includes(filter);
@@ -1620,7 +1725,7 @@ function DispatchApp({ user, onLoggedOut }) {
     const q = query.trim().toLowerCase();
     const source = viewingTerminal ? extraJobs : jobs;
     const filtered = source.filter((j) => {
-      if (!(filter === 'all' || j.status === filter)) return false;
+      if (!(filter === 'all' || canonicalStatusKey(j.status) === canonicalStatusKey(filter))) return false;
       if (!(q === '' || j.name.toLowerCase().includes(q) || (j.address || '').toLowerCase().includes(q))) return false;
       if (jobTech === 'unassigned' && j.assignments.length > 0) return false;
       if (jobTech !== 'all' && jobTech !== 'unassigned'
@@ -1719,7 +1824,9 @@ function DispatchApp({ user, onLoggedOut }) {
 
       <nav className="tabs">
         <button className={`tab ${tab === 'jobs' ? 'active' : ''}`} onClick={() => setTab('jobs')}>Outstanding Jobs</button>
-        <button className={`tab ${tab === 'schedule' ? 'active' : ''}`} onClick={() => setTab('schedule')}>Tech Schedule</button>
+        <button className={`tab ${tab === 'schedule' ? 'active' : ''}`} onClick={() => setTab('schedule')}>
+          CRS Schedule{myInvites.length > 0 && <span className="tab-count-badge">{myInvites.length}</span>}
+        </button>
         <button className={`tab ${tab === 'requests' ? 'active' : ''}`} onClick={() => setTab('requests')}>Requests</button>
         <button className={`tab ${tab === 'contacts' ? 'active' : ''}`} onClick={() => setTab('contacts')}>Contacts</button>
         <button className={`tab ${tab === 'accounts' ? 'active' : ''}`} onClick={() => setTab('accounts')}>Accounts</button>
@@ -1877,9 +1984,9 @@ function DispatchApp({ user, onLoggedOut }) {
                 original chip row untouched; only one of these two ever
                 shows at a time (styles.css). */}
             <div className="filters filters-desktop">
-              {statuses.map(([s, count]) => (
-                <button key={s} className={`chip ${filter === s ? 'on' : ''}`} onClick={() => setFilter(s)}>
-                  {s === 'all' ? 'All outstanding' : s}<span className="ct">{count}</span>
+              {statuses.map(([key, count, label]) => (
+                <button key={key} className={`chip ${filter === key ? 'on' : ''}`} onClick={() => setFilter(key)}>
+                  {label}<span className="ct">{count}</span>
                 </button>
               ))}
               <span className="chipdiv" />
@@ -1895,7 +2002,7 @@ function DispatchApp({ user, onLoggedOut }) {
                 onChange={setFilter}
                 ariaLabel="Filter by status"
                 options={[
-                  ...statuses.map(([s, count]) => [s, s === 'all' ? `All outstanding (${count})` : `${s} (${count})`]),
+                  ...statuses.map(([key, count, label]) => [key, `${label} (${count})`]),
                   ...TERMINAL_STATUSES.map((s) => [s, `${s}${filter === s && !extraLoading ? ` (${shown.length})` : ''}`]),
                 ]}
               />
@@ -1915,6 +2022,7 @@ function DispatchApp({ user, onLoggedOut }) {
                   jobNotes={notesByJobId.get(job.id) || []}
                   onOpenNote={openNote}
                   onDeleteNote={deleteNote}
+                  onNewNote={openNewNote}
                   onToggleDone={toggleDone}
                   onAssignmentDateChange={setAssignmentDate}
                   onAssignmentTimeChange={setAssignmentTime}
@@ -1935,7 +2043,13 @@ function DispatchApp({ user, onLoggedOut }) {
           </section>
         )}
 
-        {!loading && !error && tab === 'schedule' && <Schedule jobs={jobs} techs={techs} onJobClick={setSelectedJobId} onAssign={assign} />}
+        {!loading && !error && tab === 'schedule' && (
+          <Schedule
+            jobs={jobs} techs={techs} onJobClick={setSelectedJobId} onAssign={assign}
+            user={user} onTaskChange={loadMyInvites}
+            notesByTaskId={notesByTaskId} onOpenNote={openNote} onNewNote={openNewNote} onDeleteNote={deleteNote}
+          />
+        )}
         {tab === 'requests' && (
           <RequestsTab
             requests={scheduleRequests}
@@ -1981,6 +2095,10 @@ function DispatchApp({ user, onLoggedOut }) {
             users={emailUsers}
             usersLoaded={emailUsersLoaded}
             onLoadUsers={loadEmailUsers}
+            notesByJobId={notesByJobId}
+            onOpenNote={openNote}
+            onNewNote={openNewNote}
+            onDeleteNote={deleteNote}
           />
         )}
         {tab === 'parts' && (
@@ -2248,7 +2366,7 @@ function noteTitleAndPreview(text) {
 // .notes-pop* styling); clicking a note in that popup hands off to the same
 // shared NoteEditModal the header Notes menu uses (via onOpenNote, passed
 // down from App) -- there's a single modal instance, not one per badge.
-function JobNotesBadge({ notes, onOpenNote, onDeleteNote }) {
+function JobNotesBadge({ notes, onOpenNote, onDeleteNote, opportunityId, opportunityName, onNewNote }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
   const popRef = useRef(null);
@@ -2315,6 +2433,7 @@ function JobNotesBadge({ notes, onOpenNote, onDeleteNote }) {
           style={{ left: pos.left, maxHeight: pos.maxHeight, ...(pos.bottom != null ? { bottom: pos.bottom } : { top: pos.top }) }}
         >
           <div className="notes-pop-list">
+            {notes.length === 0 && <div className="notes-pop-empty">No notes yet.</div>}
             {notes.map((note) => {
               const { title, preview } = noteTitleAndPreview(note.text);
               return (
@@ -2337,6 +2456,15 @@ function JobNotesBadge({ notes, onOpenNote, onDeleteNote }) {
               );
             })}
           </div>
+          {onNewNote && (
+            <button
+              type="button"
+              className="notes-pop-add"
+              onClick={(e) => { e.stopPropagation(); setOpen(false); onNewNote(opportunityId, opportunityName); }}
+            >
+              + Add note
+            </button>
+          )}
         </div>,
         document.body
       )}
@@ -2498,9 +2626,9 @@ function NoteEditModal({ note, jobs, onSaved, onDeleted, onClose }) {
     try {
       if (note.isNew) {
         trackUsage('note_add');
-        await api.addNote(trimmed, opportunityId || null);
+        await api.addNote(trimmed, opportunityId || null, note.taskId || null);
       } else {
-        await api.updateNote(note.id, { text: trimmed, opportunityId: opportunityId || null });
+        await api.updateNote(note.id, { text: trimmed, opportunityId: opportunityId || null, taskId: note.taskId || null });
       }
       onSaved();
     } catch (e) {
@@ -2530,6 +2658,11 @@ function NoteEditModal({ note, jobs, onSaved, onDeleted, onClose }) {
         </div>
         <div className="modal-body">
           <p className="tech-links-hint">Shared with everyone on the board. The first line becomes the title.</p>
+          {/* Set once, from CRS Schedule's TaskDetailModal -- not re-pickable
+              here, same reasoning a task's own opportunity link isn't
+              editable from this modal either: this is where the note lives,
+              not where its links get managed. */}
+          {note.taskId && <p className="tech-links-hint notes-task-link">Linked to task: {note.taskName || note.taskId}</p>}
           <textarea
             className="notes-textarea"
             value={text}
@@ -2840,8 +2973,8 @@ function useAnchoredPopover(minWidth = 180) {
   const wrapRef = useRef(null);
   const popRef = useRef(null);
 
-  useEffect(() => {
-    if (!open) return;
+  const reposition = useCallback(() => {
+    if (!wrapRef.current) return;
     const rect = wrapRef.current.getBoundingClientRect();
     const width = Math.max(rect.width, minWidth);
     let left = rect.left;
@@ -2852,17 +2985,30 @@ function useAnchoredPopover(minWidth = 180) {
     const above = rect.top - GAP - EDGE;
     if (below >= above) setPos({ top: rect.bottom + GAP, bottom: null, left, width, maxHeight: Math.max(0, Math.min(CEILING, below)) });
     else setPos({ top: null, bottom: window.innerHeight - rect.top + GAP, left, width, maxHeight: Math.max(0, Math.min(CEILING, above)) });
-  }, [open, minWidth]);
+  }, [minWidth]);
+
+  useEffect(() => {
+    if (!open) return;
+    reposition();
+  }, [open, reposition]);
 
   useEffect(() => {
     if (!open) return;
     const down = (e) => { if (wrapRef.current?.contains(e.target) || popRef.current?.contains(e.target)) return; setOpen(false); };
-    const close = (e) => { if (popRef.current?.contains(e.target)) return; setOpen(false); };
+    // Follows the trigger instead of closing on scroll -- the trigger can
+    // live inside a scrollable container (a modal body, in particular:
+    // AddTaskModal/TaskDetailModal's assignee picker was closing the
+    // instant you scrolled the form to reach it) rather than only the
+    // whole page. Resize still just closes: a genuine viewport change
+    // (rotation, window resize) is rare enough mid-pick that closing is
+    // fine, and recomputing on every resize tick is unnecessary churn.
+    const onScroll = () => reposition();
+    const onResize = () => setOpen(false);
     document.addEventListener('mousedown', down);
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
-    return () => { document.removeEventListener('mousedown', down); window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
-  }, [open]);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
+    return () => { document.removeEventListener('mousedown', down); window.removeEventListener('scroll', onScroll, true); window.removeEventListener('resize', onResize); };
+  }, [open, reposition]);
 
   return { open, setOpen, pos, wrapRef, popRef };
 }
@@ -5468,22 +5614,35 @@ function rangeLabel(mode, anchor) {
 const CLOSED_LIST_STATUSES = ['Pending Customer Approval', 'Quoted', 'Parts ordered', 'Ready to be scheduled'];
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
-function Schedule({ jobs, techs, onJobClick, onAssign }) {
+function Schedule({ jobs, techs, onJobClick, onAssign, user, onTaskChange, notesByTaskId, onOpenNote, onNewNote, onDeleteNote }) {
   const [mode, setMode] = useState('week');
   const [anchor, setAnchor] = useState(() => startOfDay(new Date()));
-  const [techFilter, setTechFilter] = useState('all');
+  // Unified people-filter -- replaces the old tech-only techFilter. Values:
+  // 'all' | 'techs' | 'office' | `t:${techId}` | `u:${officeUserId}`.
+  const [peopleFilter, setPeopleFilter] = useState('all');
   const [year, setYear] = useState(() => new Date().getFullYear());
   const [expandedMonths, setExpandedMonths] = useState(() => Array(12).fill(false));
 
-  // Approved time off is invisible to the jobs API (the sentinel opp isn't in
-  // jobStatusValues), so it's fetched separately here - once, shared by both
-  // Week and Month views - for whichever range is currently in view.
+  // Approved time off and CRS Schedule tasks are both invisible to the jobs
+  // API (time off's sentinel opp isn't in jobStatusValues; tasks aren't
+  // Opportunities at all), so both are fetched separately here - once,
+  // shared by both Week and Month views - for whichever range is in view.
   const [timeOff, setTimeOff] = useState([]);
+  const [tasks, setTasks] = useState([]);
+  const [officeUsers, setOfficeUsers] = useState([]);
   const [editingOff, setEditingOff] = useState(null);
   const [addingOff, setAddingOff] = useState(false);
   const [addingAssignment, setAddingAssignment] = useState(false);
+  const [addingTask, setAddingTask] = useState(false);
+  const [viewingTask, setViewingTask] = useState(null);
 
-  const timeOffRange = useMemo(() => {
+  // The office-user directory rarely changes within a session -- fetched
+  // once on mount, not range-scoped like tasks/timeOff below.
+  useEffect(() => {
+    api.getOfficeUserDirectory().then((r) => setOfficeUsers(r.users)).catch(() => setOfficeUsers([]));
+  }, []);
+
+  const visibleRange = useMemo(() => {
     if (mode === 'week') {
       const s = startOfWeek(anchor);
       return [isoOf(s), isoOf(addDays(s, 6))];
@@ -5497,13 +5656,30 @@ function Schedule({ jobs, techs, onJobClick, onAssign }) {
   }, [mode, anchor]);
 
   const loadTimeOff = useCallback(() => {
-    const [start, end] = timeOffRange;
+    const [start, end] = visibleRange;
     return api.getTimeOff(start, end)
       .then((rows) => setTimeOff(rows))
       .catch(() => setTimeOff([]));
-  }, [timeOffRange]);
+  }, [visibleRange]);
+
+  const loadTasks = useCallback(() => {
+    const [start, end] = visibleRange;
+    return api.getTasks(start, end)
+      .then((r) => setTasks(r.tasks))
+      .catch(() => setTasks([]));
+  }, [visibleRange]);
 
   useEffect(() => { loadTimeOff(); }, [loadTimeOff]);
+  useEffect(() => { loadTasks(); }, [loadTasks]);
+
+  // Every task mutation (create/edit/respond/cancel) needs to refresh both
+  // this component's own range-scoped `tasks` AND the tab badge count that
+  // lives up in DispatchApp (see App's own myInvites/loadMyInvites) -- one
+  // callback for both so no caller has to remember both halves.
+  const refreshTasks = useCallback(() => {
+    loadTasks();
+    onTaskChange?.();
+  }, [loadTasks, onTaskChange]);
 
   const shift = (dir) => {
     const d = new Date(anchor);
@@ -5541,25 +5717,37 @@ function Schedule({ jobs, techs, onJobClick, onAssign }) {
       <div className="schedule-layout">
         <div className="schedule-main">
       <div className="view-head">
-        <div><h2>Who's on what</h2><p>Each tech's load by day. Empty cells are open.</p></div>
+        <div><h2>Who's on what</h2><p>Field work and office tasks together. Empty cells are open.</p></div>
         <div className="view-head-actions">
-          <button className="refresh" onClick={() => setAddingAssignment(true)}>+ Add Assignment</button>
+          <button className="refresh" onClick={() => setAddingAssignment(true)}>+ Add Tech Assignment</button>
           <button className="refresh" onClick={() => setAddingOff(true)}>+ Add Time Off</button>
+          <button className="refresh" onClick={() => setAddingTask(true)}>+ Add Office Task</button>
+          {/* Plain window.print() -- the actual formatting (hiding chrome,
+              forcing the desktop grid, landscape page) lives in styles.css's
+              @media print block, which also covers a bare Ctrl/Cmd+P with no
+              button involved at all. */}
+          <button className="refresh" onClick={() => window.print()} title="Print this schedule">Print</button>
         </div>
       </div>
 
-      <div className="schedbar">
-        <div className="navbtns">
-          <button className="navbtn" onClick={() => shift(-1)} aria-label="Previous">‹</button>
-          <button className="navbtn" onClick={() => setAnchor(startOfDay(new Date()))}>Today</button>
-          <button className="navbtn" onClick={() => shift(1)} aria-label="Next">›</button>
+      <div className="schedbar crs-schedbar">
+        <div className="schedbar-daterow">
+          <div className="navbtns">
+            <button className="navbtn" onClick={() => shift(-1)} aria-label="Previous">‹</button>
+            <button className="navbtn" onClick={() => setAnchor(startOfDay(new Date()))}>Today</button>
+            <button className="navbtn" onClick={() => shift(1)} aria-label="Next">›</button>
+          </div>
+          <div className="rangelabel">{rangeLabel(mode, anchor)}</div>
         </div>
-        <div className="rangelabel">{rangeLabel(mode, anchor)}</div>
         <FilterSelect
-          value={techFilter}
-          onChange={setTechFilter}
-          options={[['all', 'All technicians'], ...techs.map((t) => [t.id, t.name])]}
-          ariaLabel="Technician filter"
+          value={peopleFilter}
+          onChange={setPeopleFilter}
+          options={[
+            ['all', 'All'], ['techs', 'Techs'], ['office', 'Office'],
+            ...officeUsers.map((u) => [`u:${u.id}`, u.name]),
+            ...techs.map((t) => [`t:${t.id}`, t.name]),
+          ]}
+          ariaLabel="Schedule filter"
         />
         <div className="seg">
           <button className={`segbtn ${mode === 'week' ? 'on' : ''}`} onClick={() => setMode('week')}>Week</button>
@@ -5568,8 +5756,8 @@ function Schedule({ jobs, techs, onJobClick, onAssign }) {
       </div>
 
       {mode === 'week'
-        ? <WeekGrid jobs={jobs} techs={techs} anchor={anchor} techFilter={techFilter} onJobClick={onJobClick} timeOff={timeOff} onEditOff={setEditingOff} />
-        : <MonthGrid jobs={jobs} anchor={anchor} techFilter={techFilter} onJobClick={onJobClick} timeOff={timeOff} onEditOff={setEditingOff} />}
+        ? <WeekGrid jobs={jobs} techs={techs} tasks={tasks} officeUsers={officeUsers} user={user} anchor={anchor} peopleFilter={peopleFilter} onJobClick={onJobClick} onTaskClick={setViewingTask} timeOff={timeOff} onEditOff={setEditingOff} />
+        : <MonthGrid jobs={jobs} tasks={tasks} user={user} anchor={anchor} peopleFilter={peopleFilter} onJobClick={onJobClick} onTaskClick={setViewingTask} timeOff={timeOff} onEditOff={setEditingOff} />}
         </div>
         <aside className="closed-months-panel">
           <div className="panel-head">
@@ -5627,6 +5815,28 @@ function Schedule({ jobs, techs, onJobClick, onAssign }) {
           techs={techs}
           onClose={() => setAddingAssignment(false)}
           onAssign={onAssign}
+        />
+      )}
+      {addingTask && (
+        <AddTaskModal
+          jobs={jobs}
+          officeUsers={officeUsers}
+          onClose={() => setAddingTask(false)}
+          onCreated={refreshTasks}
+        />
+      )}
+      {viewingTask && (
+        <TaskDetailModal
+          task={viewingTask}
+          jobs={jobs}
+          officeUsers={officeUsers}
+          user={user}
+          onClose={() => setViewingTask(null)}
+          onChanged={refreshTasks}
+          notes={notesByTaskId.get(viewingTask.id) || []}
+          onOpenNote={onOpenNote}
+          onNewNote={onNewNote}
+          onDeleteNote={onDeleteNote}
         />
       )}
     </section>
@@ -5860,18 +6070,362 @@ function TimeOffEditModal({ entry, onClose, onChanged }) {
   );
 }
 
-function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEditOff }) {
+// CRS Schedule's own task/event system -- office-user-only, see tasks.js's
+// module comment for the full design. Modeled directly on AddTimeOffModal
+// above: same modal-sm/.req-field shape, same DatePicker/TimePicker fields.
+function AddTaskModal({ jobs, officeUsers, onClose, onCreated }) {
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [timeSensitive, setTimeSensitive] = useState(false);
+  // startDate/startTime double as Due Date/Time Due when timeSensitive is
+  // checked -- same two fields either way, just relabeled, rather than a
+  // separate set of due-date state. endDate/endTime are cleared the moment
+  // timeSensitive is checked (see the checkbox's onChange) so a stale end
+  // value picked before switching modes can't linger unseen and get saved.
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
+  const [opportunityId, setOpportunityId] = useState('');
+  const [assigneeUserIds, setAssigneeUserIds] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const canSave = name.trim() && startDate && assigneeUserIds.length > 0;
+
+  const save = async () => {
+    if (!canSave) return;
+    setSaving(true);
+    setErr(null);
+    trackUsage('task_add');
+    try {
+      await api.createTask({
+        name: name.trim(),
+        description: description.trim() || null,
+        timeSensitive,
+        startDate,
+        startTime: startTime || null,
+        endDate: timeSensitive ? null : (endDate || null),
+        endTime: timeSensitive ? null : (endTime || null),
+        opportunityId: opportunityId || null,
+        assigneeUserIds,
+      });
+      await onCreated();
+      onClose();
+    } catch (e) {
+      setErr(e.message);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={() => !saving && onClose()}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">New task</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={saving}>×</button>
+        </div>
+        <div className="modal-body">
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Title</span>
+            <input className="req-note-input" type="text" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          </label>
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Description (optional)</span>
+            <textarea className="req-note-input" value={description} onChange={(e) => setDescription(e.target.value)} rows={3} />
+          </label>
+          <label className="notes-job-check">
+            <input type="checkbox" checked={timeSensitive} onChange={(e) => { setTimeSensitive(e.target.checked); if (e.target.checked) { setEndDate(''); setEndTime(''); } }} />
+            <span>Time sensitive</span>
+          </label>
+          {timeSensitive ? (
+            <div className="req-panel-row">
+              <label className="req-field">
+                <span className="req-field-label">Due date</span>
+                <DatePicker className="dp-req" value={startDate} onChange={setStartDate} clearable={false} />
+              </label>
+              <label className="req-field">
+                <span className="req-field-label">Time due</span>
+                <TimePicker className="req-time" value={startTime} onChange={setStartTime} clearable />
+              </label>
+            </div>
+          ) : (
+            <>
+              <div className="req-panel-row">
+                <label className="req-field">
+                  <span className="req-field-label">Start date</span>
+                  <DatePicker className="dp-req" value={startDate} onChange={setStartDate} clearable={false} />
+                </label>
+                <label className="req-field">
+                  <span className="req-field-label">End date (optional)</span>
+                  <DatePicker className="dp-req" value={endDate} onChange={setEndDate} />
+                </label>
+              </div>
+              <div className="req-panel-row">
+                <label className="req-field">
+                  <span className="req-field-label">Start time (optional)</span>
+                  <TimePicker className="req-time" value={startTime} onChange={setStartTime} clearable />
+                </label>
+                <label className="req-field">
+                  <span className="req-field-label">End time (optional)</span>
+                  <TimePicker className="req-time" value={endTime} onChange={setEndTime} clearable />
+                </label>
+              </div>
+            </>
+          )}
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Related job (optional)</span>
+            <SearchableSelect value={opportunityId} onChange={setOpportunityId} options={jobs.map((j) => [j.id, j.name])} placeholder="Search for a job…" />
+          </label>
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Assignees</span>
+            <TechMultiSelect value={assigneeUserIds} onChange={setAssigneeUserIds} techs={officeUsers} placeholder="+ Add assignee" />
+          </label>
+          {err && <div className="modal-form-error">{err}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-save-btn" onClick={save} disabled={saving || !canSave}>{saving ? 'Creating…' : 'Create task'}</button>
+          <button className="modal-cancel-btn" onClick={onClose} disabled={saving}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// View/edit/respond-to a task in one modal, same "directly editable, no
+// separate view-mode toggle" shape as TimeOffEditModal above. The
+// accept/decline row only shows when the signed-in user has an unresponded
+// invite on this specific task (see the "You" pinning/highlighting in
+// WeekGrid/MonthGrid, which is what actually surfaces that state -- this
+// modal is where you act on it once you've noticed).
+function TaskDetailModal({ task, jobs, officeUsers, user, onClose, onChanged, notes, onOpenNote, onNewNote, onDeleteNote }) {
+  const [name, setName] = useState(task.name);
+  const [description, setDescription] = useState(task.description || '');
+  const [timeSensitive, setTimeSensitive] = useState(!!task.timeSensitive);
+  const [startDate, setStartDate] = useState(task.startDate);
+  const [endDate, setEndDate] = useState(task.endDate !== task.startDate ? task.endDate : '');
+  const [startTime, setStartTime] = useState(task.startTime || '');
+  const [endTime, setEndTime] = useState(task.endTime || '');
+  const [opportunityId, setOpportunityId] = useState(task.opportunityId || '');
+  const [assigneeUserIds, setAssigneeUserIds] = useState(task.assignees.map((a) => a.userId));
+  const [saving, setSaving] = useState(false);
+  const [responding, setResponding] = useState(false);
+  const [canceling, setCanceling] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const myAssignee = user ? task.assignees.find((a) => a.userId === user.id) : null;
+  const busy = saving || responding || canceling;
+
+  // If the linked job has fallen off the currently-loaded jobs list (closed,
+  // etc.) since the task was created, append it synthetically so the picker
+  // still shows what it's actually linked to -- same fallback NoteEditModal's
+  // own job picker already uses for the same reason.
+  const jobOptions = useMemo(() => {
+    const base = jobs.map((j) => [j.id, j.name]);
+    if (task.opportunityId && !base.some(([id]) => id === task.opportunityId)) {
+      base.push([task.opportunityId, task.opportunityName || 'Linked opportunity']);
+    }
+    return base;
+  }, [jobs, task.opportunityId, task.opportunityName]);
+
+  const save = async () => {
+    if (!name.trim() || !startDate) return;
+    setSaving(true);
+    setErr(null);
+    try {
+      await api.updateTask(task.id, {
+        name: name.trim(),
+        description: description.trim() || null,
+        timeSensitive,
+        startDate,
+        startTime: startTime || null,
+        endDate: timeSensitive ? null : (endDate || null),
+        endTime: timeSensitive ? null : (endTime || null),
+        opportunityId: opportunityId || null,
+        assigneeUserIds,
+      });
+      await onChanged();
+      onClose();
+    } catch (e) {
+      setErr(e.message);
+      setSaving(false);
+    }
+  };
+
+  const respond = async (response) => {
+    setResponding(true);
+    setErr(null);
+    trackUsage('task_respond', { response });
+    try {
+      await api.respondToTask(task.id, response);
+      await onChanged();
+      onClose();
+    } catch (e) {
+      setErr(e.message);
+      setResponding(false);
+    }
+  };
+
+  const cancelTask = async () => {
+    setCanceling(true);
+    setErr(null);
+    try {
+      await api.cancelTask(task.id);
+      await onChanged();
+      onClose();
+    } catch (e) {
+      setErr(e.message);
+      setCanceling(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={() => !busy && onClose()}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div className="modal-title-row"><span className="jname">{task.name}</span></div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={busy}>×</button>
+        </div>
+        <div className="modal-body">
+          {myAssignee?.responseStatus === 'Invited' && (
+            <div className="task-respond-row">
+              <span className="task-respond-label">You're invited to this task.</span>
+              <button className="modal-save-btn" onClick={() => respond('Accepted')} disabled={busy}>Accept</button>
+              <button className="modal-cancel-btn" onClick={() => respond('Declined')} disabled={busy}>Decline</button>
+            </div>
+          )}
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Title</span>
+            <input className="req-note-input" type="text" value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Description</span>
+            <textarea className="req-note-input" value={description} onChange={(e) => setDescription(e.target.value)} rows={3} />
+          </label>
+          <label className="notes-job-check">
+            <input type="checkbox" checked={timeSensitive} onChange={(e) => { setTimeSensitive(e.target.checked); if (e.target.checked) { setEndDate(''); setEndTime(''); } }} />
+            <span>Time sensitive</span>
+          </label>
+          {timeSensitive ? (
+            <div className="req-panel-row">
+              <label className="req-field">
+                <span className="req-field-label">Due date</span>
+                <DatePicker className="dp-req" value={startDate} onChange={setStartDate} clearable={false} />
+              </label>
+              <label className="req-field">
+                <span className="req-field-label">Time due</span>
+                <TimePicker className="req-time" value={startTime} onChange={setStartTime} clearable />
+              </label>
+            </div>
+          ) : (
+            <>
+              <div className="req-panel-row">
+                <label className="req-field">
+                  <span className="req-field-label">Start date</span>
+                  <DatePicker className="dp-req" value={startDate} onChange={setStartDate} clearable={false} />
+                </label>
+                <label className="req-field">
+                  <span className="req-field-label">End date</span>
+                  <DatePicker className="dp-req" value={endDate} onChange={setEndDate} />
+                </label>
+              </div>
+              <div className="req-panel-row">
+                <label className="req-field">
+                  <span className="req-field-label">Start time</span>
+                  <TimePicker className="req-time" value={startTime} onChange={setStartTime} clearable />
+                </label>
+                <label className="req-field">
+                  <span className="req-field-label">End time</span>
+                  <TimePicker className="req-time" value={endTime} onChange={setEndTime} clearable />
+                </label>
+              </div>
+            </>
+          )}
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Related job</span>
+            <SearchableSelect value={opportunityId} onChange={setOpportunityId} options={jobOptions} placeholder="Search for a job…" />
+          </label>
+          <label className="req-field req-field-wide">
+            <span className="req-field-label">Assignees</span>
+            <TechMultiSelect value={assigneeUserIds} onChange={setAssigneeUserIds} techs={officeUsers} placeholder="+ Add assignee" />
+          </label>
+          <div className="task-assignee-list">
+            {task.assignees.map((a) => (
+              <div key={a.id} className={`task-assignee-row ${a.responseStatus.toLowerCase()}`}>
+                <span>{a.userName}</span>
+                <span className="task-assignee-status">{a.responseStatus}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="notes-job-link task-notes">
+            <span className="req-field-label">Notes</span>
+            {notes.length === 0 && <div className="tech-week-empty">No notes yet.</div>}
+            {notes.map((note) => {
+              const { title, preview } = noteTitleAndPreview(note.text);
+              return (
+                <div className="notes-pop-row" key={note.id}>
+                  <button className="notes-pop-item" onClick={() => onOpenNote(note)}>
+                    <span className="notes-pop-title">{title}</span>
+                    {preview && <span className="notes-pop-preview">{preview}</span>}
+                  </button>
+                  <button type="button" className="notes-pop-delete" title="Delete note" aria-label="Delete note" onClick={() => onDeleteNote(note.id)}>×</button>
+                </div>
+              );
+            })}
+            <button type="button" className="notes-pop-add" onClick={() => onNewNote(null, null, task.id, task.name)}>+ Add note</button>
+          </div>
+
+          {err && <div className="modal-form-error">{err}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="unschedule" onClick={cancelTask} disabled={busy}>{canceling ? 'Canceling…' : 'Cancel task'}</button>
+          <div className="modal-footer-spacer" />
+          <button className="modal-cancel-btn" onClick={onClose} disabled={busy}>Close</button>
+          <button className="modal-save-btn" onClick={save} disabled={busy || !name.trim() || !startDate}>{saving ? 'Saving…' : 'Save changes'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WeekGrid({ jobs, techs, tasks, officeUsers, user, anchor, peopleFilter, onJobClick, onTaskClick, timeOff, onEditOff }) {
   const days = useMemo(() => {
     const s = startOfWeek(anchor);
     return Array.from({ length: 7 }, (_, i) => addDays(s, i));
   }, [anchor]);
   const todayIso = isoOf(startOfDay(new Date()));
-  const rows = techFilter === 'all' ? techs : techs.filter((t) => t.id === techFilter);
+
+  // Unified people-filter: 'all' | 'techs' | 'office' | `t:${id}` | `u:${id}`.
+  const showTechs = peopleFilter === 'all' || peopleFilter === 'techs' || peopleFilter.startsWith('t:');
+  const showOffice = peopleFilter === 'all' || peopleFilter === 'office' || peopleFilter.startsWith('u:');
+  const filteredTechs = showTechs
+    ? (peopleFilter.startsWith('t:') ? techs.filter((t) => t.id === peopleFilter.slice(2)) : techs)
+    : [];
+  const filteredOfficeUsers = showOffice
+    ? (peopleFilter.startsWith('u:') ? officeUsers.filter((u) => u.id === peopleFilter.slice(2)) : officeUsers)
+    : [];
+
+  // Office rows above tech rows (per direction), the signed-in user's own
+  // row pinned above the rest of office -- this ordering is also what the
+  // "You" tag below and the mobile TechWeekList (fed the same `rows`)
+  // inherit for free, no separate logic needed there.
+  const rows = useMemo(() => {
+    const mine = user ? filteredOfficeUsers.filter((u) => u.id === user.id) : [];
+    const restOffice = filteredOfficeUsers.filter((u) => !user || u.id !== user.id);
+    return [
+      ...mine.map((u) => ({ ...u, kind: 'office', mine: true })),
+      ...restOffice.map((u) => ({ ...u, kind: 'office', mine: false })),
+      ...filteredTechs.map((t) => ({ ...t, kind: 'tech', mine: false })),
+    ];
+  }, [filteredOfficeUsers, filteredTechs, user]);
 
   // Completed assignments collapse into a per-cell "✓N done" toggle by
-  // default -- keyed by "techId|iso" rather than lifted to Schedule, since
+  // default -- keyed by "id|iso" rather than lifted to Schedule, since
   // nothing outside this grid needs it and remounting on Week/Month switch
-  // already resets it to all-collapsed, which is the desired default.
+  // already resets it to all-collapsed, which is the desired default. Tasks
+  // have no equivalent "done" collapse -- Status__c is task-level, not
+  // per-assignee -- so they always render as active items.
   const [expandedCells, setExpandedCells] = useState(() => new Set());
   const toggleCell = (key) => setExpandedCells((prev) => {
     const next = new Set(prev);
@@ -5879,23 +6433,41 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
     return next;
   });
 
-  // techId -> iso -> [{ name, startTime }], sorted by start time
+  // One combined map, id -> iso -> [chip], covering both tech ids (job
+  // assignments) and office user ids (tasks) -- lets every consumer below
+  // (the desktop table AND TechWeekList) iterate `rows` without caring
+  // which kind of row it's rendering; each chip carries its own `kind` so
+  // click handling/styling can branch per item instead.
   const grid = useMemo(() => {
     const m = {};
     jobs.forEach((job) => job.assignments.forEach((a) => {
       if (!a.workDate) return; // unscheduled assignment - not on the calendar
-      ((m[a.technicianId] ||= {})[a.workDate] ||= []).push({ name: job.name, startTime: a.startTime || '07:00', jobId: job.id, completed: !!a.completed });
+      ((m[a.technicianId] ||= {})[a.workDate] ||= []).push({
+        kind: 'job', name: job.name, startTime: a.startTime || '07:00', jobId: job.id, completed: !!a.completed,
+      });
     }));
-    // sort each cell by start time
+    tasks.forEach((task) => {
+      const start = task.startDate;
+      const end = task.endDate || task.startDate;
+      task.assignees.forEach((a) => {
+        for (let d = start; d <= end; d = addIsoDays(d, 1)) {
+          ((m[a.userId] ||= {})[d] ||= []).push({
+            kind: 'task', name: task.name, startTime: task.startTime || '', task, responseStatus: a.responseStatus,
+          });
+        }
+      });
+    });
+    // sort each cell by start time (untimed tasks, with no startTime, sort first)
     Object.values(m).forEach((byDate) =>
-      Object.values(byDate).forEach((items) => items.sort((a, b) => a.startTime.localeCompare(b.startTime)))
+      Object.values(byDate).forEach((items) => items.sort((a, b) => (a.startTime || '').localeCompare(b.startTime || '')))
     );
     return m;
-  }, [jobs]);
+  }, [jobs, tasks]);
 
-  // techId -> iso -> time-off entry, overlaid on the calendar below. Indexed
+  // id -> iso -> time-off entry, overlaid on the calendar below. Indexed
   // from the `timeOff` prop (fetched once by the parent Schedule component
-  // for whatever range - week or month - is currently in view).
+  // for whatever range - week or month - is currently in view). Tech-only --
+  // office users don't have Job_Assignment__c-based time off tracked.
   const timeOffByTechDate = useMemo(() => {
     const m = {};
     timeOff.forEach((r) => {
@@ -5919,16 +6491,16 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
           </tr>
         </thead>
         <tbody>
-          {rows.map((t) => (
-            <tr key={t.id}>
-              <td className="techcol"><div className="tn">{t.name}</div></td>
+          {rows.map((r) => (
+            <tr key={r.id} className={r.mine ? 'mine-row' : ''}>
+              <td className="techcol"><div className="tn">{r.name}</div></td>
               {days.map((d) => {
                 const iso = isoOf(d);
-                const items = grid[t.id]?.[iso] || [];
+                const items = grid[r.id]?.[iso] || [];
                 const activeItems = items.filter((it) => !it.completed);
                 const doneItems = items.filter((it) => it.completed);
-                const off = timeOffByTechDate[t.id]?.[iso];
-                const cellKey = `${t.id}|${iso}`;
+                const off = r.kind === 'tech' ? timeOffByTechDate[r.id]?.[iso] : null;
+                const cellKey = `${r.id}|${iso}`;
                 const showDone = expandedCells.has(cellKey);
                 const cls = `${items.length || off ? '' : 'open'} ${iso === todayIso ? 'todaycol' : ''} ${off ? 'offcol' : ''}`.trim();
                 return (
@@ -5939,7 +6511,16 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
                       </div>
                     )}
                     {items.length === 0 && !off && <span className="free">✓ Open</span>}
-                    {activeItems.map((item, i) => (
+                    {activeItems.map((item, i) => item.kind === 'task' ? (
+                      <div
+                        key={i}
+                        className={`jchip task ${r.mine && item.responseStatus === 'Invited' ? 'needs-response' : ''} ${item.responseStatus === 'Declined' ? 'declined' : ''}`}
+                        onClick={() => onTaskClick(item.task)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onTaskClick(item.task)}
+                      >
+                        {item.startTime && <span className="jtime">{item.startTime}</span>}
+                        {item.name}
+                      </div>
+                    ) : (
                       <div className="jchip" key={i} onClick={() => onJobClick(item.jobId)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onJobClick(item.jobId)}>
                         <span className="jtime">{item.startTime}</span>
                         {item.name.split('—')[0].trim()}
@@ -5973,29 +6554,31 @@ function WeekGrid({ jobs, techs, anchor, techFilter, onJobClick, timeOff, onEdit
     </div>
     {/* Mobile-only (styles.css) -- per direction 2026-08-28, mirroring
         crs-board's own "All Techs" crew view (CrewBoard.tsx): one collapsed
-        card per tech instead of a 7-day grid that only ever showed ~2 real
+        card per person instead of a 7-day grid that only ever showed ~2 real
         columns on a phone. Same grid/timeOffByTechDate data, just
-        restructured from "one cell per tech x day" into "one flat, sorted
-        list of real entries per tech" -- an empty day just produces no
+        restructured from "one cell per row x day" into "one flat, sorted
+        list of real entries per row" -- an empty day just produces no
         entry here, unlike the grid where every day gets its own cell
         (mostly showing "Open"). */}
     <TechWeekList
-      techs={rows}
+      rows={rows}
       days={days}
       grid={grid}
       timeOffByTechDate={timeOffByTechDate}
       todayIso={todayIso}
       onJobClick={onJobClick}
+      onTaskClick={onTaskClick}
       onEditOff={onEditOff}
     />
     </>
   );
 }
 
-// See WeekGrid's own comment above for why this exists. One card per tech,
-// summary visible by default, tap to expand into every real slot (job or
-// time off) across the visible week, in day order.
-function TechWeekList({ techs, days, grid, timeOffByTechDate, todayIso, onJobClick, onEditOff }) {
+// See WeekGrid's own comment above for why this exists. One card per
+// person (tech or office user), summary visible by default, tap to expand
+// into every real slot (job, task, or time off) across the visible week,
+// in day order.
+function TechWeekList({ rows, days, grid, timeOffByTechDate, todayIso, onJobClick, onTaskClick, onEditOff }) {
   const [expanded, setExpanded] = useState(() => new Set());
   const toggle = (id) => setExpanded((prev) => {
     const next = new Set(prev);
@@ -6003,41 +6586,43 @@ function TechWeekList({ techs, days, grid, timeOffByTechDate, todayIso, onJobCli
     return next;
   });
 
-  const byTech = useMemo(() => techs.map((t) => {
+  const byPerson = useMemo(() => rows.map((r) => {
     const entries = [];
     for (const d of days) {
       const iso = isoOf(d);
-      const off = timeOffByTechDate[t.id]?.[iso];
+      const off = timeOffByTechDate[r.id]?.[iso];
       if (off) entries.push({ kind: 'off', iso, off });
-      for (const item of (grid[t.id]?.[iso] || [])) entries.push({ kind: 'job', iso, ...item });
+      for (const item of (grid[r.id]?.[iso] || [])) entries.push({ iso, ...item });
     }
-    return { tech: t, entries };
-  }), [techs, days, grid, timeOffByTechDate]);
+    return { person: r, entries };
+  }), [rows, days, grid, timeOffByTechDate]);
 
   const dayLabel = (iso) => {
     if (iso === todayIso) return 'Today';
     return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'numeric', day: 'numeric' });
   };
 
-  if (byTech.length === 0) return <div className="tech-week-empty">No technicians</div>;
+  if (byPerson.length === 0) return <div className="tech-week-empty">No one to show</div>;
 
   return (
     <div className="tech-week-list">
-      {byTech.map(({ tech, entries }) => {
-        const isOpen = expanded.has(tech.id);
+      {byPerson.map(({ person, entries }) => {
+        const isOpen = expanded.has(person.id);
         const activeCount = entries.filter((e) => e.kind === 'job' && !e.completed).length;
         const doneCount = entries.filter((e) => e.kind === 'job' && e.completed).length;
+        const taskCount = entries.filter((e) => e.kind === 'task').length;
         const offCount = entries.filter((e) => e.kind === 'off').length;
         return (
-          <div key={tech.id} className="tech-week-card">
-            <button type="button" className="tech-week-head" onClick={() => toggle(tech.id)} aria-expanded={isOpen}>
-              <span className="tech-week-name">{tech.name}</span>
+          <div key={person.id} className={`tech-week-card ${person.mine ? 'mine-row' : ''}`}>
+            <button type="button" className="tech-week-head" onClick={() => toggle(person.id)} aria-expanded={isOpen}>
+              <span className="tech-week-name">{person.name}</span>
               <span className="tech-week-summary">
                 {entries.length === 0
                   ? <span className="tech-week-free">Open all week</span>
                   : (
                     <>
                       {activeCount > 0 && <span>{activeCount} job{activeCount === 1 ? '' : 's'}</span>}
+                      {taskCount > 0 && <span>{taskCount} task{taskCount === 1 ? '' : 's'}</span>}
                       {doneCount > 0 && <span>✓{doneCount} done</span>}
                       {offCount > 0 && <span>{offCount} off</span>}
                     </>
@@ -6060,6 +6645,16 @@ function TechWeekList({ techs, days, grid, timeOffByTechDate, todayIso, onJobCli
                     <span className="tech-week-row-day">{dayLabel(e.iso)}</span>
                     <span className="tech-week-row-info">Time off</span>
                   </div>
+                ) : e.kind === 'task' ? (
+                  <div
+                    key={i}
+                    className={`tech-week-row task ${person.mine && e.responseStatus === 'Invited' ? 'needs-response' : ''} ${e.responseStatus === 'Declined' ? 'declined' : ''}`}
+                    onClick={() => onTaskClick(e.task)} role="button" tabIndex={0} onKeyDown={(ev) => ev.key === 'Enter' && onTaskClick(e.task)}
+                  >
+                    <span className="tech-week-row-day">{dayLabel(e.iso)}</span>
+                    <span className="tech-week-row-time">{e.startTime}</span>
+                    <span className="tech-week-row-info">{e.name}</span>
+                  </div>
                 ) : (
                   <div key={i} className={`tech-week-row ${e.completed ? 'done' : ''}`} onClick={() => onJobClick(e.jobId)} role="button" tabIndex={0} onKeyDown={(ev) => ev.key === 'Enter' && onJobClick(e.jobId)}>
                     <span className="tech-week-row-day">{dayLabel(e.iso)}</span>
@@ -6076,9 +6671,19 @@ function TechWeekList({ techs, days, grid, timeOffByTechDate, todayIso, onJobCli
   );
 }
 
-function MonthGrid({ jobs, anchor, techFilter, onJobClick, timeOff, onEditOff }) {
+function MonthGrid({ jobs, tasks, user, anchor, peopleFilter, onJobClick, onTaskClick, timeOff, onEditOff }) {
   const todayIso = isoOf(startOfDay(new Date()));
   const month = anchor.getMonth();
+
+  // Unified people-filter, same values WeekGrid uses: 'all' | 'techs' |
+  // 'office' | `t:${id}` | `u:${id}`. Month view has no per-person rows to
+  // show/hide -- instead this gates which of jobs/tasks appear at all
+  // (techs/a specific tech -> jobs only, office/a specific office user ->
+  // tasks only) and narrows within that.
+  const showJobs = peopleFilter === 'all' || peopleFilter === 'techs' || peopleFilter.startsWith('t:');
+  const showTasks = peopleFilter === 'all' || peopleFilter === 'office' || peopleFilter.startsWith('u:');
+  const techIdFilter = peopleFilter.startsWith('t:') ? peopleFilter.slice(2) : null;
+  const officeIdFilter = peopleFilter.startsWith('u:') ? peopleFilter.slice(2) : null;
 
   // A fully-completed job already drops out of `byDate` below (see
   // nextScheduledAssignmentDate) -- this only handles the mixed-completion
@@ -6101,33 +6706,57 @@ function MonthGrid({ jobs, anchor, techFilter, onJobClick, timeOff, onEditOff })
     return Array.from({ length: total }, (_, i) => addDays(gridStart, i));
   }, [anchor, month]);
 
-  // iso -> [job], optionally narrowed to a single tech's jobs
+  // iso -> [job], optionally narrowed to a single tech's jobs; empty
+  // entirely when the filter is office-only.
   const byDate = useMemo(() => {
     const m = {};
+    if (!showJobs) return m;
     jobs.forEach((j) => {
       const date = nextScheduledAssignmentDate(j);
       if (!date) return;
-      if (techFilter !== 'all' && !j.assignments.some((a) => a.technicianId === techFilter)) return;
+      if (techIdFilter && !j.assignments.some((a) => a.technicianId === techIdFilter)) return;
       (m[date] ||= []).push(j);
     });
     return m;
-  }, [jobs, techFilter]);
+  }, [jobs, showJobs, techIdFilter]);
 
-  // iso -> [time-off entry], same techFilter narrowing as jobs above
+  // iso -> [time-off entry], same tech narrowing as jobs above
   const offByDate = useMemo(() => {
     const m = {};
+    if (!showJobs) return m;
     timeOff.forEach((r) => {
       if (!r.workDate) return;
-      if (techFilter !== 'all' && r.technicianId !== techFilter) return;
+      if (techIdFilter && r.technicianId !== techIdFilter) return;
       (m[r.workDate] ||= []).push(r);
     });
     return m;
-  }, [timeOff, techFilter]);
+  }, [timeOff, showJobs, techIdFilter]);
+
+  // iso -> [task], expanded across every day a multi-day task spans (same
+  // idea as WeekGrid's own grid-building) and narrowed to a single office
+  // user's tasks if that's the active filter; empty entirely when the
+  // filter is techs-only. Mixed into the same day cell as jobs below, per
+  // direction -- not interleaved by time (jobs have no per-item time sort
+  // in this view today either), just appended after the day's jobs.
+  const tasksByDate = useMemo(() => {
+    const m = {};
+    if (!showTasks) return m;
+    tasks.forEach((task) => {
+      if (officeIdFilter && !task.assignees.some((a) => a.userId === officeIdFilter)) return;
+      const start = task.startDate;
+      const end = task.endDate || task.startDate;
+      for (let d = start; d <= end; d = addIsoDays(d, 1)) {
+        (m[d] ||= []).push(task);
+      }
+    });
+    return m;
+  }, [tasks, showTasks, officeIdFilter]);
 
   const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
   return (
-    <div className="month">
+    <>
+    <div className="month sched-desktop">
       {WD.map((w) => <div className="wd" key={w}>{w}</div>)}
       {cells.map((d) => {
         const iso = isoOf(d);
@@ -6165,9 +6794,105 @@ function MonthGrid({ jobs, anchor, techFilter, onJobClick, timeOff, onEditOff })
                 </div>
               );
             })}
+            {(tasksByDate[iso] || []).map((task) => {
+              const myAssignee = user ? task.assignees.find((a) => a.userId === user.id) : null;
+              const mine = !!myAssignee;
+              const needsResponse = myAssignee?.responseStatus === 'Invited';
+              return (
+                <div
+                  className={`dayjob task ${mine ? 'mine' : ''} ${needsResponse ? 'needs-response' : ''}`}
+                  key={task.id} title={task.name} onClick={() => onTaskClick(task)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onTaskClick(task)}
+                >
+                  <span className="jn">{task.name}</span>
+                  {task.assignees.length > 0 && <span className="inits">{task.assignees.map((a) => initials(a.userName)).join(' ')}</span>}
+                </div>
+              );
+            })}
           </div>
         );
       })}
+    </div>
+    {/* Mobile-only stand-in for the 7-column .month grid above -- same
+        problem (and same fix) as WeekGrid's own TechWeekList and the Quotes
+        tab's QuotesAgendaList: 7 columns of truncated pill chips are
+        illegible on a phone (found live 2026-09-01 -- real screenshot
+        showed 2-3 character ellipsized fragments stacked on top of each
+        other). Skips days with nothing on them entirely, same "entries
+        only, not a padded grid" approach as those two. */}
+    <MonthAgendaList
+      cells={cells} byDate={byDate} offByDate={offByDate} tasksByDate={tasksByDate}
+      user={user} todayIso={todayIso}
+      onJobClick={onJobClick} onTaskClick={onTaskClick} onEditOff={onEditOff}
+    />
+    </>
+  );
+}
+
+// See MonthGrid's own comment above for why this exists. One card per day
+// that actually has something on it (jobs, tasks, or time off), in day
+// order -- mirrors QuotesAgendaList's shape (reuses its .quote-agenda-day/
+// -day-label/-row/-kind/-name row styling directly, same generic "day
+// header + kind-tagged rows" pattern already shared across two Quotes call
+// sites) but its own wrapper class, since .month-agenda-list's mobile-only
+// display toggle is paired one-to-one with THIS screen's own .month
+// sched-desktop swap, not Quotes'.
+function MonthAgendaList({ cells, byDate, offByDate, tasksByDate, user, todayIso, onJobClick, onTaskClick, onEditOff }) {
+  const dayLabel = (iso) => {
+    if (iso === todayIso) return 'Today';
+    return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'numeric', day: 'numeric' });
+  };
+
+  const days = useMemo(() => cells
+    .map((d) => {
+      const iso = isoOf(d);
+      const entries = [
+        ...(offByDate[iso] || []).map((off) => ({ kind: 'off', off })),
+        ...(byDate[iso] || []).map((job) => ({ kind: 'job', job })),
+        ...(tasksByDate[iso] || []).map((task) => ({ kind: 'task', task })),
+      ];
+      return { iso, entries };
+    })
+    .filter((d) => d.entries.length > 0)
+  , [cells, byDate, offByDate, tasksByDate]);
+
+  return (
+    <div className="month-agenda-list">
+      {days.length === 0 && <div className="tech-week-empty">Nothing scheduled this month.</div>}
+      {days.map(({ iso, entries }) => (
+        <div key={iso} className={`quote-agenda-day ${iso === todayIso ? 'today' : ''}`}>
+          <div className="quote-agenda-day-label">{dayLabel(iso)}</div>
+          {entries.map((e, i) => {
+            if (e.kind === 'off') {
+              return (
+                <div key={i} className="quote-agenda-row off" onClick={() => onEditOff(e.off)} role="button" tabIndex={0} onKeyDown={(ev) => ev.key === 'Enter' && onEditOff(e.off)}>
+                  <span className="quote-agenda-kind">Off</span>
+                  <span className="quote-agenda-name">{e.off.technicianName}</span>
+                </div>
+              );
+            }
+            if (e.kind === 'task') {
+              const myAssignee = user ? e.task.assignees.find((a) => a.userId === user.id) : null;
+              const needsResponse = myAssignee?.responseStatus === 'Invited';
+              return (
+                <div
+                  key={i}
+                  className={`quote-agenda-row task ${!!myAssignee ? 'mine' : ''} ${needsResponse ? 'needs-response' : ''}`}
+                  onClick={() => onTaskClick(e.task)} role="button" tabIndex={0} onKeyDown={(ev) => ev.key === 'Enter' && onTaskClick(e.task)}
+                >
+                  <span className="quote-agenda-kind">Task</span>
+                  <span className="quote-agenda-name">{e.task.name}</span>
+                </div>
+              );
+            }
+            return (
+              <div key={i} className="quote-agenda-row agenda-job" data-status={statusClass(e.job.status)} onClick={() => onJobClick(e.job.id)} role="button" tabIndex={0} onKeyDown={(ev) => ev.key === 'Enter' && onJobClick(e.job.id)}>
+                <span className="quote-agenda-kind">{AGENDA_JOB_KIND_LABEL[jobCategory(e.job)] || 'Job'}</span>
+                <span className="quote-agenda-name">{e.job.name.split('—')[0].trim()}</span>
+              </div>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -6190,7 +6915,7 @@ const quoteSortKey = (q) => q.dueDate || '9999-99-99';
 // due date/review deadline) stays always-visible too, unlike JobCard --
 // per direction, overflow/info-running-off was never a problem on this
 // screen, only the buttons were.
-function QuoteRow({ quote: q, users, usersLoaded, onLoadUsers, onStatusChange, onSend, onReview }) {
+function QuoteRow({ quote: q, users, usersLoaded, onLoadUsers, onStatusChange, onSend, onReview, notes, onOpenNote, onNewNote, onDeleteNote }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <div className="job">
@@ -6198,6 +6923,11 @@ function QuoteRow({ quote: q, users, usersLoaded, onLoadUsers, onStatusChange, o
       <div className="body">
         <div className="row1">
           <OppLink className="jname" id={q.id} name={q.name} />
+          {/* Per direction 2026-08-31: the second most important thing on
+              this row after the quote's own name -- given real visual
+              weight (not the small muted .meta row every other secondary
+              detail lives in) and placed right next to the name itself. */}
+          {q.quotedByName && <span className="quote-quoted-by-badge">Assigned to {q.quotedByName}</span>}
           {q.opportunityType && <span className="quote-type">{q.opportunityType}</span>}
           {/* Per direction 2026-08-30: status stays visible without
               expanding -- only the 4 action buttons/badges below are what
@@ -6211,6 +6941,16 @@ function QuoteRow({ quote: q, users, usersLoaded, onLoadUsers, onStatusChange, o
                 <QuoteRecipientButton quote={q} label="Sent" title="Send this quote for customer approval" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onSend} />
                 <QuoteSystemsButton quote={q} />
                 <QuoteDocumentsBadge quoteId={q.id} />
+                {/* Same JobNotesBadge component Outstanding Jobs uses -- its
+                    own "+ Add note" is now inside the popover (per direction
+                    2026-08-31) rather than a separate always-visible button.
+                    Notably still needed here even though the header Notes
+                    menu also has an "add" flow: that picker is scoped to the
+                    dispatch board's `jobs` list, which doesn't include every
+                    quote status (e.g. Ready for Review), so quotes need
+                    their own way to attach a first note rather than relying
+                    on that picker finding them. */}
+                <JobNotesBadge notes={notes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} opportunityId={q.id} opportunityName={q.name} onNewNote={onNewNote} />
               </div>
             </div>
           </div>
@@ -6224,13 +6964,28 @@ function QuoteRow({ quote: q, users, usersLoaded, onLoadUsers, onStatusChange, o
           {q.accountName && <span><span className="ic">◍</span>{q.accountName}</span>}
           <span className="created quote-due">{q.dueDate ? `Due ${fmtDate(q.dueDate)}` : 'No due date set'}</span>
           {q.reviewDeadline && <span className="created quote-review-deadline">Review by {fmtDateTime(q.reviewDeadline)}</span>}
+          {/* Real Sent_To_Customer__c/Ready_For_Review__c mirror, read-only --
+              per direction 2026-08-31. Reflects state only; toggling either
+              one for real still goes through the Ready For Review/Sent send
+              flow above (QuoteRecipientButton), which is what stamps these
+              fields server-side after a real email actually goes out -- a
+              directly-clickable checkbox here would let the field say "sent"
+              with nothing ever having been emailed. */}
+          <label className="quote-checkbox-field" title="Reflects the real Ready_For_Review__c field: set automatically once the Ready For Review email is sent above; not editable here directly">
+            <input type="checkbox" checked={q.readyForReview} readOnly disabled />
+            Ready for Review
+          </label>
+          <label className="quote-checkbox-field" title="Reflects the real Sent_To_Customer__c field: set automatically once the Sent email is sent above; not editable here directly">
+            <input type="checkbox" checked={q.sentToCustomer} readOnly disabled />
+            Sent to Customer
+          </label>
         </div>
       </div>
     </div>
   );
 }
 
-function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, onSend, onReview, users, usersLoaded, onLoadUsers }) {
+function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, onSend, onReview, users, usersLoaded, onLoadUsers, notesByJobId, onOpenNote, onNewNote, onDeleteNote }) {
   const [mode, setMode] = useState('list');
   const [calMode, setCalMode] = useState('month');
   const [anchor, setAnchor] = useState(() => startOfDay(new Date()));
@@ -6355,6 +7110,10 @@ function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, 
                 onStatusChange={onStatusChange}
                 onSend={onSend}
                 onReview={onReview}
+                notes={notesByJobId.get(q.id) || []}
+                onOpenNote={onOpenNote}
+                onNewNote={onNewNote}
+                onDeleteNote={onDeleteNote}
               />
             ))}
           </div>
@@ -6393,6 +7152,10 @@ function QuotesTab({ quotes, loading, quotesView, onViewChange, onStatusChange, 
           users={users}
           usersLoaded={usersLoaded}
           onLoadUsers={onLoadUsers}
+          notes={notesByJobId.get(selectedQuote.id) || []}
+          onOpenNote={onOpenNote}
+          onNewNote={onNewNote}
+          onDeleteNote={onDeleteNote}
         />
       )}
     </section>
@@ -6799,13 +7562,14 @@ function QuoteSystemsButton({ quote }) {
   );
 }
 
-function QuoteDetailModal({ quote, onClose, onStatusChange, onSend, onReview, users, usersLoaded, onLoadUsers }) {
+function QuoteDetailModal({ quote, onClose, onStatusChange, onSend, onReview, users, usersLoaded, onLoadUsers, notes, onOpenNote, onNewNote, onDeleteNote }) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <div className="modal-header">
           <div className="modal-title-row">
             <span className="jname">{quote.name}</span>
+            {quote.quotedByName && <span className="quote-quoted-by-badge">Assigned to {quote.quotedByName}</span>}
             {quote.opportunityType && <span className="quote-type">{quote.opportunityType}</span>}
             <QuoteStatusSelect status={quote.status} onChange={onStatusChange} />
           </div>
@@ -6816,11 +7580,20 @@ function QuoteDetailModal({ quote, onClose, onStatusChange, onSend, onReview, us
             {quote.accountName && <span><span className="ic">◍</span>{quote.accountName}</span>}
             <span className="created quote-due">{quote.dueDate ? `Due ${fmtDate(quote.dueDate)}` : 'No due date set'}</span>
             {quote.reviewDeadline && <span className="created quote-review-deadline">Review by {fmtDateTime(quote.reviewDeadline)}</span>}
+            <label className="quote-checkbox-field" title="Reflects the real Ready_For_Review__c field: set automatically once the Ready For Review email is sent below; not editable here directly">
+              <input type="checkbox" checked={quote.readyForReview} readOnly disabled />
+              Ready for Review
+            </label>
+            <label className="quote-checkbox-field" title="Reflects the real Sent_To_Customer__c field: set automatically once the Sent email is sent below; not editable here directly">
+              <input type="checkbox" checked={quote.sentToCustomer} readOnly disabled />
+              Sent to Customer
+            </label>
           </div>
           <div className="quote-actions">
             <QuoteRecipientButton quote={quote} label="Ready For Review" title="Send this quote for internal review" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onReview} />
             <QuoteRecipientButton quote={quote} label="Sent" title="Send this quote for customer approval" users={users} usersLoaded={usersLoaded} onLoadUsers={onLoadUsers} onConfirm={onSend} />
             <QuoteDocumentsBadge quoteId={quote.id} />
+            <JobNotesBadge notes={notes} onOpenNote={onOpenNote} onDeleteNote={onDeleteNote} opportunityId={quote.id} opportunityName={quote.name} onNewNote={onNewNote} />
           </div>
         </div>
       </div>
@@ -10252,16 +11025,24 @@ function ExpenseTrackingTab() {
 
 // Admin usage dashboard (D1-backed): KPIs, per-day + time-of-day bars, by-screen,
 // top features, who's-using-it, a recent-activity feed, and a per-user drill-down.
-// Auto-refresh interval while the Usage tab is actually open -- per direction
-// 2026-08-27: before this, the tab had no polling at all, only refetching on
-// first mount or the manual "↻ Refresh" button -- an admin watching it could
-// genuinely miss a just-fired event indefinitely. This only runs while
-// UsageDashboard is mounted (i.e. only while the Usage tab is the active
-// tab), same lifecycle-scoping as any other component-local interval here.
-const USAGE_POLL_MS = 20 * 1000;
-
+// No auto-refresh -- only the manual "↻ Refresh" button (and filter/days
+// changes) trigger a refetch. Had a 20s poll (per direction 2026-08-27, so
+// an admin watching it wouldn't miss a just-fired event), bumped to 5min
+// then 10min after it turned out to be what actually blew through the D1
+// free tier's daily row-read cap (found live 2026-09-02 -- each poll tick
+// re-fired getUsage()'s 8-query Promise.all fan-out plus getUsageRecent/
+// getUsagePeople/getUsageUser, and real D1 query-analytics data showed each
+// aggregate reads ~2,000-3,600 rows on its own). Turned off entirely per
+// direction 2026-09-02, rather than continuing to tune the interval --
+// nothing here needs to be live-updating, and this removes the recurring
+// cost altogether instead of just shrinking it.
 function UsageDashboard({ refreshKey = 0 }) {
-  const [days, setDays] = useState(30);
+  // Was 30 -- found live 2026-09-02: default window is the single biggest
+  // lever on per-query row-read cost (roughly linear in days), and most
+  // looks at this dashboard care about recent trends, not a month by
+  // default. Still selectable up to 365 via the days control below for
+  // whoever actually wants the longer view.
+  const [days, setDays] = useState(7);
   const [app, setApp] = useState('all');
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -10269,34 +11050,82 @@ function UsageDashboard({ refreshKey = 0 }) {
   const [people, setPeople] = useState([]);
   const [selPerson, setSelPerson] = useState('');
   const [detail, setDetail] = useState(null);
-  const [tick, setTick] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), USAGE_POLL_MS);
-    return () => clearInterval(id);
-  }, []);
+  // Per direction 2026-08-27: a refetch (the manual refresh button, or a
+  // filter/days change) used to null out `data` first, dropping the whole
+  // page back to bare LoadingDots on every trigger -- scroll position, an
+  // open drill-down, whatever you were looking at, blown away. Same "stay
+  // on the old data until the new data is ready" fix already applied to
+  // Billing Reconciliation -- `data` (and `recent`/`people`/`detail` below,
+  // which never had the clear-first bug in the first place) is only ever
+  // replaced once the new fetch resolves, never blanked mid-flight.
+  // `refreshing` drives a small inline "Updating…" indicator instead.
+  // Manual-refresh throttle: repeat clicks on the "↻ Refresh" button (which
+  // just bumps refreshKey) within this window show what's already loaded
+  // instead of re-hitting the API. 60s matches the server-side cache's own
+  // TTL (USAGE_CACHE_TTL_MS in routes.js) -- no point throttling shorter
+  // than a window the server would just serve from cache anyway, and no
+  // point throttling longer since the server would recompute for real past
+  // that point regardless. Each fetch below tracks its own last-successful
+  // {params, timestamp} so a *filter* change (days/app/selPerson) always
+  // goes through even if it lands inside the window -- that's a genuinely
+  // different query, not a repeat of the last one. Initial mount is never
+  // throttled (the ref starts with no recorded params, so the first render
+  // never matches).
+  const USAGE_REFRESH_THROTTLE_MS = 60_000;
+  const usageFetchRef = useRef({ key: null, at: 0 });
+  const recentFetchRef = useRef({ key: null, at: 0 });
+  const peopleFetchRef = useRef(0);
+  const userFetchRef = useRef({ key: null, at: 0 });
+  const prevRefreshKeyRef = useRef(refreshKey);
+  const [throttleNotice, setThrottleNotice] = useState(false);
 
-  // Per direction 2026-08-27: the auto-refresh (or the manual filter/days
-  // change below it) used to null out `data` before every refetch, which
-  // dropped the whole page back to the bare LoadingDots state every 20s --
-  // scroll position, an open drill-down, whatever you were looking at, all
-  // blown away by a poll tick you didn't even ask for. Same "stay on the old
-  // data until the new data is ready" fix already applied to Billing
-  // Reconciliation -- `data` (and `recent`/`people`/`detail` below, which
-  // never had the clear-first bug in the first place) is only ever replaced
-  // once the new fetch resolves, never blanked mid-flight. `refreshing`
-  // drives a small inline "Updating…" indicator instead of a full teardown.
   useEffect(() => {
+    const key = `${days}:${app}`;
+    const last = usageFetchRef.current;
+    const refreshKeyBumped = refreshKey !== prevRefreshKeyRef.current;
+    prevRefreshKeyRef.current = refreshKey;
+    if (last.key === key && Date.now() - last.at < USAGE_REFRESH_THROTTLE_MS) {
+      // Only surface the "already up to date" hint for an actual repeat
+      // click of the refresh button -- silent on initial mount.
+      if (refreshKeyBumped) {
+        setThrottleNotice(true);
+        const t = setTimeout(() => setThrottleNotice(false), 2500);
+        return () => clearTimeout(t);
+      }
+      return;
+    }
+    setThrottleNotice(false);
     setRefreshing(true);
-    api.getUsage(days, app).then((d) => { setData(d); setErr(null); }).catch((e) => setErr(e.message)).finally(() => setRefreshing(false));
-  }, [days, app, refreshKey, tick]);
-  useEffect(() => { api.getUsageRecent({ days, app, limit: 120 }).then((r) => setRecent(r.events || [])).catch(() => setRecent([])); }, [days, app, refreshKey, tick]);
-  useEffect(() => { api.getUsagePeople().then((r) => setPeople(r.people || [])).catch(() => {}); }, [refreshKey, tick]);
+    api.getUsage(days, app).then((d) => {
+      setData(d); setErr(null);
+      usageFetchRef.current = { key, at: Date.now() };
+    }).catch((e) => setErr(e.message)).finally(() => setRefreshing(false));
+  }, [days, app, refreshKey]);
+  useEffect(() => {
+    const key = `${days}:${app}`;
+    const last = recentFetchRef.current;
+    if (last.key === key && Date.now() - last.at < USAGE_REFRESH_THROTTLE_MS) return;
+    api.getUsageRecent({ days, app, limit: 120 }).then((r) => {
+      setRecent(r.events || []);
+      recentFetchRef.current = { key, at: Date.now() };
+    }).catch(() => setRecent([]));
+  }, [days, app, refreshKey]);
+  useEffect(() => {
+    if (Date.now() - peopleFetchRef.current < USAGE_REFRESH_THROTTLE_MS && peopleFetchRef.current !== 0) return;
+    api.getUsagePeople().then((r) => { setPeople(r.people || []); peopleFetchRef.current = Date.now(); }).catch(() => {});
+  }, [refreshKey]);
   useEffect(() => {
     if (!selPerson) { setDetail(null); return; }
-    api.getUsageUser(selPerson, days).then(setDetail).catch(() => setDetail(null));
-  }, [selPerson, days, refreshKey, tick]);
+    const key = `${selPerson}:${days}`;
+    const last = userFetchRef.current;
+    if (last.key === key && Date.now() - last.at < USAGE_REFRESH_THROTTLE_MS) return;
+    api.getUsageUser(selPerson, days).then((d) => {
+      setDetail(d);
+      userFetchRef.current = { key, at: Date.now() };
+    }).catch(() => setDetail(null));
+  }, [selPerson, days, refreshKey]);
 
   const peopleOptions = useMemo(
     () => people.map((p) => [p.name, `${p.name} · ${p.kind === 'tech' ? 'Tech' : 'Office'}`]),
@@ -10328,7 +11157,6 @@ function UsageDashboard({ refreshKey = 0 }) {
       <div className="view-head usage-head">
         <div>
           <h2>Usage</h2>
-          <div className="synced"><span className="dot" /><span className="lbl">Auto-refreshes every {USAGE_POLL_MS / 1000}s</span></div>
           {refreshing && data && <LoadingDots label="Updating…" inline />}
         </div>
         <div className="usage-controls">

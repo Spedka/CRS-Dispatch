@@ -75,6 +75,10 @@ function shapeNote(r) {
     opportunitySpecific: r[n.opportunitySpecific] === true,
     opportunityName: r[n.opportunityRelationship]?.Name ?? null,
     opportunityLid: r[n.opportunityRelationship]?.[f.oppLid] ?? null,
+    // Task link mirrors the Opportunity one above but with no redundant
+    // "specific" boolean - the UI can just check taskId directly.
+    taskId: r[n.task] ?? null,
+    taskName: r[n.taskRelationship]?.Name ?? null,
     createdDate: r.CreatedDate ?? null,
     lastModifiedDate: r.LastModifiedDate ?? null,
   };
@@ -133,6 +137,7 @@ function shapeQuote(r) {
     dueDate: r[f.oppBidDate] ?? null,
     reviewDeadline: r[f.oppReviewDeadline] ?? null,
     accountName: account.Name ?? null,
+    quotedByName: r[f.oppQuotedByRelationship]?.Name ?? null,
     // Installed-system manufacturers from the linked Account, shown in the
     // quote card's "System Info" modal. Null = not recorded on the account.
     systems: {
@@ -201,10 +206,21 @@ export async function getAllJobs(env) {
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
+// Hidden admin identity(-ies) used by crs-board's login (its own
+// worker/src/store/store.ts ADMIN_TECH_NAMES) -- a real Technician__c
+// record so an office admin can log into the board without a parallel auth
+// system, but it isn't an actual technician and shouldn't be treated like
+// one anywhere in dispatch: the schedule grid, assignment/tech-filter
+// pickers, the TV board. Keep this list in sync with crs-board's own.
+const HIDDEN_TECH_NAMES = ['Admin'];
+
 // Same query as GET /technicians -- extracted for the same reason as
 // getAllJobs above. includeInactive=true is used by the Manage Techs panel
 // (which needs to show/reactivate deactivated techs); every other caller
 // (assignment pickers, the /tv calendar) wants the default active-only list.
+// HIDDEN_TECH_NAMES is excluded only from that default list -- Manage Techs
+// still needs to see it, since that's also where its board password gets
+// reset (PATCH /technicians/:id), same as any other tech's.
 export async function getAllTechnicians(env, includeInactive = false) {
   const sf = createSalesforce(env);
   const soql = `SELECT Id, Name, ${o.technicianActive}, ${o.technicianFsUserId}, ${o.technicianColor}
@@ -212,12 +228,32 @@ export async function getAllTechnicians(env, includeInactive = false) {
                 ${includeInactive ? '' : `WHERE ${o.technicianActive} = true`}
                 ORDER BY Name`;
   const recs = await sf.query(soql);
-  return recs.map((t) => ({
-    id: t.Id,
-    name: t.Name,
-    active: t[o.technicianActive] === true,
-    fsUserId: t[o.technicianFsUserId] ?? null,
-    color: t[o.technicianColor] ?? null,
+  return recs
+    .filter((t) => includeInactive || !HIDDEN_TECH_NAMES.includes(t.Name))
+    .map((t) => ({
+      id: t.Id,
+      name: t.Name,
+      active: t[o.technicianActive] === true,
+      fsUserId: t[o.technicianFsUserId] ?? null,
+      color: t[o.technicianColor] ?? null,
+    }));
+}
+
+// Same query as GET /auth/office-users -- extracted for the same reason as
+// getAllTechnicians above. includePassword=true is used only by the
+// admin-only Office Users panel (which needs to show/reset a forgotten
+// password); every other caller (the CRS Schedule task-assignee picker,
+// task-invite emails) wants the lean directory with no password field.
+export async function getAllOfficeUsers(env, includePassword = false) {
+  const sf = createSalesforce(env);
+  const fields = ['Id', ou.name, ou.email, ou.admin];
+  if (includePassword) fields.push(ou.password);
+  const rows = await sf.query(
+    `SELECT ${fields.join(', ')} FROM ${ou.sobject} WHERE ${ou.access} = true AND ${ou.active} = true ORDER BY ${ou.name}`
+  );
+  return rows.map((u) => ({
+    id: u.Id, name: u[ou.name], email: u[ou.email], isAdmin: u[ou.admin] === true,
+    ...(includePassword ? { password: u[ou.password] ?? '' } : {}),
   }));
 }
 
@@ -255,7 +291,12 @@ api.route('/', jobCost);
 // carries the SF User Id). Re-reads role/access LIVE from Salesforce so a
 // revoked admin/access takes effect immediately. Returns { id, name, isAdmin }
 // or null (unknown / inactive / access revoked).
-async function getOfficeUser(c) {
+// Exported (not just used locally) so tasks.js can resolve "who's calling"
+// the same way -- mounted directly in worker.js rather than chained through
+// this file's own api.route('/', X) list, same reasoning as tv.js importing
+// getAllTechnicians/getAllJobs from here: one-directional (tasks.js/tv.js ->
+// routes.js), so it can't become a circular import.
+export async function getOfficeUser(c) {
   const id = await resolveBearer(c);
   if (!id) return null;
   const sf = createSalesforce(c.env);
@@ -284,7 +325,12 @@ api.post('/auth/login', async (c) => {
     const effective = stored && String(stored).length ? String(stored) : fallback;
     if (!u || String(password) !== effective) return c.json({ error: 'Invalid email or password' }, 401);
     const token = await signDeviceToken(u.Id, getAuthSecret(c.env));
-    return c.json({ token, name: u[ou.name], email: u[ou.email], isAdmin: u[ou.admin] === true });
+    // id was queried (needed for the token itself) but never actually
+    // returned here -- silently broke every "is this me" comparison added
+    // since (CRS Schedule's row-pinning/highlighting, task-invite
+    // response matching), which compared against undefined. Found live,
+    // 2026-09-01.
+    return c.json({ id: u.Id, token, name: u[ou.name], email: u[ou.email], isAdmin: u[ou.admin] === true });
   } catch (e) { return c.json({ error: e.message }, 500); }
 });
 
@@ -315,15 +361,19 @@ api.get('/auth/office-users', async (c) => {
   try {
     const me = await getOfficeUser(c);
     if (!me?.isAdmin) return c.json({ error: 'Admin only' }, 403);
-    const sf = createSalesforce(c.env);
-    const rows = await sf.query(
-      `SELECT Id, ${ou.name}, ${ou.email}, ${ou.admin}, ${ou.password} FROM ${ou.sobject} ` +
-      `WHERE ${ou.access} = true AND ${ou.active} = true ORDER BY ${ou.name}`
-    );
-    return c.json({ users: rows.map((u) => ({
-      id: u.Id, name: u[ou.name], email: u[ou.email],
-      isAdmin: u[ou.admin] === true, password: u[ou.password] ?? '',
-    })) });
+    return c.json({ users: await getAllOfficeUsers(c.env, true) });
+  } catch (e) { return c.json({ error: e.message }, 500); }
+});
+
+// Non-admin: lean office-user list ({id, name, email, isAdmin}, no password)
+// for pickers -- the CRS Schedule task-assignee multi-select in particular.
+// Any signed-in office user can see who else is in the office to assign a
+// task to; only the admin-only route above exposes passwords.
+api.get('/office-users/directory', async (c) => {
+  try {
+    const me = await getOfficeUser(c);
+    if (!me) return c.json({ error: 'Not authenticated' }, 401);
+    return c.json({ users: await getAllOfficeUsers(c.env) });
   } catch (e) { return c.json({ error: e.message }, 500); }
 });
 
@@ -354,13 +404,29 @@ api.patch('/auth/office-users/:id', async (c) => {
 });
 
 // ---- Usage analytics (D1: USAGE_DB) ----
+// Actors excluded from usage tracking entirely (Leo Sokolyuk /
+// l.sokolyuk@crssafetysolutions.com - the developer account, whose own
+// heavy day-to-day testing traffic isn't real usage data worth counting).
+// Matched on the exact `actor` name (this app's identity string throughout
+// - see officeUser.name in config.js); add more here if needed.
+// Was dashboard-only (still ingested, just filtered out of the aggregate
+// queries via exclusionClause() below) until found live 2026-09-02: an
+// excluded actor's rows still get WRITTEN (D1 row-write cost) and still get
+// SCANNED by every dashboard query's date-range filter before the
+// `actor NOT IN` clause drops them (D1 row-read cost) - excluding at
+// ingestion instead avoids both, not just hiding the number.
+const EXCLUDED_ACTORS = ['Leo Sokolyuk'];
+const exclusionClause = () => EXCLUDED_ACTORS.length ? ` AND actor NOT IN (${EXCLUDED_ACTORS.map(() => '?').join(',')})` : '';
+
 // Best-effort event ingest from the dispatch frontend. Never breaks the UI:
-// any failure (incl. USAGE_DB unbound) returns ok:false silently.
+// any failure (incl. USAGE_DB unbound) returns ok:false silently. Excluded
+// actors (above) are dropped here, before the insert, not just hidden later.
 api.post('/track', async (c) => {
   try {
     const db = c.env.USAGE_DB;
     if (!db) return c.json({ ok: false });
     const me = await getOfficeUser(c);
+    if (me?.name && EXCLUDED_ACTORS.includes(me.name)) return c.json({ ok: true });
     const { event, screen, props } = await c.req.json();
     if (!event) return c.json({ ok: false });
     await db.prepare('INSERT INTO usage_events (ts, app, actor, event, screen, props) VALUES (?, ?, ?, ?, ?, ?)')
@@ -370,13 +436,35 @@ api.post('/track', async (c) => {
   } catch { return c.json({ ok: false }); }
 });
 
-// Actors hidden from the usage DASHBOARDS (still ingested to D1 - nothing is
-// dropped, so this is reversible). Keeps a heavy in-app developer/admin from
-// dominating the analytics. Matched on the exact `actor` name; add more here.
-const EXCLUDED_ACTORS = ['Leo Sokolyuk'];
-const exclusionClause = () => EXCLUDED_ACTORS.length ? ` AND actor NOT IN (${EXCLUDED_ACTORS.map(() => '?').join(',')})` : '';
-
 const usageDays = (c) => Math.min(365, Math.max(1, parseInt(c.req.query('days') || '30', 10)));
+
+// Cheap in-memory response cache for the three D1-heavy usage-dashboard
+// routes below -- warm-isolate reuse only (Workers run many isolates, so
+// this isn't shared globally, same acknowledged limitation as the SF token
+// cache in salesforce.js), but caps repeat D1 hits from whichever isolate
+// handles a given request regardless of how many browser tabs/admins are
+// looking at it. Added 2026-09-02: a single day's D1 free-tier row-read cap
+// (5M) was blown through by 6.8M reads, almost entirely from this
+// dashboard's own 20s auto-poll -- since removed entirely (App.jsx's
+// UsageDashboard is now pure manual-refresh, with its own client-side
+// throttle on top of this same 60s window). Three layers now, each catching
+// what the one before it can't: no more auto-poll (removes the dominant,
+// human-independent cost driver), this server cache (catches several admins
+// open at once, or a refresh burst landing within the same window even
+// across isolates), and usage_hourly_summary (usage-schema.sql /
+// usageRollup.js, added once crs-board's rollout meant every GET /usage
+// call was about to re-scan a much bigger raw-event window on every hit --
+// shrinks what each of these queries actually has to read, independent of
+// how often they're called).
+const USAGE_CACHE_TTL_MS = 60_000;
+const usageCache = new Map(); // key -> { data, expires }
+async function cachedUsage(key, compute) {
+  const hit = usageCache.get(key);
+  if (hit && Date.now() < hit.expires) return hit.data;
+  const data = await compute();
+  usageCache.set(key, { data, expires: Date.now() + USAGE_CACHE_TTL_MS });
+  return data;
+}
 
 // screen_view_end is a synthetic bookkeeping event (paired with screen_view,
 // carrying only a duration) -- not a real distinct action a person took, so
@@ -387,7 +475,16 @@ const usageDays = (c) => Math.min(365, Math.max(1, parseInt(c.req.query('days') 
 // query string alongside appClause/exclClause without touching `binds`.
 const NO_DURATION_MARKER_CLAUSE = " AND event != 'screen_view_end'";
 
-// Admin-only dashboard aggregates (board + dispatch).
+// Admin-only dashboard aggregates (board + dispatch). Reads
+// usage_hourly_summary (see usage-schema.sql / usageRollup.js), not raw
+// usage_events -- as of 2026-09-01 every query here scans the small,
+// pre-bucketed rollup table instead of re-aggregating the full raw window
+// on every call, which is what actually blew through the D1 read cap
+// (see USAGE_CACHE_TTL_MS's comment above for that incident). Because the
+// rollup's grain is hour_bucket, not the raw event ts, every COUNT(*) below
+// becomes SUM(cnt) (a summary row already represents 1+ raw events) and
+// screen IS NOT NULL becomes screen != '' (NULLs are COALESCE'd to '' at
+// rollup time -- see usage-schema.sql's comment on why).
 api.get('/usage', async (c) => {
   try {
     const me = await getOfficeUser(c);
@@ -395,32 +492,39 @@ api.get('/usage', async (c) => {
     const db = c.env.USAGE_DB;
     if (!db) return c.json({ error: 'Usage DB not configured' }, 500);
     const days = usageDays(c);
-    const since = Date.now() - days * 86400000;
-    // Optional app filter (board / dispatch) applied to every aggregate.
     const app = c.req.query('app');
-    const appClause = (app === 'board' || app === 'dispatch') ? ' AND app = ?' : '';
-    const exclClause = exclusionClause();
-    const binds = appClause ? [since, app] : [since];
-    binds.push(...EXCLUDED_ACTORS);
-    const q = (sql) => db.prepare(sql).bind(...binds).all().then((r) => r.results ?? []);
-    const [eventsByDay, activeByDay, byEvent, byUser, byApp, byHour, byScreen, totals] = await Promise.all([
-      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(*) c FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY d ORDER BY d`),
-      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(DISTINCT actor) c FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY d ORDER BY d`),
-      q(`SELECT event, COUNT(*) c FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY event ORDER BY c DESC`),
-      q(`SELECT actor, app, COUNT(*) c, MAX(ts) last FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY actor, app ORDER BY c DESC`),
-      q(`SELECT app, COUNT(*) c FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY app`),
-      q(`SELECT strftime('%H', ts/1000, 'unixepoch') h, COUNT(*) c FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY h ORDER BY h`),
-      // Avg duration comes from the sibling screen_view_end events (same
-      // `screen`, `props.durationMs`) -- one query, not a second round trip.
-      // D1/SQLite's json_extract pulls the number straight out of the
-      // stored JSON props blob.
-      q(`SELECT screen,
-                SUM(CASE WHEN event='screen_view' THEN 1 ELSE 0 END) c,
-                AVG(CASE WHEN event='screen_view_end' THEN CAST(json_extract(props,'$.durationMs') AS REAL) END) avgMs
-         FROM usage_events WHERE ts>=?${appClause}${exclClause} AND screen IS NOT NULL GROUP BY screen ORDER BY c DESC`),
-      q(`SELECT COUNT(DISTINCT actor) users, COUNT(*) events, SUM(CASE WHEN event='login' THEN 1 ELSE 0 END) logins FROM usage_events WHERE ts>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE}`),
-    ]);
-    return c.json({ days, app: app || 'all', eventsByDay, activeByDay, byEvent, byUser, byApp, byHour, byScreen, totals: totals[0] ?? { users: 0, events: 0, logins: 0 } });
+    const result = await cachedUsage(`usage:${days}:${app || 'all'}`, async () => {
+      // Floored to the hour to match usage_hourly_summary's own grain -- a
+      // request landing mid-hour must not clip that hour's already-bucketed
+      // row. Up to ~59 minutes of slop at the edge is invisible at this
+      // dashboard's day-granularity (7/30/90).
+      const since = Math.floor((Date.now() - days * 86400000) / 3600000) * 3600000;
+      // Optional app filter (board / dispatch) applied to every aggregate.
+      const appClause = (app === 'board' || app === 'dispatch') ? ' AND app = ?' : '';
+      const exclClause = exclusionClause();
+      const binds = appClause ? [since, app] : [since];
+      binds.push(...EXCLUDED_ACTORS);
+      const q = (sql) => db.prepare(sql).bind(...binds).all().then((r) => r.results ?? []);
+      const [eventsByDay, activeByDay, byEvent, byUser, byApp, byHour, byScreen, totals] = await Promise.all([
+        q(`SELECT strftime('%Y-%m-%d', hour_bucket/1000, 'unixepoch') d, SUM(cnt) c FROM usage_hourly_summary WHERE hour_bucket>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY d ORDER BY d`),
+        q(`SELECT strftime('%Y-%m-%d', hour_bucket/1000, 'unixepoch') d, COUNT(DISTINCT actor) c FROM usage_hourly_summary WHERE hour_bucket>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY d ORDER BY d`),
+        q(`SELECT event, SUM(cnt) c FROM usage_hourly_summary WHERE hour_bucket>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY event ORDER BY c DESC`),
+        q(`SELECT actor, app, SUM(cnt) c, MAX(max_ts) last FROM usage_hourly_summary WHERE hour_bucket>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY actor, app ORDER BY c DESC`),
+        q(`SELECT app, SUM(cnt) c FROM usage_hourly_summary WHERE hour_bucket>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY app`),
+        q(`SELECT strftime('%H', hour_bucket/1000, 'unixepoch') h, SUM(cnt) c FROM usage_hourly_summary WHERE hour_bucket>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE} GROUP BY h ORDER BY h`),
+        // Avg duration comes from the sibling screen_view_end rows' own
+        // duration_sum/duration_cnt columns (populated at rollup time from
+        // props.durationMs -- see usageRollup.js) -- SUM/SUM here is the
+        // rollup-table equivalent of the raw table's AVG(...) CASE.
+        q(`SELECT screen,
+                  SUM(CASE WHEN event='screen_view' THEN cnt ELSE 0 END) c,
+                  SUM(duration_sum) / NULLIF(SUM(duration_cnt), 0) avgMs
+           FROM usage_hourly_summary WHERE hour_bucket>=?${appClause}${exclClause} AND screen != '' GROUP BY screen ORDER BY c DESC`),
+        q(`SELECT COUNT(DISTINCT actor) users, COALESCE(SUM(cnt),0) events, COALESCE(SUM(CASE WHEN event='login' THEN cnt ELSE 0 END),0) logins FROM usage_hourly_summary WHERE hour_bucket>=?${appClause}${exclClause}${NO_DURATION_MARKER_CLAUSE}`),
+      ]);
+      return { days, app: app || 'all', eventsByDay, activeByDay, byEvent, byUser, byApp, byHour, byScreen, totals: totals[0] ?? { users: 0, events: 0, logins: 0 } };
+    });
+    return c.json(result);
   } catch (e) { return c.json({ error: e.message }, 500); }
 });
 
@@ -432,20 +536,22 @@ api.get('/usage/recent', async (c) => {
     const db = c.env.USAGE_DB;
     if (!db) return c.json({ error: 'Usage DB not configured' }, 500);
     const days = usageDays(c);
-    const since = Date.now() - days * 86400000;
     const limit = Math.min(500, Math.max(1, parseInt(c.req.query('limit') || '100', 10)));
-    const actor = c.req.query('actor');
-    const app = c.req.query('app');
-    let where = 'ts>=?';
-    const binds = [since];
-    if (actor) { where += ' AND actor=?'; binds.push(actor); } // explicit drill-down wins - no exclusion
-    else { where += exclusionClause(); binds.push(...EXCLUDED_ACTORS); }
-    if (app === 'board' || app === 'dispatch') { where += ' AND app=?'; binds.push(app); }
-    // screen_view_end is deliberately NOT excluded here (unlike every other
-    // aggregate above) -- per direction 2026-08-27, it's what carries the
-    // "viewed X for Ys" duration into the recent activity feed. `props` is
-    // selected so the frontend can read durationMs back out of it.
-    const rows = await db.prepare(`SELECT ts, app, actor, event, screen, props FROM usage_events WHERE ${where} ORDER BY ts DESC LIMIT ${limit}`).bind(...binds).all().then((r) => r.results ?? []);
+    const actor = c.req.query('actor') || '';
+    const app = c.req.query('app') || '';
+    const rows = await cachedUsage(`recent:${days}:${limit}:${actor}:${app}`, async () => {
+      const since = Date.now() - days * 86400000;
+      let where = 'ts>=?';
+      const binds = [since];
+      if (actor) { where += ' AND actor=?'; binds.push(actor); } // explicit drill-down wins - no exclusion
+      else { where += exclusionClause(); binds.push(...EXCLUDED_ACTORS); }
+      if (app === 'board' || app === 'dispatch') { where += ' AND app=?'; binds.push(app); }
+      // screen_view_end is deliberately NOT excluded here (unlike every other
+      // aggregate above) -- per direction 2026-08-27, it's what carries the
+      // "viewed X for Ys" duration into the recent activity feed. `props` is
+      // selected so the frontend can read durationMs back out of it.
+      return db.prepare(`SELECT ts, app, actor, event, screen, props FROM usage_events WHERE ${where} ORDER BY ts DESC LIMIT ${limit}`).bind(...binds).all().then((r) => r.results ?? []);
+    });
     return c.json({ events: rows });
   } catch (e) { return c.json({ error: e.message }, 500); }
 });
@@ -478,27 +584,40 @@ api.get('/usage/user', async (c) => {
     const actor = c.req.query('actor');
     if (!actor) return c.json({ error: 'actor required' }, 400);
     const days = usageDays(c);
-    const since = Date.now() - days * 86400000;
-    const q = (sql) => db.prepare(sql).bind(actor, since).all().then((r) => r.results ?? []);
-    const [eventsByDay, byEvent, byApp, byScreen, activeDays, recent, totals] = await Promise.all([
-      q(`SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch') d, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=?${NO_DURATION_MARKER_CLAUSE} GROUP BY d ORDER BY d`),
-      q(`SELECT event, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=?${NO_DURATION_MARKER_CLAUSE} GROUP BY event ORDER BY c DESC`),
-      q(`SELECT app, COUNT(*) c FROM usage_events WHERE actor=? AND ts>=?${NO_DURATION_MARKER_CLAUSE} GROUP BY app`),
-      q(`SELECT screen,
-                SUM(CASE WHEN event='screen_view' THEN 1 ELSE 0 END) c,
-                AVG(CASE WHEN event='screen_view_end' THEN CAST(json_extract(props,'$.durationMs') AS REAL) END) avgMs
-         FROM usage_events WHERE actor=? AND ts>=? AND screen IS NOT NULL GROUP BY screen ORDER BY c DESC`),
-      q(`SELECT COUNT(DISTINCT strftime('%Y-%m-%d', ts/1000, 'unixepoch')) d FROM usage_events WHERE actor=? AND ts>=?${NO_DURATION_MARKER_CLAUSE}`),
-      // screen_view_end intentionally not excluded here, same reasoning as
-      // /usage/recent above -- it's what carries duration into this feed.
-      db.prepare(`SELECT ts, app, event, screen, props FROM usage_events WHERE actor=? AND ts>=? ORDER BY ts DESC LIMIT 50`).bind(actor, since).all().then((r) => r.results ?? []),
-      q(`SELECT COUNT(*) events, MIN(ts) first, MAX(ts) last FROM usage_events WHERE actor=? AND ts>=?${NO_DURATION_MARKER_CLAUSE}`),
-    ]);
-    return c.json({
-      actor, days, eventsByDay, byEvent, byApp, byScreen, recent,
-      activeDays: activeDays[0]?.d ?? 0,
-      totals: totals[0] ?? { events: 0, first: null, last: null },
+    const result = await cachedUsage(`user:${actor}:${days}`, async () => {
+      // Same rollup-table switch as GET /usage above -- see its comment for
+      // the reasoning (SUM(cnt) instead of COUNT(*), screen != '' instead of
+      // IS NOT NULL, hour-floored `since`). The `recent` feed below is the
+      // one exception: it needs real per-event rows, so it still reads
+      // usage_events directly (already cheap -- indexed, LIMIT 50).
+      const since = Math.floor((Date.now() - days * 86400000) / 3600000) * 3600000;
+      const rawSince = Date.now() - days * 86400000;
+      const q = (sql) => db.prepare(sql).bind(actor, since).all().then((r) => r.results ?? []);
+      const [eventsByDay, byEvent, byApp, byScreen, activeDays, recent, totals] = await Promise.all([
+        q(`SELECT strftime('%Y-%m-%d', hour_bucket/1000, 'unixepoch') d, SUM(cnt) c FROM usage_hourly_summary WHERE actor=? AND hour_bucket>=?${NO_DURATION_MARKER_CLAUSE} GROUP BY d ORDER BY d`),
+        q(`SELECT event, SUM(cnt) c FROM usage_hourly_summary WHERE actor=? AND hour_bucket>=?${NO_DURATION_MARKER_CLAUSE} GROUP BY event ORDER BY c DESC`),
+        q(`SELECT app, SUM(cnt) c FROM usage_hourly_summary WHERE actor=? AND hour_bucket>=?${NO_DURATION_MARKER_CLAUSE} GROUP BY app`),
+        q(`SELECT screen,
+                  SUM(CASE WHEN event='screen_view' THEN cnt ELSE 0 END) c,
+                  SUM(duration_sum) / NULLIF(SUM(duration_cnt), 0) avgMs
+           FROM usage_hourly_summary WHERE actor=? AND hour_bucket>=? AND screen != '' GROUP BY screen ORDER BY c DESC`),
+        q(`SELECT COUNT(DISTINCT strftime('%Y-%m-%d', hour_bucket/1000, 'unixepoch')) d FROM usage_hourly_summary WHERE actor=? AND hour_bucket>=?${NO_DURATION_MARKER_CLAUSE}`),
+        // screen_view_end intentionally not excluded here, same reasoning as
+        // /usage/recent above -- it's what carries duration into this feed.
+        db.prepare(`SELECT ts, app, event, screen, props FROM usage_events WHERE actor=? AND ts>=? ORDER BY ts DESC LIMIT 50`).bind(actor, rawSince).all().then((r) => r.results ?? []),
+        // `first` loses at most ~1hr of precision here (MIN(hour_bucket) vs.
+        // the raw table's exact MIN(ts)) -- an acceptable tradeoff for a
+        // "first seen" display; `last` stays exact (MAX(max_ts) is the real
+        // raw ts, stored per-bucket at rollup time).
+        q(`SELECT COALESCE(SUM(cnt),0) events, MIN(hour_bucket) first, MAX(max_ts) last FROM usage_hourly_summary WHERE actor=? AND hour_bucket>=?${NO_DURATION_MARKER_CLAUSE}`),
+      ]);
+      return {
+        actor, days, eventsByDay, byEvent, byApp, byScreen, recent,
+        activeDays: activeDays[0]?.d ?? 0,
+        totals: totals[0] ?? { events: 0, first: null, last: null },
+      };
     });
+    return c.json(result);
   } catch (e) { return c.json({ error: e.message }, 500); }
 });
 
@@ -971,7 +1090,7 @@ api.get('/jobs/quotes', async (c) => {
       needsClause;
     const soql = `
       SELECT Id, ${f.oppName}, ${f.oppType}, ${JOB_STATUS_SELECT}, ${f.oppBidDate}, ${f.oppReviewDeadline},
-             ${f.oppAccountRelationship}.Name,
+             ${f.oppAccountRelationship}.Name, ${f.oppQuotedByRelationship}.Name,
              ${f.oppAccountRelationship}.${acc.fireAlarmMfr}, ${f.oppAccountRelationship}.${acc.accessControlMfr},
              ${f.oppAccountRelationship}.${acc.cctvMfr}, ${f.oppAccountRelationship}.${acc.intrusionMfr},
              ${f.oppSentToCustomer}, ${f.oppReadyForReview}, CreatedDate
@@ -1913,6 +2032,7 @@ api.get('/notes', async (c) => {
     const rows = await sf.query(
       `SELECT Id, ${n.body}, ${n.opportunity}, ${n.opportunitySpecific},
               ${n.opportunityRelationship}.Name, ${n.opportunityRelationship}.${f.oppLid},
+              ${n.task}, ${n.taskRelationship}.Name,
               CreatedDate, LastModifiedDate
        FROM ${n.sobject} ORDER BY LastModifiedDate DESC`
     );
@@ -1925,13 +2045,14 @@ api.get('/notes', async (c) => {
 api.post('/notes', async (c) => {
   try {
     const sf = createSalesforce(c.env);
-    const { text, opportunityId } = await c.req.json();
+    const { text, opportunityId, taskId } = await c.req.json();
     const body = (text ?? '').trim();
     if (!body) return c.json({ error: 'Note text is required' }, 400);
     const created = await sf.createRecord(n.sobject, {
       [n.body]: body,
       [n.opportunity]: opportunityId || null,
       [n.opportunitySpecific]: !!opportunityId,
+      [n.task]: taskId || null,
     });
     return c.json({ id: created.id });
   } catch (e) {
@@ -1943,7 +2064,7 @@ api.patch('/notes/:id', async (c) => {
   try {
     const sf = createSalesforce(c.env);
     const id = c.req.param('id');
-    const { text, opportunityId } = await c.req.json();
+    const { text, opportunityId, taskId } = await c.req.json();
     const fields = {};
     if (text !== undefined) {
       const body = text.trim();
@@ -1953,6 +2074,9 @@ api.patch('/notes/:id', async (c) => {
     if (opportunityId !== undefined) {
       fields[n.opportunity] = opportunityId || null;
       fields[n.opportunitySpecific] = !!opportunityId;
+    }
+    if (taskId !== undefined) {
+      fields[n.task] = taskId || null;
     }
     await sf.updateRecord(n.sobject, id, fields);
     return c.json({ success: true });
